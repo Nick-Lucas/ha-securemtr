@@ -74,9 +74,9 @@ For anyone using the **E7+ Wifi-enabled Smart Water Heater Controller** from Sec
 
 ---
 
-## Configure statistics options
+## Configure energy options
 
-Open the integration entry in **Settings → Devices & Services** and choose **Configure** to match the statistics with your local setup:
+Open the integration entry in **Settings → Devices & Services** and choose **Configure** to match the nightly energy processing with your local setup:
 
 - **Timezone** — pick the place where the water heater is installed. Leave the default if you are in Ireland.
 - **Primary anchor** — time of day you expect off-peak heating to fall. Keeping 03:00 works well for most homes.
@@ -94,6 +94,34 @@ The integration updates the numbers once each night after **01:00 local time** s
 - **Boost on demand:** Create a one-tap button in a dashboard to trigger a boost cycle before showers or laundry.
 - **Schedule around tariffs:** Align the weekly heating timetable with your off-peak electricity rates for lower bills.
 - **Energy tracking:** Add the energy sensors to Home Assistant’s Energy Dashboard to see usage trends and cost estimates.
+
+### Native Energy Dashboard support
+
+SecureMTR exposes cumulative totals that follow the [Home Assistant Energy](https://www.home-assistant.io/docs/energy/) sensor requirements without writing external statistics. Both energy entities publish:
+
+- `device_class: energy`
+- `state_class: total_increasing`
+- `unit_of_measurement: kWh`
+
+You will see the attributes in **Developer Tools → States** as soon as the first nightly import finishes:
+
+![SecureMTR energy sensor attributes](docs/images/energy_sensor_attributes.svg)
+
+To add the device to the Energy Dashboard:
+
+1. Open **Settings → Dashboards → Energy**.
+2. Click **Device consumption** → **Add consumption**.
+3. Tick **SecureMTR Primary Energy kWh** and, if you use the boost element, **SecureMTR Boost Energy kWh**.
+
+![Selecting SecureMTR sensors in the Energy Dashboard](docs/images/energy_dashboard_device_selection.svg)
+
+The integration keeps the totals monotonic by persisting every processed day. No recorder or statistics configuration is required beyond enabling the integration itself.
+
+Prefer bucketed entities in addition to the Energy Dashboard? The integration automatically creates **daily** and **weekly** [Utility Meter](https://www.home-assistant.io/integrations/utility_meter/) helpers for both zones. Each helper reads from the cumulative SecureMTR sensor so you can drop the daily or weekly totals into dashboards, automations, or template sensors without building your own helpers.
+
+### Reset energy totals
+
+If the controller reports an unexpected reset, the accumulator automatically starts a fresh series from `0 kWh` while logging a warning so you can investigate. You can also call the `securemtr.reset_energy_accumulator` service with the config entry ID and zone (`primary` or `boost`). The integration clears the persisted ledger and the matching energy sensor starts again from `0 kWh` on the next import.
 
 ---
 
@@ -121,11 +149,11 @@ Add them to a dashboard card or use them in automations—for example, to skip s
 
 Daily statistics from the controller are available as Home Assistant sensors:
 
-- **Primary Energy Total** and **Boost Energy Total** expose cumulative kWh values that match the statistics exported to the Energy dashboard.
+- **SecureMTR Primary Energy kWh** and **SecureMTR Boost Energy kWh** expose cumulative totals ready for the Home Assistant Energy Dashboard.
 - **Primary Runtime (Last Day)** and **Boost Runtime (Last Day)** report how long each element actually heated yesterday.
 - **Primary Scheduled (Last Day)** and **Boost Scheduled (Last Day)** show the total scheduled minutes for yesterday, making it easy to compare the planned runtime with the actual runtime.
 
-Each sensor includes the calendar day it represents and updates automatically after the nightly statistics refresh. Add them to dashboards, set up automations, or monitor long-term trends alongside the recorder statistics.
+Each sensor includes the calendar day it represents and updates automatically after the nightly refresh. Add them to dashboards, set up automations, or monitor long-term trends alongside the Home Assistant Energy Dashboard.
 ---
 
 ## Troubleshooting

@@ -137,13 +137,21 @@ async def test_sensor_requires_controller() -> None:
 
 
 @pytest.mark.asyncio
-async def test_statistics_sensors_report_totals() -> None:
-    """Ensure the statistics sensors expose cumulative and daily values."""
+async def test_energy_sensors_report_totals() -> None:
+    """Ensure the energy sensors expose cumulative and daily values."""
 
     runtime = _create_runtime()
-    runtime.statistics_state = {
-        "primary": {"energy_sum": 12.5, "last_day": "2024-03-01"},
-        "boost": {"energy_sum": 4.75, "last_day": "2024-03-01"},
+    runtime.energy_state = {
+        "primary": {
+            "energy_sum": 12.5,
+            "last_day": "2024-03-01",
+            "series_start": "2024-02-20",
+        },
+        "boost": {
+            "energy_sum": 4.75,
+            "last_day": "2024-03-01",
+            "series_start": "2024-02-22",
+        },
     }
     runtime.statistics_recent = {
         "primary": {
@@ -171,6 +179,8 @@ async def test_statistics_sensors_report_totals() -> None:
 
     primary_energy = sensors_by_id["serial_1_primary_energy_total"]
     assert isinstance(primary_energy, SecuremtrEnergyTotalSensor)
+    assert primary_energy.name == "SecureMTR Primary Energy kWh"
+    assert primary_energy.entity_id == "sensor.securemtr_primary_energy_kwh"
     assert primary_energy.native_value == pytest.approx(12.5)
     assert (
         primary_energy.native_unit_of_measurement
@@ -179,14 +189,18 @@ async def test_statistics_sensors_report_totals() -> None:
     assert primary_energy.device_class is SensorDeviceClass.ENERGY
     assert primary_energy.state_class is SensorStateClass.TOTAL_INCREASING
     assert primary_energy.extra_state_attributes == {
-        "last_report_day": "2024-03-01"
+        "last_report_day": "2024-03-01",
+        "series_start_day": "2024-02-20",
     }
 
     boost_energy = sensors_by_id["serial_1_boost_energy_total"]
     assert isinstance(boost_energy, SecuremtrEnergyTotalSensor)
+    assert boost_energy.name == "SecureMTR Boost Energy kWh"
+    assert boost_energy.entity_id == "sensor.securemtr_boost_energy_kwh"
     assert boost_energy.native_value == pytest.approx(4.75)
     assert boost_energy.extra_state_attributes == {
-        "last_report_day": "2024-03-01"
+        "last_report_day": "2024-03-01",
+        "series_start_day": "2024-02-22",
     }
 
     primary_runtime = sensors_by_id["serial_1_primary_runtime_daily"]
@@ -210,11 +224,11 @@ async def test_statistics_sensors_report_totals() -> None:
     assert primary_scheduled_attrs["report_day"] == "2024-03-01"
     assert primary_scheduled_attrs["energy_total_kwh"] == pytest.approx(12.5)
 
-    runtime.statistics_state = {"boost": {"energy_sum": "invalid", "last_day": 123}}
+    runtime.energy_state = {"boost": {"energy_sum": "invalid", "last_day": 123}}
     assert boost_energy.native_value is None
     assert boost_energy.extra_state_attributes is None
 
-    runtime.statistics_state = None
+    runtime.energy_state = None
     assert boost_energy.native_value is None
     assert boost_energy.extra_state_attributes is None
 

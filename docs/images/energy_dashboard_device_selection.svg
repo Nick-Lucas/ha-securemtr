@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540" role="img" aria-labelledby="title desc">
+  <title id="title">Home Assistant Energy Dashboard device selection example</title>
+  <desc id="desc">Mock screenshot that highlights SecureMTR energy sensors being selected for device consumption in the Energy Dashboard.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f1f5ff" />
+      <stop offset="100%" stop-color="#e0e7ff" />
+    </linearGradient>
+    <style>
+      .panel { fill: white; stroke: #c5d0f2; stroke-width: 1.4; rx: 16; }
+      .heading { font: 700 32px 'Inter', 'Segoe UI', sans-serif; fill: #1f275f; }
+      .label { font: 600 22px 'Inter', 'Segoe UI', sans-serif; fill: #253275; }
+      .option { font: 500 22px 'Inter', 'Segoe UI', sans-serif; fill: #1e293b; }
+      .note { font: 400 20px 'Inter', 'Segoe UI', sans-serif; fill: #475569; }
+      .checkbox { fill: #4f46e5; stroke: #312e81; stroke-width: 1; rx: 6; }
+      .checkbox-empty { fill: none; stroke: #94a3b8; stroke-width: 2; rx: 6; }
+      .chip { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 1; rx: 18; }
+      .chip-text { font: 600 20px 'Inter', 'Segoe UI', sans-serif; fill: #3730a3; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="960" height="540" fill="url(#bg)" />
+  <rect x="110" y="70" width="740" height="400" class="panel" />
+  <text x="150" y="130" class="heading">Energy → Device consumption</text>
+  <text x="150" y="180" class="note">Select the SecureMTR energy sensors to include this device in the dashboard.</text>
+  <rect x="150" y="210" width="28" height="28" class="checkbox" />
+  <text x="190" y="232" class="option">SecureMTR Primary Energy kWh</text>
+  <rect x="150" y="258" width="28" height="28" class="checkbox" />
+  <text x="190" y="280" class="option">SecureMTR Boost Energy kWh</text>
+  <rect x="150" y="306" width="28" height="28" class="checkbox-empty" />
+  <text x="190" y="328" class="option">Other device sensor</text>
+  <rect x="150" y="360" width="420" height="48" class="chip" />
+  <text x="170" y="392" class="chip-text">Totals update automatically without external statistics</text>
+</svg>

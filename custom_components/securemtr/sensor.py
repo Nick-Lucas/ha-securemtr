@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import datetime
+import logging
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -12,18 +12,13 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.const import UnitOfEnergy, UnitOfTime
 
-from . import (
-    DOMAIN,
-    SecuremtrController,
-    SecuremtrRuntimeData,
-    runtime_update_signal,
-)
+from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData, runtime_update_signal
 from .entity import build_device_info, slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
@@ -189,13 +184,14 @@ class SecuremtrEnergyTotalSensor(_SecuremtrBaseSensor):
 
         super().__init__(runtime, controller, entry_id)
         self._zone = zone
-        self._attr_name = f"{label} Energy Total"
+        self._attr_name = f"SecureMTR {label} Energy kWh"
         self._attr_unique_id = f"{self._identifier_slug()}_{zone}_energy_total"
+        self.entity_id = f"sensor.securemtr_{zone}_energy_kwh"
 
     def _zone_state(self) -> dict[str, object] | None:
-        """Return the persisted statistics state for the zone."""
+        """Return the persisted energy state for the zone."""
 
-        state = self._runtime.statistics_state
+        state = self._runtime.energy_state
         if not isinstance(state, dict):
             return None
         zone_state = state.get(self._zone)
@@ -221,9 +217,13 @@ class SecuremtrEnergyTotalSensor(_SecuremtrBaseSensor):
         if not zone_state:
             return None
         last_day = zone_state.get("last_day")
+        attributes: dict[str, object] = {}
         if isinstance(last_day, str):
-            return {"last_report_day": last_day}
-        return None
+            attributes["last_report_day"] = last_day
+        series_start = zone_state.get("series_start")
+        if isinstance(series_start, str):
+            attributes["series_start_day"] = series_start
+        return attributes or None
 
 
 class SecuremtrDailyDurationSensor(_SecuremtrBaseSensor):
@@ -297,6 +297,6 @@ class SecuremtrDailyDurationSensor(_SecuremtrBaseSensor):
 
 __all__ = [
     "SecuremtrBoostEndsSensor",
-    "SecuremtrEnergyTotalSensor",
     "SecuremtrDailyDurationSensor",
+    "SecuremtrEnergyTotalSensor",
 ]
