@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from math import log
 from statistics import median
-from typing import Iterable, Mapping, NamedTuple, Sequence
-from typing import Literal
+from typing import Literal, NamedTuple
+from zoneinfo import ZoneInfo
 
 from homeassistant.util import dt as dt_util
 
@@ -22,24 +23,27 @@ class EnergyCalibration(NamedTuple):
     source: Literal["device_scaled", "duration_power"]
 
 
-def to_local(value: datetime | int | float, tz: tzinfo) -> datetime:
+def to_local(value: datetime | float, tz: tzinfo) -> datetime:
     """Convert a timestamp into an aware datetime in the provided timezone."""
 
     if isinstance(value, datetime):
         dt_value = value
     else:
-        dt_value = datetime.fromtimestamp(float(value), timezone.utc)
+        dt_value = datetime.fromtimestamp(float(value), UTC)
 
     if dt_value.tzinfo is None:
-        dt_value = dt_value.replace(tzinfo=timezone.utc)
+        dt_value = dt_value.replace(tzinfo=UTC)
 
     return dt_value.astimezone(tz)
 
 
-def report_day_for_sample(value: datetime | int | float, tz: tzinfo) -> date:
-    """Return the local calendar day represented by a consumption sample."""
+def assign_report_day(value: datetime, tz: ZoneInfo) -> date:
+    """Return the SecureMTR reporting day for the provided timestamp."""
 
-    local_dt = to_local(value, tz)
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("assign_report_day requires an aware datetime")
+
+    local_dt = value.astimezone(tz)
     return (local_dt - timedelta(days=1)).date()
 
 

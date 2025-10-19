@@ -11,10 +11,10 @@ from custom_components.securemtr.utils import (
     EnergyCalibration,
     LN10,
     _collect_ratios,
+    assign_report_day,
     calibrate_energy_scale,
     cumulative_update,
     energy_from_row,
-    report_day_for_sample,
     safe_anchor_datetime,
     to_local,
 )
@@ -67,23 +67,31 @@ def test_to_local_converts_epoch_and_datetime(value: int | datetime) -> None:
     assert result.day == 1
 
 
-def test_report_day_for_sample_returns_previous_local_day() -> None:
-    """report_day_for_sample should map timestamps to the previous local day."""
+def test_assign_report_day_returns_previous_local_day() -> None:
+    """assign_report_day should map timestamps to the previous local day."""
 
     tz = ZoneInfo("Europe/Dublin")
-    epoch = datetime(2024, 4, 2, 0, 15, tzinfo=timezone.utc).timestamp()
-    assert report_day_for_sample(epoch, tz) == date(2024, 4, 1)
+    sample = datetime(2024, 4, 2, 0, 15, tzinfo=timezone.utc)
+    assert assign_report_day(sample, tz) == date(2024, 4, 1)
 
 
-def test_report_day_for_sample_handles_dst_transition() -> None:
-    """report_day_for_sample should honour DST offsets around transitions."""
+def test_assign_report_day_handles_dst_transition() -> None:
+    """assign_report_day should honour DST offsets around transitions."""
 
     tz = ZoneInfo("Europe/Dublin")
-    before = datetime(2024, 3, 31, 0, 30, tzinfo=timezone.utc).timestamp()
-    after = datetime(2024, 3, 31, 23, 30, tzinfo=timezone.utc).timestamp()
+    before = datetime(2024, 3, 31, 0, 30, tzinfo=timezone.utc)
+    after = datetime(2024, 3, 31, 23, 30, tzinfo=timezone.utc)
 
-    assert report_day_for_sample(before, tz) == date(2024, 3, 30)
-    assert report_day_for_sample(after, tz) == date(2024, 3, 31)
+    assert assign_report_day(before, tz) == date(2024, 3, 30)
+    assert assign_report_day(after, tz) == date(2024, 3, 31)
+
+
+def test_assign_report_day_rejects_naive_datetimes() -> None:
+    """assign_report_day should raise when provided a naive datetime."""
+
+    tz = ZoneInfo("Europe/Dublin")
+    with pytest.raises(ValueError):
+        assign_report_day(datetime(2024, 4, 2, 0, 15), tz)
 
 
 def test_safe_anchor_datetime_handles_dst_gap() -> None:
@@ -244,15 +252,15 @@ def test_energy_from_row_returns_zero_for_non_positive_duration() -> None:
     assert energy == pytest.approx(0.0)
 
 
-def test_report_day_for_sample_handles_offset_timezone() -> None:
-    """report_day_for_sample should cope with large timezone offsets."""
+def test_assign_report_day_handles_offset_timezone() -> None:
+    """assign_report_day should cope with large timezone offsets."""
 
-    tz = timezone(timedelta(hours=10))
-    epoch = datetime(2024, 4, 2, 3, 0, tzinfo=timezone.utc).timestamp()
-    assert report_day_for_sample(epoch, tz) == date(2024, 4, 1)
+    tz = ZoneInfo("Etc/GMT-10")
+    early = datetime(2024, 4, 2, 3, 0, tzinfo=timezone.utc)
+    assert assign_report_day(early, tz) == date(2024, 4, 1)
 
-    later = datetime(2024, 4, 2, 15, 0, tzinfo=timezone.utc).timestamp()
-    assert report_day_for_sample(later, tz) == date(2024, 4, 2)
+    later = datetime(2024, 4, 2, 15, 0, tzinfo=timezone.utc)
+    assert assign_report_day(later, tz) == date(2024, 4, 2)
 
 
 def test_cumulative_update_accumulates_values() -> None:

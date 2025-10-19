@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from custom_components.securemtr import (
     DOMAIN,
     SecuremtrRuntimeData,
+    _RESET_SERVICE_FLAG,
     async_setup,
     async_setup_entry,
     async_unload_entry,
@@ -142,7 +143,7 @@ async def test_async_setup_initializes_domain_storage(
 ) -> None:
     """Ensure async_setup prepares storage for the integration."""
     assert await async_setup(hass_fixture, {})
-    assert hass_fixture.data[DOMAIN] == {}
+    assert hass_fixture.data[DOMAIN] == {_RESET_SERVICE_FLAG: True}
 
 
 @pytest.mark.asyncio

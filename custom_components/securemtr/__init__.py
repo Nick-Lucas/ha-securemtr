@@ -6,32 +6,37 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, tzinfo
+from datetime import date, datetime, time, timedelta
 import logging
+from types import MappingProxyType
 from typing import Any, TypeVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientWebSocketResponse
-from homeassistant.components.recorder.statistics import (
-    StatisticData,
-    StatisticMeanType,
-    StatisticMetaData,
-    async_add_external_statistics,
+from homeassistant import config_entries as hass_config_entries
+from homeassistant.components.utility_meter.const import (
+    CONF_METER_DELTA_VALUES,
+    CONF_METER_NET_CONSUMPTION,
+    CONF_METER_OFFSET,
+    CONF_METER_PERIODICALLY_RESETTING,
+    CONF_METER_TYPE,
+    CONF_SENSOR_ALWAYS_AVAILABLE,
+    CONF_SOURCE_SENSOR,
+    CONF_TARIFFS,
+    DAILY,
+    DOMAIN as UTILITY_METER_DOMAIN,
+    WEEKLY,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    CONF_EMAIL,
-    CONF_PASSWORD,
-    CONF_TIME_ZONE,
-    UnitOfEnergy,
-    UnitOfTime,
-)
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from homeassistant.const import CONF_EMAIL, CONF_NAME, CONF_PASSWORD, CONF_TIME_ZONE
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
+import voluptuous as vol
 
 from .beanbag import (
     BeanbagBackend,
@@ -41,13 +46,13 @@ from .beanbag import (
     BeanbagStateSnapshot,
     WeeklyProgram,
 )
+from .energy import EnergyAccumulator
 from .schedule import canonicalize_weekly, choose_anchor, day_intervals
 from .utils import (
     EnergyCalibration,
+    assign_report_day,
     calibrate_energy_scale,
-    cumulative_update,
     energy_from_row,
-    report_day_for_sample,
     safe_anchor_datetime,
 )
 
@@ -61,19 +66,185 @@ MODEL_ALIASES: dict[str, str] = {
 
 _RUNTIME_UPDATE_SIGNAL = "securemtr_runtime_update"
 
+UTILITY_METER_CYCLES: tuple[str, ...] = (DAILY, WEEKLY)
+UTILITY_METER_ZONE_LABELS: dict[str, str] = {"primary": "Primary", "boost": "Boost"}
+
 _LOGGER = logging.getLogger(__name__)
 
-STATISTICS_STORE_VERSION = 1
+ENERGY_STORE_VERSION = 1
+SERVICE_RESET_ENERGY = "reset_energy_accumulator"
+ATTR_ENTRY_ID = "entry_id"
+ATTR_ZONE = "zone"
+ENERGY_ZONES = ("primary", "boost")
+_RESET_SERVICE_FLAG = "_reset_service_registered"
 
 
 _ResultT = TypeVar("_ResultT")
+
+
+def _async_register_services(hass: HomeAssistant) -> None:
+    """Register SecureMTR domain services once per Home Assistant instance."""
+
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if domain_data.get(_RESET_SERVICE_FLAG):
+        return
+
+    schema = vol.Schema(
+        {
+            vol.Required(ATTR_ENTRY_ID): str,
+            vol.Optional(ATTR_ZONE, default=ENERGY_ZONES[0]): vol.In(ENERGY_ZONES),
+        }
+    )
+
+    async def _async_handle_reset(call: ServiceCall) -> None:
+        """Reset the cumulative energy state for a config entry zone."""
+
+        entry_id: str = call.data[ATTR_ENTRY_ID]
+        zone: str = call.data[ATTR_ZONE]
+        domain_state = hass.data.get(DOMAIN, {})
+        runtime: SecuremtrRuntimeData | None = domain_state.get(entry_id)
+        if runtime is None:
+            raise HomeAssistantError(
+                f"SecureMTR entry {entry_id} is not loaded; cannot reset energy"
+            )
+
+        accumulator = runtime.energy_accumulator
+        if accumulator is None:
+            store = runtime.energy_store
+            if store is None:
+                raise HomeAssistantError(
+                    f"SecureMTR entry {entry_id} has no energy storage"
+                )
+            accumulator = EnergyAccumulator(store=store)
+            runtime.energy_accumulator = accumulator
+
+        await accumulator.async_load()
+        await accumulator.async_reset_zone(zone)
+
+        runtime.energy_state = accumulator.as_sensor_state()
+        _LOGGER.info(
+            "Reset cumulative energy state for %s zone %s", entry_id, zone
+        )
+        async_dispatch_runtime_update(hass, entry_id)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESET_ENERGY,
+        _async_handle_reset,
+        schema=schema,
+    )
+    domain_data[_RESET_SERVICE_FLAG] = True
+
+
+async def _async_ensure_utility_meters(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Create daily and weekly utility_meter helpers for the entry if needed."""
+
+    entry_identifier = _entry_display_name(entry)
+    config_entries_helper = getattr(hass, "config_entries", None)
+    if config_entries_helper is None:
+        _LOGGER.debug(
+            "config_entries helper unavailable; skipping utility meter helpers for %s",
+            entry_identifier,
+        )
+        return
+
+    required_methods = ["async_entries", "async_add"]
+    missing = [
+        name for name in required_methods if not hasattr(config_entries_helper, name)
+    ]
+    if missing:
+        _LOGGER.debug(
+            "config_entries helper missing %s; skipping utility meter helpers for %s",
+            ", ".join(missing),
+            entry_identifier,
+        )
+        return
+
+    try:
+        existing_entries = {
+            entry_obj.unique_id: entry_obj
+            for entry_obj in config_entries_helper.async_entries(
+                UTILITY_METER_DOMAIN
+            )
+            if entry_obj.unique_id is not None
+        }
+    except Exception:  # pragma: no cover - defensive guard for helper behaviour
+        _LOGGER.exception(
+            "Unable to inspect existing utility meter helpers for %s",
+            entry_identifier,
+        )
+        return
+
+    for zone_key, zone_label in UTILITY_METER_ZONE_LABELS.items():
+        source_entity = f"sensor.securemtr_{zone_key}_energy_kwh"
+        for cycle in UTILITY_METER_CYCLES:
+            unique_id = f"securemtr_{entry.entry_id}_{zone_key}_{cycle}_utility_meter"
+            if unique_id in existing_entries:
+                _LOGGER.debug(
+                    "Utility meter helper already present for %s zone %s cycle %s",
+                    entry_identifier,
+                    zone_key,
+                    cycle,
+                )
+                continue
+
+            meter_name = (
+                f"SecureMTR {zone_label} Energy {cycle.capitalize()}"
+            )
+            options: dict[str, Any] = {
+                CONF_NAME: meter_name,
+                CONF_SOURCE_SENSOR: source_entity,
+                CONF_METER_TYPE: cycle,
+                CONF_METER_OFFSET: 0,
+                CONF_TARIFFS: [],
+                CONF_METER_NET_CONSUMPTION: False,
+                CONF_METER_DELTA_VALUES: False,
+                CONF_METER_PERIODICALLY_RESETTING: True,
+                CONF_SENSOR_ALWAYS_AVAILABLE: False,
+            }
+
+            helper_entry = ConfigEntry(
+                data={},
+                domain=UTILITY_METER_DOMAIN,
+                title=meter_name,
+                version=2,
+                minor_version=2,
+                source=hass_config_entries.SOURCE_SYSTEM,
+                unique_id=unique_id,
+                options=options,
+                discovery_keys=MappingProxyType({}),
+                entry_id=f"securemtr_um_{entry.entry_id}_{zone_key}_{cycle}",
+                subentries_data=(),
+            )
+
+            try:
+                await config_entries_helper.async_add(helper_entry)
+            except Exception:  # pragma: no cover - defensive guard for helper writes
+                _LOGGER.exception(
+                    "Failed to create %s utility meter helper for %s zone %s",
+                    cycle,
+                    entry_identifier,
+                    zone_key,
+                )
+                continue
+
+            existing_entries[unique_id] = helper_entry
+            _LOGGER.info(
+                "Created %s utility meter helper for %s zone %s (source=%s)",
+                cycle,
+                entry_identifier,
+                zone_key,
+                source_entity,
+            )
 
 
 @dataclass(slots=True)
 class StatisticsOptions:
     """Represent statistics configuration derived from entry options."""
 
-    timezone: tzinfo
+    timezone: ZoneInfo
     timezone_name: str
     anchor_strategy: str
     primary_anchor: time
@@ -99,56 +270,6 @@ class ZoneContext:
 
 
 @dataclass(slots=True)
-class StatisticDefinition:
-    """Describe exported statistic metadata."""
-
-    name: str
-    unit: str | None
-    has_sum: bool
-    mean_type: StatisticMeanType
-
-
-STATISTIC_DEFINITIONS: dict[str, StatisticDefinition] = {
-    "primary_energy_kwh": StatisticDefinition(
-        "Primary energy",
-        UnitOfEnergy.KILO_WATT_HOUR,
-        True,
-        StatisticMeanType.NONE,
-    ),
-    "boost_energy_kwh": StatisticDefinition(
-        "Boost energy",
-        UnitOfEnergy.KILO_WATT_HOUR,
-        True,
-        StatisticMeanType.NONE,
-    ),
-    "primary_runtime_h": StatisticDefinition(
-        "Primary runtime",
-        UnitOfTime.HOURS,
-        False,
-        StatisticMeanType.ARITHMETIC,
-    ),
-    "primary_sched_h": StatisticDefinition(
-        "Primary scheduled time",
-        UnitOfTime.HOURS,
-        False,
-        StatisticMeanType.ARITHMETIC,
-    ),
-    "boost_runtime_h": StatisticDefinition(
-        "Boost runtime",
-        UnitOfTime.HOURS,
-        False,
-        StatisticMeanType.ARITHMETIC,
-    ),
-    "boost_sched_h": StatisticDefinition(
-        "Boost scheduled time",
-        UnitOfTime.HOURS,
-        False,
-        StatisticMeanType.ARITHMETIC,
-    ),
-}
-
-
-@dataclass(slots=True)
 class SecuremtrRuntimeData:
     """Track runtime Beanbag backend state for a config entry."""
 
@@ -171,8 +292,9 @@ class SecuremtrRuntimeData:
     state_snapshot: BeanbagStateSnapshot | None = None
     consumption_metrics_log: list[dict[str, Any]] = field(default_factory=list)
     consumption_schedule_unsub: Callable[[], None] | None = None
-    statistics_store: Store[dict[str, Any]] | None = None
-    statistics_state: dict[str, Any] | None = None
+    energy_store: Store[dict[str, Any]] | None = None
+    energy_state: dict[str, Any] | None = None
+    energy_accumulator: EnergyAccumulator | None = None
     statistics_recent: dict[str, Any] | None = None
 
 
@@ -194,6 +316,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the securemtr integration."""
     _LOGGER.info("Starting securemtr integration setup")
     hass.data.setdefault(DOMAIN, {})
+    _async_register_services(hass)
     _LOGGER.info("securemtr integration setup completed")
     return True
 
@@ -204,15 +327,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Setting up config entry for securemtr: %s", entry_identifier)
 
     hass.data.setdefault(DOMAIN, {})
+    _async_register_services(hass)
 
     session = async_get_clientsession(hass)
     runtime = SecuremtrRuntimeData(backend=BeanbagBackend(session))
     hass.data[DOMAIN][entry.entry_id] = runtime
 
-    runtime.statistics_store = Store(
+    runtime.energy_store = Store(
         hass,
-        STATISTICS_STORE_VERSION,
-        _statistics_store_key(entry),
+        ENERGY_STORE_VERSION,
+        _energy_store_key(entry),
     )
 
     runtime.startup_task = hass.async_create_task(_async_start_backend(entry, runtime))
@@ -244,6 +368,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "config_entries helper unavailable; skipping platform setup for %s",
             entry_identifier,
         )
+
+    await _async_ensure_utility_meters(hass, entry)
 
     _LOGGER.info("Config entry setup completed for securemtr: %s", entry_identifier)
     return True
@@ -659,8 +785,9 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     processed_rows: list[dict[str, Any]] = []
     log_rows: list[dict[str, Any]] = []
     for sample in samples:
-        report_day = report_day_for_sample(sample.timestamp, options.timezone)
-        iso_timestamp = dt_util.utc_from_timestamp(sample.timestamp).isoformat()
+        sample_dt = dt_util.utc_from_timestamp(sample.timestamp)
+        report_day = assign_report_day(sample_dt, options.timezone)
+        iso_timestamp = sample_dt.isoformat()
         row = {
             "timestamp": iso_timestamp,
             "epoch_seconds": sample.timestamp,
@@ -739,31 +866,6 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ),
     }
 
-    from .entity import slugify_identifier  # Import lazily to avoid circular dependency.  # noqa: I001, PLC0415
-
-    controller_identifier = controller.serial_number or controller.identifier
-    controller_slug = slugify_identifier(controller_identifier)
-    energy_statistic_ids: dict[str, str] = {}
-
-    registry = er.async_get(hass)
-    for zone_key, context in contexts.items():
-        unique_id = f"{controller_slug}_{zone_key}_energy_total"
-        entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
-        if entity_id is None:
-            _LOGGER.debug(
-                "Energy sensor unique ID %s not found in entity registry for %s",
-                unique_id,
-                entry_identifier,
-            )
-            continue
-        energy_statistic_ids[context.energy_suffix] = entity_id
-
-    suffix_zone_key: dict[str, str] = {}
-    for zone_key, context in contexts.items():
-        suffix_zone_key[context.energy_suffix] = zone_key
-        suffix_zone_key[context.runtime_suffix] = zone_key
-        suffix_zone_key[context.schedule_suffix] = zone_key
-
     calibrations: dict[str, EnergyCalibration] = {
         "primary": calibrate_energy_scale(
             processed_rows,
@@ -799,40 +901,56 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
             False, options.fallback_power_kw, "duration_power"
         )
 
-    store = runtime.statistics_store
+    store = runtime.energy_store
     if store is None:
-        store = Store(hass, STATISTICS_STORE_VERSION, _statistics_store_key(entry))
-        runtime.statistics_store = store
+        store = Store(hass, ENERGY_STORE_VERSION, _energy_store_key(entry))
+        runtime.energy_store = store
 
-    statistics_state = runtime.statistics_state
-    if statistics_state is None:
-        loaded_state = await store.async_load()
-        statistics_state = loaded_state if isinstance(loaded_state, dict) else {}
-        runtime.statistics_state = statistics_state
+    accumulator = runtime.energy_accumulator
+    if accumulator is None:
+        accumulator = EnergyAccumulator(store=store)
+        runtime.energy_accumulator = accumulator
 
-    statistics_payload: dict[str, list[StatisticData]] = {
-        suffix: [] for suffix in STATISTIC_DEFINITIONS
-    }
+    await accumulator.async_load()
+    if runtime.energy_state is None:
+        runtime.energy_state = accumulator.as_sensor_state()
 
-    entry_slug = slugify_identifier(entry_identifier)
-    store_dirty = False
-    runtime_updated = False
     recent_measurements: dict[str, Any] = dict(runtime.statistics_recent or {})
-
-    zone_last_days: dict[str, date | None] = {}
+    zone_summaries: dict[str, tuple[date, float | None, float | None]] = {}
+    energy_changed = False
+    runtime_updated = False
 
     for zone_key, context in contexts.items():
         calibration = calibrations[zone_key]
-        energy_sum, last_day = _load_zone_state(statistics_state, zone_key)
-        zone_updated = False
         latest_runtime_hours: float | None = None
         latest_scheduled_hours: float | None = None
         latest_day: date | None = None
 
         for row in processed_rows:
             report_day: date = row["report_day"]
-            if last_day is not None and report_day <= last_day:
-                continue
+
+            energy_value = energy_from_row(
+                row,
+                context.energy_field,
+                context.runtime_field,
+                calibration,
+                options.fallback_power_kw,
+            )
+            energy_value = max(0.0, energy_value)
+            updated = await accumulator.async_add_day(
+                zone_key, report_day, energy_value
+            )
+            if updated:
+                energy_changed = True
+                zone_total = accumulator.zone_total(zone_key)
+                _LOGGER.info(
+                    "SecureMTR %s energy on %s for %s: day=%.3f kWh cumulative=%.3f kWh",
+                    context.label,
+                    report_day.isoformat(),
+                    entry_identifier,
+                    energy_value,
+                    zone_total,
+                )
 
             intervals: list[tuple[datetime, datetime]] = []
             if context.program is not None and context.canonical is not None:
@@ -845,46 +963,18 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
             anchor = _resolve_anchor(report_day, context, options, intervals)
 
-            energy_value = energy_from_row(
-                row,
-                context.energy_field,
-                context.runtime_field,
-                calibration,
-                options.fallback_power_kw,
-            )
-            energy_value = max(0.0, energy_value)
-            energy_sum = cumulative_update(energy_sum, energy_value)
-            statistics_payload[context.energy_suffix].append(
-                {"start": anchor, "state": energy_value, "sum": energy_sum}
-            )
-
             runtime_minutes = float(row.get(context.runtime_field, 0.0))
             runtime_hours = max(runtime_minutes, 0.0) / 60.0
-            statistics_payload[context.runtime_suffix].append(
-                {
-                    "start": anchor,
-                    "mean": runtime_hours,
-                    "min": runtime_hours,
-                    "max": runtime_hours,
-                }
-            )
 
             scheduled_minutes = float(row.get(context.scheduled_field, 0.0))
             scheduled_hours = max(scheduled_minutes, 0.0) / 60.0
-            statistics_payload[context.schedule_suffix].append(
-                {
-                    "start": anchor,
-                    "mean": scheduled_hours,
-                    "min": scheduled_hours,
-                    "max": scheduled_hours,
-                }
-            )
 
-            _LOGGER.info(
-                "%s statistics for %s on %s: anchor=%s energy=%.3f runtime_h=%.2f scheduled_h=%.2f intervals=%d",
+            _LOGGER.debug(
+                "%s energy sample for %s on %s (updated=%s): anchor=%s energy=%.3f runtime_h=%.2f scheduled_h=%.2f intervals=%d",
                 context.label,
                 entry_identifier,
                 report_day.isoformat(),
+                updated,
                 anchor.isoformat(),
                 energy_value,
                 runtime_hours,
@@ -892,59 +982,46 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 len(intervals),
             )
 
-            last_day = report_day
-            zone_updated = True
             latest_runtime_hours = runtime_hours
             latest_scheduled_hours = scheduled_hours
             latest_day = report_day
 
-        if zone_updated:
-            _store_zone_state(statistics_state, zone_key, energy_sum, last_day)
-            store_dirty = True
+        if latest_day is not None:
             runtime_updated = True
-            recent_measurements[zone_key] = {
-                "report_day": latest_day.isoformat() if latest_day else None,
-                "runtime_hours": float(latest_runtime_hours)
-                if latest_runtime_hours is not None
-                else None,
-                "scheduled_hours": float(latest_scheduled_hours)
-                if latest_scheduled_hours is not None
-                else None,
-                "energy_sum": float(energy_sum),
-            }
-        zone_last_days[zone_key] = last_day
-
-    for suffix, definition in STATISTIC_DEFINITIONS.items():
-        statistics = statistics_payload[suffix]
-        if not statistics:
-            zone_key = suffix_zone_key.get(suffix)
-            zone_context = contexts.get(zone_key) if zone_key else None
-            zone_label = zone_context.label if zone_context is not None else "Unknown"
-            last_day = zone_last_days.get(zone_key) if zone_key else None
-            _LOGGER.debug(
-                "No statistics rows generated for %s (%s zone). last_day=%s processed_rows=%d",
-                entry_identifier,
-                zone_label,
-                last_day.isoformat() if isinstance(last_day, date) else None,
-                len(processed_rows),
+            zone_summaries[zone_key] = (
+                latest_day,
+                latest_runtime_hours,
+                latest_scheduled_hours,
             )
-            continue
-        metadata = _build_statistic_metadata(
-            entry_identifier,
-            entry_slug,
-            suffix,
-            definition,
-            statistic_id_override=energy_statistic_ids.get(suffix),
-        )
+
+    sensor_state = accumulator.as_sensor_state()
+    if energy_changed or runtime.energy_state is None:
+        runtime.energy_state = sensor_state
+        runtime_updated = True
+        primary_total = float(sensor_state.get("primary", {}).get("energy_sum", 0.0))
+        boost_total = float(sensor_state.get("boost", {}).get("energy_sum", 0.0))
         _LOGGER.info(
-            "Importing %d statistic rows for %s", len(statistics), metadata["statistic_id"]
+            "Updated cumulative energy state for %s: primary=%.3f kWh boost=%.3f kWh",
+            entry_identifier,
+            primary_total,
+            boost_total,
         )
-        async_add_external_statistics(hass, metadata, statistics)
+
+    for zone_key, summary in zone_summaries.items():
+        report_day, runtime_hours, scheduled_hours = summary
+        zone_energy = sensor_state.get(zone_key, {})
+        recent_measurements[zone_key] = {
+            "report_day": report_day.isoformat(),
+            "runtime_hours": float(runtime_hours)
+            if runtime_hours is not None
+            else None,
+            "scheduled_hours": float(scheduled_hours)
+            if scheduled_hours is not None
+            else None,
+            "energy_sum": float(zone_energy.get("energy_sum", 0.0)),
+        }
 
     runtime.statistics_recent = recent_measurements
-
-    if store_dirty:
-        await store.async_save(statistics_state)
 
     if runtime_updated:
         async_dispatch_runtime_update(hass, entry.entry_id)
@@ -955,10 +1032,10 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     )
 
 
-def _statistics_store_key(entry: ConfigEntry) -> str:
-    """Return the persistent storage key for statistics state."""
+def _energy_store_key(entry: ConfigEntry) -> str:
+    """Return the persistent storage key for energy totals."""
 
-    return f"{DOMAIN}_{entry.entry_id}_statistics"
+    return f"{DOMAIN}_{entry.entry_id}_energy"
 
 
 def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
@@ -986,25 +1063,49 @@ def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
     if hass is not None:
         hass_timezone = getattr(hass.config, "time_zone", None)
 
-    timezone_name = hass_timezone or options.get(CONF_TIME_ZONE) or DEFAULT_TIMEZONE
-    timezone = dt_util.get_time_zone(timezone_name)
+    requested_timezone = options.get(CONF_TIME_ZONE)
+    timezone_name = requested_timezone or hass_timezone or DEFAULT_TIMEZONE
+
+    def _zoneinfo_from(name: str | None) -> ZoneInfo | None:
+        if not name:
+            return None
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError:
+            return None
+
+    timezone = _zoneinfo_from(timezone_name)
 
     if timezone is None:
+        entry_name = _entry_display_name(entry)
         _LOGGER.warning(
-            "Invalid timezone %s for %s; falling back to Home Assistant default",
+            "Invalid timezone %s for %s; attempting fallbacks",
             timezone_name,
-            _entry_display_name(entry),
+            entry_name,
         )
-        timezone_name = hass_timezone or DEFAULT_TIMEZONE
-        timezone = dt_util.get_time_zone(timezone_name)
-        if timezone is None:
-            timezone = dt_util.get_time_zone(DEFAULT_TIMEZONE)
-            timezone_name = DEFAULT_TIMEZONE
-        if timezone is None:
-            timezone = dt_util.get_default_time_zone()
-            timezone_name = getattr(timezone, "key", None) or timezone.tzname(
-                dt_util.utcnow()
-            )
+        fallback_names: list[str | None] = [
+            hass_timezone if timezone_name != hass_timezone else None,
+            DEFAULT_TIMEZONE if timezone_name != DEFAULT_TIMEZONE else None,
+        ]
+        default_zone = dt_util.get_default_time_zone()
+        fallback_names.append(getattr(default_zone, "key", None))
+        fallback_names.append("UTC")
+
+        for candidate in fallback_names:
+            if not candidate:
+                continue
+            zone = _zoneinfo_from(candidate)
+            if zone is not None:
+                timezone = zone
+                timezone_name = candidate
+                _LOGGER.info(
+                    "Using fallback timezone %s for %s", timezone_name, entry_name
+                )
+                break
+
+    if timezone is None:
+        timezone_name = DEFAULT_TIMEZONE
+        timezone = ZoneInfo(DEFAULT_TIMEZONE)
 
     anchor_strategy = options.get(CONF_ANCHOR_STRATEGY, DEFAULT_ANCHOR_STRATEGY)
     if anchor_strategy not in ANCHOR_STRATEGIES:
@@ -1071,42 +1172,6 @@ async def _read_zone_program(
     return None
 
 
-def _load_zone_state(
-    statistics_state: dict[str, Any], zone: str
-) -> tuple[float, date | None]:
-    """Return the persisted cumulative sum and last processed day."""
-
-    stored = statistics_state.get(zone)
-    energy_sum = 0.0
-    last_day: date | None = None
-
-    if isinstance(stored, dict):
-        energy_raw = stored.get("energy_sum")
-        if isinstance(energy_raw, (int, float)):
-            energy_sum = float(energy_raw)
-
-        last_day_raw = stored.get("last_day")
-        if isinstance(last_day_raw, str):
-            with suppress(ValueError):
-                last_day = date.fromisoformat(last_day_raw)
-
-    return energy_sum, last_day
-
-
-def _store_zone_state(
-    statistics_state: dict[str, Any],
-    zone: str,
-    energy_sum: float,
-    last_day: date | None,
-) -> None:
-    """Persist the updated cumulative state for a zone."""
-
-    statistics_state[zone] = {
-        "energy_sum": max(0.0, float(energy_sum)),
-        "last_day": last_day.isoformat() if last_day is not None else None,
-    }
-
-
 def _resolve_anchor(
     report_day: date,
     context: ZoneContext,
@@ -1146,28 +1211,6 @@ def _resolve_anchor(
         fallback.isoformat(),
     )
     return fallback
-
-
-def _build_statistic_metadata(
-    entry_identifier: str,
-    entry_slug: str,
-    suffix: str,
-    definition: StatisticDefinition,
-    *,
-    statistic_id_override: str | None = None,
-) -> StatisticMetaData:
-    """Create metadata for a statistic export."""
-
-    identifier = entry_identifier.strip() or entry_identifier
-    statistic_id = statistic_id_override or f"{DOMAIN}:{entry_slug}:{suffix}"
-    return {
-        "source": DOMAIN,
-        "name": f"{identifier} {definition.name}",
-        "statistic_id": statistic_id,
-        "unit_of_measurement": definition.unit,
-        "has_sum": definition.has_sum,
-        "mean_type": definition.mean_type,
-    }
 
 
 def _normalize_identifier(value: Any) -> str | None:
