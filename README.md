@@ -170,6 +170,7 @@ Daily statistics from the controller are available as Home Assistant sensors:
 - **Primary Scheduled (Last Day)** and **Boost Scheduled (Last Day)** show the total scheduled minutes for yesterday, making it easy to compare the planned runtime with the actual runtime.
 
 Each sensor includes the calendar day it represents and updates automatically after the nightly refresh. Add them to dashboards, set up automations, or monitor long-term trends alongside the Home Assistant Energy Dashboard.
+
 ---
 
 ## Troubleshooting
