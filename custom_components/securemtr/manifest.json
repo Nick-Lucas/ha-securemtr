@@ -1,12 +1,12 @@
 {
   "domain": "securemtr",
   "name": "SecureMTR",
-  "dependencies": ["utility_meter"],
   "after_dependencies": ["recorder"],
   "codeowners": [
     "@ha-securemtr"
   ],
   "config_flow": true,
+  "dependencies": ["utility_meter"],
   "documentation": "https://github.com/ha-securemtr/ha-securemtr#readme",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/ha-securemtr/ha-securemtr/issues",
