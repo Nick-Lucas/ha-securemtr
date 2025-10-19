@@ -1,6 +1,7 @@
 {
   "domain": "securemtr",
   "name": "SecureMTR",
+  "dependencies": ["utility_meter"],
   "after_dependencies": ["recorder"],
   "codeowners": [
     "@ha-securemtr"

@@ -31,6 +31,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_NAME, CONF_PASSWORD, CONF_TIME_ZONE
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
@@ -57,6 +58,8 @@ from .utils import (
 )
 
 DOMAIN = "securemtr"
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 DEFAULT_DEVICE_LABEL = "E7+ Smart Water Heater Controller"
 
