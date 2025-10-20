@@ -421,13 +421,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     runtime.startup_task = hass.async_create_task(_async_start_backend(entry, runtime))
 
+    def _queue_consumption_refresh() -> None:
+        """Schedule the asynchronous consumption metrics task safely."""
+
+        def _schedule() -> None:
+            hass.async_create_task(consumption_metrics(hass, entry))
+
+        loop = getattr(hass, "loop", None)
+        if loop is None:
+            hass.async_create_task(consumption_metrics(hass, entry))
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            _schedule()
+        else:
+            loop.call_soon_threadsafe(_schedule)
+
     def _scheduled_consumption_refresh(now: datetime) -> None:
         """Trigger the scheduled consumption metrics task."""
 
         _LOGGER.debug(
             "Scheduled consumption metrics refresh triggered for %s", entry_identifier
         )
-        hass.async_create_task(consumption_metrics(hass, entry))
+        _queue_consumption_refresh()
 
     schedule_unsubs: list[Callable[[], None]] = []
     for scheduled_hour in (1, 13):
@@ -454,7 +475,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug(
         "Queuing immediate consumption metrics refresh for %s", entry_identifier
     )
-    hass.async_create_task(consumption_metrics(hass, entry))
+    _queue_consumption_refresh()
 
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:

@@ -549,6 +549,10 @@ class FakeHass:
         self.config_entries = FakeConfigEntries()
         self.config = SimpleNamespace(time_zone=DEFAULT_TIMEZONE)
         self.services = FakeServiceRegistry()
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = asyncio.get_event_loop()
 
     def async_create_task(self, coro: Awaitable[Any]) -> asyncio.Task[Any]:
         """Schedule a coroutine on the running loop and keep a reference."""
@@ -773,14 +777,23 @@ async def test_consumption_scheduler_fires_with_frozen_clock(
     ]
 
     morning = datetime(2024, 8, 20, 1, 0, tzinfo=timezone.utc)
-    callbacks[0][0](morning)
+    await asyncio.to_thread(callbacks[0][0], morning)
     await hass.async_block_till_done()
 
     midday = datetime(2024, 8, 20, 13, 0, tzinfo=timezone.utc)
     callbacks[1][0](midday)
     await hass.async_block_till_done()
 
+    original_loop = hass.loop
+    hass.loop = None
+    try:
+        callbacks[0][0](midday)
+        await hass.async_block_till_done()
+    finally:
+        hass.loop = original_loop
+
     assert fake_metrics.await_args_list == [
+        call(hass, entry),
         call(hass, entry),
         call(hass, entry),
         call(hass, entry),
