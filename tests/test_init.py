@@ -13,23 +13,11 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
+from aiohttp import ClientSession
 
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.components.utility_meter.const import (
-    CONF_METER_DELTA_VALUES,
-    CONF_METER_NET_CONSUMPTION,
-    CONF_METER_OFFSET,
-    CONF_METER_PERIODICALLY_RESETTING,
-    CONF_METER_TYPE,
-    CONF_SENSOR_ALWAYS_AVAILABLE,
-    CONF_SOURCE_SENSOR,
-    CONF_TARIFFS,
-    DAILY,
-    DOMAIN as UTILITY_METER_DOMAIN,
-    WEEKLY,
-)
-
+from homeassistant.core import HomeAssistant
 from custom_components.securemtr import (
     DOMAIN,
     SecuremtrController,
@@ -46,6 +34,14 @@ from custom_components.securemtr import (
     _read_zone_program,
     _remove_legacy_energy_entities,
     _resolve_anchor,
+    CONF_METER_DELTA_VALUES,
+    CONF_METER_NET_CONSUMPTION,
+    CONF_METER_OFFSET,
+    CONF_METER_PERIODICALLY_RESETTING,
+    CONF_METER_TYPE,
+    CONF_SENSOR_ALWAYS_AVAILABLE,
+    CONF_SOURCE_SENSOR,
+    CONF_TARIFFS,
     async_setup,
     async_dispatch_runtime_update,
     async_run_with_reconnect,
@@ -59,6 +55,8 @@ from custom_components.securemtr import (
     SERVICE_RESET_ENERGY,
     runtime_update_signal,
     consumption_metrics,
+    UTILITY_METER_CYCLES,
+    UTILITY_METER_DOMAIN,
 )
 import custom_components.securemtr as securemtr_module
 from custom_components.securemtr.energy import EnergyAccumulator
@@ -84,13 +82,14 @@ from custom_components.securemtr.config_flow import (
     DEFAULT_TIMEZONE,
 )
 from custom_components.securemtr.sensor import (
+    DEVICE_CLASS_ENERGY,
     SecuremtrEnergyTotalSensor,
+    STATE_CLASS_TOTAL_INCREASING,
     async_setup_entry as sensor_async_setup_entry,
 )
 from custom_components.securemtr.utils import assign_report_day
 from homeassistant.util import dt as dt_util
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_registry import RegistryEntryDisabler
@@ -154,6 +153,120 @@ def store_instances(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
     monkeypatch.setattr("custom_components.securemtr.Store", factory)
     return instances
+
+
+@pytest.mark.asyncio
+async def test_async_get_clientsession_creates_session() -> None:
+    """Ensure the SecureMTR session helper returns an aiohttp session."""
+
+    class StubBus:
+        def async_listen_once(self, _event: str, callback: Callable[..., Any]) -> None:
+            self.callback = callback
+
+    class StubHass:
+        def __init__(self) -> None:
+            self.data: dict[str, Any] = {}
+            self.bus = StubBus()
+
+    hass = StubHass()
+    session = securemtr_module.async_get_clientsession(hass)
+    try:
+        assert isinstance(session, ClientSession)
+        assert not session.closed
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_async_get_clientsession_registers_shutdown_listener() -> None:
+    """Ensure the session helper closes sessions on Home Assistant shutdown."""
+
+    class StubBus:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, Callable[..., Any]]] = []
+
+        def async_listen_once(self, event: str, callback: Callable[..., Any]) -> None:
+            self.calls.append((event, callback))
+
+    class StubHass:
+        def __init__(self) -> None:
+            self.data: dict[str, Any] = {}
+            self.bus = StubBus()
+
+    hass = StubHass()
+    session = securemtr_module.async_get_clientsession(hass)
+
+    assert hass.bus.calls
+    event, callback = hass.bus.calls.pop()
+    assert event == securemtr_module.EVENT_HOMEASSISTANT_CLOSE
+    await callback(object())
+    assert session.closed
+
+
+@pytest.mark.asyncio
+async def test_close_client_session_skips_when_already_closed() -> None:
+    """Ensure the close helper returns immediately for closed sessions."""
+
+    class StubSession:
+        closed = True
+
+    await securemtr_module._async_close_client_session(StubSession())
+
+
+@pytest.mark.asyncio
+async def test_close_client_session_invokes_close_method() -> None:
+    """Ensure the close helper calls synchronous close methods."""
+
+    class StubSession:
+        def __init__(self) -> None:
+            self.closed = False
+            self.closed_called = False
+
+        def close(self) -> None:
+            self.closed_called = True
+
+    session = StubSession()
+    await securemtr_module._async_close_client_session(session)
+    assert session.closed_called
+
+
+@pytest.mark.asyncio
+async def test_close_client_session_invokes_async_close() -> None:
+    """Ensure the close helper awaits asynchronous close methods."""
+
+    class StubSession:
+        def __init__(self) -> None:
+            self.closed = False
+            self.invoked = False
+
+        async def async_close(self) -> None:
+            self.invoked = True
+
+    session = StubSession()
+    await securemtr_module._async_close_client_session(session)
+    assert session.invoked
+
+
+@pytest.mark.asyncio
+async def test_retire_legacy_entities_no_removals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure legacy retirement returns early when no entities are removed."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(entry_id="no-removals", data={}, unique_id="uid")
+
+    class StubRegistry:
+        pass
+
+    monkeypatch.setattr(
+        "homeassistant.helpers.entity_registry.async_get", lambda hass_obj: StubRegistry()
+    )
+    monkeypatch.setattr(
+        securemtr_module,
+        "_remove_legacy_energy_entities",
+        lambda registry, entry_obj: [],
+    )
+
+    await securemtr_module._async_retire_legacy_entities(hass, entry)
 
 
 class FakeBeanbagBackend:
@@ -733,7 +846,7 @@ async def test_async_setup_entry_starts_backend(
 
     for meter in meters:
         assert meter.options[CONF_SOURCE_SENSOR] in expected_sources
-        assert meter.options[CONF_METER_TYPE] in (DAILY, WEEKLY)
+        assert meter.options[CONF_METER_TYPE] in UTILITY_METER_CYCLES
         assert meter.options[CONF_METER_OFFSET] == 0
         assert meter.options[CONF_TARIFFS] == []
         assert meter.options[CONF_METER_NET_CONSUMPTION] is False
@@ -1797,12 +1910,12 @@ async def test_energy_dashboard_flow_validates_sensor_states(
     primary_sensor = energy_entities["sensor.securemtr_primary_energy_kwh"]
     boost_sensor = energy_entities["sensor.securemtr_boost_energy_kwh"]
 
-    assert primary_sensor.device_class is SensorDeviceClass.ENERGY
-    assert primary_sensor.state_class is SensorStateClass.TOTAL_INCREASING
+    assert primary_sensor.device_class == DEVICE_CLASS_ENERGY
+    assert primary_sensor.state_class == STATE_CLASS_TOTAL_INCREASING
     assert (
         primary_sensor.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
     )
-    assert boost_sensor.device_class is SensorDeviceClass.ENERGY
+    assert boost_sensor.device_class == DEVICE_CLASS_ENERGY
 
     first_day_iso = assign_report_day(
         datetime.fromtimestamp(all_samples[0].timestamp, timezone.utc), tz
