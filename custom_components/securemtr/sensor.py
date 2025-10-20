@@ -6,22 +6,24 @@ import asyncio
 from datetime import datetime
 import logging
 
-from homeassistant.components.sensor import (
-    SensorDeviceClass,
-    SensorEntity,
-    SensorStateClass,
-)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData, runtime_update_signal
 from .entity import build_device_info, slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
+
+DEVICE_CLASS_ENERGY = "energy"
+DEVICE_CLASS_DURATION = "duration"
+DEVICE_CLASS_TIMESTAMP = "timestamp"
+STATE_CLASS_MEASUREMENT = "measurement"
+STATE_CLASS_TOTAL_INCREASING = "total_increasing"
 
 _CONTROLLER_WAIT_TIMEOUT = 15.0
 
@@ -49,7 +51,7 @@ async def async_setup_entry(
         raise HomeAssistantError("Secure Meters controller metadata was not available")
 
     zone_labels = {"primary": "Primary", "boost": "Boost"}
-    sensors: list[SensorEntity] = [
+    sensors: list[SecuremtrSensorEntity] = [
         SecuremtrBoostEndsSensor(runtime, controller, entry.entry_id)
     ]
 
@@ -87,10 +89,13 @@ async def async_setup_entry(
     async_add_entities(sensors)
 
 
-class _SecuremtrBaseSensor(SensorEntity):
+class SecuremtrSensorEntity(Entity):
     """Provide shared behaviour for Secure Meters sensors."""
 
     _attr_should_poll = False
+    _attr_device_class: str | None = None
+    _attr_state_class: str | None = None
+    _attr_native_unit_of_measurement: str | None = None
 
     def __init__(
         self,
@@ -126,6 +131,24 @@ class _SecuremtrBaseSensor(SensorEntity):
         self.async_on_remove(remove)
 
     @property
+    def device_class(self) -> str | None:
+        """Return the assigned sensor device class."""
+
+        return self._attr_device_class
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return the unit of measurement for the sensor value."""
+
+        return self._attr_native_unit_of_measurement
+
+    @property
+    def state_class(self) -> str | None:
+        """Return the statistics state class for the sensor value."""
+
+        return self._attr_state_class
+
+    @property
     def device_info(self) -> dict[str, object]:
         """Return device registry information for the controller."""
 
@@ -139,10 +162,10 @@ class _SecuremtrBaseSensor(SensorEntity):
         return slugify_identifier(serial_identifier)
 
 
-class SecuremtrBoostEndsSensor(_SecuremtrBaseSensor):
+class SecuremtrBoostEndsSensor(SecuremtrSensorEntity):
     """Report the expected end time of the active boost run."""
 
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_device_class = DEVICE_CLASS_TIMESTAMP
 
     def __init__(
         self,
@@ -165,11 +188,11 @@ class SecuremtrBoostEndsSensor(_SecuremtrBaseSensor):
         return self._runtime.timed_boost_end_time
 
 
-class SecuremtrEnergyTotalSensor(_SecuremtrBaseSensor):
+class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
     """Expose the cumulative energy total for a controller zone."""
 
-    _attr_device_class = SensorDeviceClass.ENERGY
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_device_class = DEVICE_CLASS_ENERGY
+    _attr_state_class = STATE_CLASS_TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
 
     def __init__(
@@ -229,11 +252,11 @@ class SecuremtrEnergyTotalSensor(_SecuremtrBaseSensor):
         return attributes or None
 
 
-class SecuremtrDailyDurationSensor(_SecuremtrBaseSensor):
+class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
     """Expose the previous day's runtime or scheduled duration."""
 
-    _attr_device_class = SensorDeviceClass.DURATION
-    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = DEVICE_CLASS_DURATION
+    _attr_state_class = STATE_CLASS_MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfTime.HOURS
 
     def __init__(

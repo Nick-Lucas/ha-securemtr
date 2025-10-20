@@ -12,27 +12,19 @@ from types import MappingProxyType
 from typing import Any, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from aiohttp import ClientWebSocketResponse
+from aiohttp import ClientSession, ClientWebSocketResponse
 from homeassistant import config_entries as hass_config_entries
-from homeassistant.components.utility_meter.const import (
-    CONF_METER_DELTA_VALUES,
-    CONF_METER_NET_CONSUMPTION,
-    CONF_METER_OFFSET,
-    CONF_METER_PERIODICALLY_RESETTING,
-    CONF_METER_TYPE,
-    CONF_SENSOR_ALWAYS_AVAILABLE,
-    CONF_SOURCE_SENSOR,
-    CONF_TARIFFS,
-    DAILY,
-    DOMAIN as UTILITY_METER_DOMAIN,
-    WEEKLY,
-)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_EMAIL, CONF_NAME, CONF_PASSWORD, CONF_TIME_ZONE
+from homeassistant.const import (
+    CONF_EMAIL,
+    CONF_NAME,
+    CONF_PASSWORD,
+    CONF_TIME_ZONE,
+    EVENT_HOMEASSISTANT_CLOSE,
+)
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
@@ -63,14 +55,23 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 DEFAULT_DEVICE_LABEL = "E7+ Smart Water Heater Controller"
 
+CONF_METER_DELTA_VALUES = "delta_values"
+CONF_METER_NET_CONSUMPTION = "net_consumption"
+CONF_METER_OFFSET = "offset"
+CONF_METER_PERIODICALLY_RESETTING = "periodically_resetting"
+CONF_METER_TYPE = "cycle"
+CONF_SENSOR_ALWAYS_AVAILABLE = "always_available"
+CONF_SOURCE_SENSOR = "source"
+CONF_TARIFFS = "tariffs"
+UTILITY_METER_DOMAIN = "utility_meter"
+UTILITY_METER_CYCLES: tuple[str, ...] = ("daily", "weekly")
+UTILITY_METER_ZONE_LABELS: dict[str, str] = {"primary": "Primary", "boost": "Boost"}
+
 MODEL_ALIASES: dict[str, str] = {
     "2": DEFAULT_DEVICE_LABEL,
 }
 
 _RUNTIME_UPDATE_SIGNAL = "securemtr_runtime_update"
-
-UTILITY_METER_CYCLES: tuple[str, ...] = (DAILY, WEEKLY)
-UTILITY_METER_ZONE_LABELS: dict[str, str] = {"primary": "Primary", "boost": "Boost"}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -352,6 +353,7 @@ class SecuremtrRuntimeData:
     """Track runtime Beanbag backend state for a config entry."""
 
     backend: BeanbagBackend
+    http_session: ClientSession | None = None
     session: BeanbagSession | None = None
     websocket: ClientWebSocketResponse | None = None
     startup_task: asyncio.Task[Any] | None = None
@@ -390,6 +392,47 @@ def _entry_display_name(entry: ConfigEntry) -> str:
     return DOMAIN
 
 
+def async_get_clientsession(hass: HomeAssistant) -> ClientSession:
+    """Return a dedicated aiohttp session for SecureMTR backend calls."""
+
+    session = ClientSession()
+
+    bus = getattr(hass, "bus", None)
+    if bus is not None and hasattr(bus, "async_listen_once"):
+
+        async def _close_session(_event: Any) -> None:
+            """Close the backend session when Home Assistant shuts down."""
+
+            await _async_close_client_session(session)
+
+        bus.async_listen_once(EVENT_HOMEASSISTANT_CLOSE, _close_session)
+
+    return session
+
+
+async def _async_close_client_session(session: Any) -> None:
+    """Close an aiohttp-style session when possible."""
+
+    closed = getattr(session, "closed", None)
+    if isinstance(closed, bool) and closed:
+        return
+
+    closer = getattr(session, "close", None)
+    if callable(closer):
+        with suppress(Exception):  # pragma: no cover - defensive guard
+            result = closer()
+            if isinstance(result, Awaitable):
+                await result
+        return
+
+    async_closer = getattr(session, "async_close", None)
+    if callable(async_closer):
+        with suppress(Exception):  # pragma: no cover - defensive guard
+            result = async_closer()
+            if isinstance(result, Awaitable):
+                await result
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the securemtr integration."""
     _LOGGER.info("Starting securemtr integration setup")
@@ -408,7 +451,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _async_register_services(hass)
 
     session = async_get_clientsession(hass)
-    runtime = SecuremtrRuntimeData(backend=BeanbagBackend(session))
+    runtime = SecuremtrRuntimeData(
+        backend=BeanbagBackend(session), http_session=session
+    )
     hass.data[DOMAIN][entry.entry_id] = runtime
 
     runtime.energy_store = Store(
@@ -529,6 +574,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if runtime.websocket is not None and not runtime.websocket.closed:
         await runtime.websocket.close()
+
+    if runtime.http_session is not None:
+        await _async_close_client_session(runtime.http_session)
+        runtime.http_session = None
 
     _LOGGER.info("securemtr config entry unloaded: %s", entry_identifier)
     return unload_ok

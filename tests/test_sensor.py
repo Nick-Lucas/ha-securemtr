@@ -8,15 +8,16 @@ import pytest
 
 from custom_components.securemtr import DOMAIN, SecuremtrController, SecuremtrRuntimeData
 from custom_components.securemtr.sensor import (
+    DEVICE_CLASS_DURATION,
+    DEVICE_CLASS_ENERGY,
+    DEVICE_CLASS_TIMESTAMP,
     SecuremtrBoostEndsSensor,
     SecuremtrDailyDurationSensor,
     SecuremtrEnergyTotalSensor,
+    SecuremtrSensorEntity,
+    STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL_INCREASING,
     async_setup_entry,
-)
-from homeassistant.components.sensor import (
-    SensorDeviceClass,
-    SensorEntity,
-    SensorStateClass,
 )
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.exceptions import HomeAssistantError
@@ -63,7 +64,7 @@ async def test_sensor_reports_end_time() -> None:
     runtime = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = DummyEntry(entry_id="entry")
-    entities: list[SensorEntity] = []
+    entities: list[SecuremtrSensorEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
 
@@ -78,6 +79,7 @@ async def test_sensor_reports_end_time() -> None:
         sensor.device_info["name"] == "E7+ Smart Water Heater Controller"
     )
     assert sensor.available is True
+    assert sensor.device_class == DEVICE_CLASS_TIMESTAMP
 
     sensor.hass = SimpleNamespace()
 
@@ -99,7 +101,7 @@ async def test_sensor_reports_end_time() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
-            "custom_components.securemtr.sensor.SensorEntity.async_added_to_hass",
+            "homeassistant.helpers.entity.Entity.async_added_to_hass",
             _fake_added,
         )
         mp.setattr(
@@ -172,7 +174,7 @@ async def test_energy_sensors_report_totals() -> None:
 
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = DummyEntry(entry_id="entry")
-    entities: list[SensorEntity] = []
+    entities: list[SecuremtrSensorEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
 
@@ -188,8 +190,8 @@ async def test_energy_sensors_report_totals() -> None:
         primary_energy.native_unit_of_measurement
         == UnitOfEnergy.KILO_WATT_HOUR
     )
-    assert primary_energy.device_class is SensorDeviceClass.ENERGY
-    assert primary_energy.state_class is SensorStateClass.TOTAL_INCREASING
+    assert primary_energy.device_class == DEVICE_CLASS_ENERGY
+    assert primary_energy.state_class == STATE_CLASS_TOTAL_INCREASING
     assert primary_energy.extra_state_attributes == {
         "last_report_day": "2024-03-01",
         "series_start_day": "2024-02-20",
@@ -214,8 +216,8 @@ async def test_energy_sensors_report_totals() -> None:
     assert isinstance(primary_runtime, SecuremtrDailyDurationSensor)
     assert primary_runtime.native_value == pytest.approx(3.25)
     assert primary_runtime.native_unit_of_measurement == UnitOfTime.HOURS
-    assert primary_runtime.device_class is SensorDeviceClass.DURATION
-    assert primary_runtime.state_class is SensorStateClass.MEASUREMENT
+    assert primary_runtime.device_class == DEVICE_CLASS_DURATION
+    assert primary_runtime.state_class == STATE_CLASS_MEASUREMENT
     primary_runtime_attrs = primary_runtime.extra_state_attributes
     assert primary_runtime_attrs is not None
     assert primary_runtime_attrs["report_day"] == "2024-03-01"

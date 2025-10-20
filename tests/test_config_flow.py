@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import shutil
 import hashlib
 import logging
+from contextlib import suppress
+from datetime import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Awaitable, Callable
+import tempfile
 import sys
-from datetime import time
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
-from pytest import TempPathFactory
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_TIME_ZONE
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -48,12 +51,118 @@ from custom_components.securemtr.config_flow import (
     _serialize_anchor,
 )
 
+
+class ConfigFlowServiceRegistry:
+    """Provide minimal service registration for config flow tests."""
+
+    def __init__(self) -> None:
+        self._handlers: dict[tuple[str, str], tuple[callable, Any | None]] = {}
+
+    def async_register(
+        self,
+        domain: str,
+        service: str,
+        handler: Callable[[SimpleNamespace], Any] | Callable[[SimpleNamespace], Awaitable[Any]],
+        schema: Any | None = None,
+    ) -> None:
+        """Record registered services."""
+
+        self._handlers[(domain, service)] = (handler, schema)
+
+    async def async_call(
+        self, domain: str, service: str, data: dict[str, Any] | None = None
+    ) -> None:
+        """Invoke a registered service handler if present."""
+
+        handler, schema = self._handlers[(domain, service)]
+        payload = data or {}
+        if schema is not None:
+            payload = schema(payload)
+        result = handler(SimpleNamespace(data=payload))
+        if asyncio.iscoroutine(result):
+            await result
+
+
+class ConfigFlowConfigEntries:
+    """Provide minimal config entry helper behavior."""
+
+    def __init__(self) -> None:
+        self._entries: list[config_entries.ConfigEntry] = []
+
+    def async_entries(self, domain: str) -> list[config_entries.ConfigEntry]:
+        """Return stored entries for the requested domain."""
+
+        return [entry for entry in self._entries if entry.domain == domain]
+
+    async def async_add(self, entry: config_entries.ConfigEntry) -> config_entries.ConfigEntry:
+        """Store a created config entry."""
+
+        self._entries.append(entry)
+        return entry
+
+    async def async_forward_entry_setups(
+        self, entry: config_entries.ConfigEntry, platforms: list[str]
+    ) -> None:
+        """No-op platform forwarder for tests."""
+
+    async def async_unload_platforms(
+        self, entry: config_entries.ConfigEntry, platforms: list[str]
+    ) -> bool:
+        """Simulate successful platform unload."""
+
+        return True
+
+
+class ConfigFlowHass:
+    """Emulate the subset of Home Assistant APIs required for config flow tests."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+        self.services = ConfigFlowServiceRegistry()
+        self.config_entries = ConfigFlowConfigEntries()
+        self._config_dir = Path(tempfile.mkdtemp(prefix="securemtr-config-"))
+        self.config = SimpleNamespace(
+            time_zone="Europe/London", config_dir=str(self._config_dir)
+        )
+        self._tasks: list[asyncio.Task[Any]] = []
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = asyncio.get_event_loop()
+
+    async def async_start(self) -> None:
+        """Start the test Home Assistant instance."""
+
+    async def async_stop(self) -> None:
+        """Stop the test Home Assistant instance, cancelling pending tasks."""
+
+        for task in list(self._tasks):
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        shutil.rmtree(self._config_dir, ignore_errors=True)
+
+    def async_create_task(self, coro: Awaitable[Any]) -> asyncio.Task[Any]:
+        """Schedule a coroutine on the running loop."""
+
+        task = asyncio.create_task(coro)
+        self._tasks.append(task)
+        return task
+
+    async def async_block_till_done(self) -> None:
+        """Await all tracked tasks to complete."""
+
+        if not self._tasks:
+            return
+        await asyncio.gather(*self._tasks)
+
+
 @pytest_asyncio.fixture
-async def hass_fixture(tmp_path_factory: TempPathFactory) -> HomeAssistant:
-    """Provide a Home Assistant instance for tests."""
-    config_dir: Path = tmp_path_factory.mktemp("securemtr")
-    hass = HomeAssistant(config_dir=str(config_dir))
-    hass.data.clear()
+async def hass_fixture() -> ConfigFlowHass:
+    """Provide a minimal Home Assistant stand-in for config flow tests."""
+
+    hass = ConfigFlowHass()
     await hass.async_start()
     try:
         yield hass
@@ -139,7 +248,7 @@ def backend_patch(monkeypatch: pytest.MonkeyPatch) -> DummyBackend:
 
 @pytest.mark.asyncio
 async def test_async_setup_initializes_domain_storage(
-    hass_fixture: HomeAssistant,
+    hass_fixture: ConfigFlowHass,
 ) -> None:
     """Ensure async_setup prepares storage for the integration."""
     assert await async_setup(hass_fixture, {})
@@ -148,7 +257,7 @@ async def test_async_setup_initializes_domain_storage(
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_stores_entry_data(
-    hass_fixture: HomeAssistant, backend_patch: DummyBackend
+    hass_fixture: ConfigFlowHass, backend_patch: DummyBackend
 ) -> None:
     """Ensure async_setup_entry keeps the provided credential data."""
     hashed_password = hashlib.md5("secure".encode("utf-8")).hexdigest()
@@ -170,7 +279,7 @@ async def test_async_setup_entry_stores_entry_data(
 
 @pytest.mark.asyncio
 async def test_async_unload_entry_removes_entry_data(
-    hass_fixture: HomeAssistant, backend_patch: DummyBackend
+    hass_fixture: ConfigFlowHass, backend_patch: DummyBackend
 ) -> None:
     """Ensure async_unload_entry clears stored data."""
     entry = SimpleNamespace(
@@ -188,7 +297,7 @@ async def test_async_unload_entry_removes_entry_data(
 
 
 @pytest.mark.asyncio
-async def test_config_flow_shows_form(hass_fixture: HomeAssistant) -> None:
+async def test_config_flow_shows_form(hass_fixture: ConfigFlowHass) -> None:
     """Verify the config flow displays the initial form."""
     flow = SecuremtrConfigFlow()
     flow.hass = hass_fixture
@@ -200,7 +309,7 @@ async def test_config_flow_shows_form(hass_fixture: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
-async def test_config_flow_creates_entry(hass_fixture: HomeAssistant) -> None:
+async def test_config_flow_creates_entry(hass_fixture: ConfigFlowHass) -> None:
     """Verify a config entry is created with sanitized credentials."""
     flow = SecuremtrConfigFlow()
     flow.hass = hass_fixture
@@ -226,7 +335,7 @@ async def test_config_flow_creates_entry(hass_fixture: HomeAssistant) -> None:
 
 @pytest.mark.asyncio
 async def test_config_flow_rejects_long_password(
-    hass_fixture: HomeAssistant,
+    hass_fixture: ConfigFlowHass,
 ) -> None:
     """Ensure config flow rejects passwords longer than the mobile app allows."""
     flow = SecuremtrConfigFlow()
