@@ -31,8 +31,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_NAME, CONF_PASSWORD, CONF_TIME_ZONE
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
@@ -148,12 +147,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
     domain_data[_RESET_SERVICE_FLAG] = True
 
 
-def _disable_legacy_energy_entities(
+def _remove_legacy_energy_entities(
     entity_registry: er.EntityRegistry, entry: ConfigEntry
 ) -> list[tuple[str, str]]:
-    """Disable legacy total sensors for the config entry if present."""
+    """Remove legacy total sensors for the config entry if present."""
 
-    disabled_entities: list[tuple[str, str]] = []
+    removed_entities: list[tuple[str, str]] = []
     for legacy_entity_id, guidance in LEGACY_ENERGY_ENTITY_GUIDANCE.items():
         entry_record = None
         entities_data = getattr(entity_registry, "_entities_data", None)
@@ -173,14 +172,15 @@ def _disable_legacy_energy_entities(
         unique_id = getattr(entry_record, "unique_id", "") or ""
         if expected_suffix and not unique_id.endswith(expected_suffix):
             continue
-        if entry_record.disabled_by == er.RegistryEntryDisabler.INTEGRATION:
+        try:
+            entity_registry.async_remove(legacy_entity_id)
+        except Exception:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unable to remove legacy SecureMTR energy entity %s", legacy_entity_id
+            )
             continue
-        entity_registry.async_update_entity(
-            legacy_entity_id,
-            disabled_by=er.RegistryEntryDisabler.INTEGRATION,
-        )
-        disabled_entities.append((legacy_entity_id, replacement_entity_id))
-    return disabled_entities
+        removed_entities.append((legacy_entity_id, replacement_entity_id))
+    return removed_entities
 
 
 async def _async_retire_legacy_entities(
@@ -198,15 +198,15 @@ async def _async_retire_legacy_entities(
         )
         return
 
-    disabled_entities = _disable_legacy_energy_entities(entity_registry, entry)
-    if not disabled_entities:
+    removed_entities = _remove_legacy_energy_entities(entity_registry, entry)
+    if not removed_entities:
         return
 
-    for legacy_entity_id, replacement_entity_id in disabled_entities:
+    for legacy_entity_id, replacement_entity_id in removed_entities:
         _LOGGER.info(
             (
-                "Disabled legacy SecureMTR energy entity %s for %s; "
-                "select %s in the Energy Dashboard instead"
+                "Removed legacy SecureMTR energy entity %s for %s; "
+                "the replacement is %s"
             ),
             legacy_entity_id,
             entry_identifier,
@@ -450,17 +450,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         _queue_consumption_refresh()
 
-    schedule_unsubs: list[Callable[[], None]] = []
-    for scheduled_hour in (1, 13):
-        schedule_unsubs.append(
-            async_track_time_change(
-                hass,
-                _scheduled_consumption_refresh,
-                hour=scheduled_hour,
-                minute=0,
-                second=0,
-            )
+    schedule_unsubs: list[Callable[[], None]] = [
+        async_track_time_change(
+            hass,
+            _scheduled_consumption_refresh,
+            hour=scheduled_hour,
+            minute=0,
+            second=0,
         )
+        for scheduled_hour in (1, 13)
+    ]
 
     def _unsubscribe_schedules() -> None:
         """Cancel every scheduled consumption metrics callback."""

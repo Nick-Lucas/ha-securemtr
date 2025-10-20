@@ -131,7 +131,7 @@ Daily ledgers lock once the following night completes. Revisions for frozen days
 
 #### Migration from earlier releases
 
-Existing installations may still show legacy energy entities named `sensor.primary_energy_total` or `sensor.boost_energy_total` from the original implementation. The integration now disables those entries automatically during setup and logs a reminder to use `sensor.securemtr_primary_energy_kwh` and `sensor.securemtr_boost_energy_kwh` in the Energy Dashboard. If you need the legacy entities for historical charts, you can re-enable them manually from the entity registry.
+Existing installations may still show legacy energy entities named `sensor.primary_energy_total` or `sensor.boost_energy_total` from the original implementation. The integration now removes those entries automatically during setup and logs a reminder to use `sensor.securemtr_primary_energy_kwh` and `sensor.securemtr_boost_energy_kwh` in the Energy Dashboard.
 
 Prefer bucketed entities in addition to the Energy Dashboard? The integration automatically creates **daily** and **weekly** [Utility Meter](https://www.home-assistant.io/integrations/utility_meter/) helpers for both zones. Each helper reads from the cumulative SecureMTR sensor so you can drop the daily or weekly totals into dashboards, automations, or template sensors without building your own helpers.
 
