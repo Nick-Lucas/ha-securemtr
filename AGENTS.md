@@ -27,6 +27,7 @@ End users are non-technical Home Assistant operators. Documentation must be task
 * Provide a concise one-line docstring for every function.
 * Apply the **minimal viable change** for each task; avoid touching unrelated code.
 * Adhere to DRY principles and practice defensive programming—anticipate invalid input, communication failures, and other error conditions, and handle them gracefully.
+* This is a new codebae. Do not implement "fallback" or "backwards compatibility", for older versions of HA or older versions of this project. We don't have a large deployed user base to protect. 
 * Log major function entry/exit points at `INFO`, protocol interactions at `DEBUG`, and errors at `ERROR`.
 * Format and lint all changes with `ruff` before committing.
 
