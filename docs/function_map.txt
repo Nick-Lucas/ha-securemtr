@@ -1,7 +1,7 @@
 custom_components.securemtr.__init__.async_setup: Set up the securemtr integration.
 custom_components.securemtr.__init__._async_register_services: Register SecureMTR domain services once per Home Assistant instance.
-custom_components.securemtr.__init__._disable_legacy_energy_entities: Disable legacy energy total entities for a config entry and note the replacements.
-custom_components.securemtr.__init__._async_retire_legacy_entities: Inspect the entity registry for legacy totals and hide them while logging guidance.
+custom_components.securemtr.__init__._remove_legacy_energy_entities: Remove legacy energy total entities for a config entry so the replacements can register cleanly.
+custom_components.securemtr.__init__._async_retire_legacy_entities: Inspect the entity registry for legacy totals and delete them while logging guidance.
 custom_components.securemtr.__init__._async_ensure_utility_meters: Create daily and weekly utility_meter helpers that wrap the SecureMTR energy sensors when missing.
 custom_components.securemtr.__init__.SecuremtrRuntimeData: Track runtime Beanbag backend state and cached sensor context for a config entry.
 custom_components.securemtr.__init__.SecuremtrController: Represent the discovered Secure Meters controller.

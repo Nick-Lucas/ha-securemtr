@@ -484,6 +484,7 @@ class FakeEntityRegistry:
         self._entities_data = dict(self._entries_by_id)
         self.entities = SimpleNamespace(get_entry=self._entries_by_id.get)
         self.updated: list[tuple[str, dict[str, object]]] = []
+        self.removed: list[str] = []
 
     def async_get(self, entity_id: str) -> FakeRegistryEntry | None:
         """Return an entity entry if present."""
@@ -497,6 +498,13 @@ class FakeEntityRegistry:
         for key, value in changes.items():
             setattr(entry, key, value)
         self.updated.append((entity_id, dict(changes)))
+
+    def async_remove(self, entity_id: str) -> None:
+        """Remove the stored entity entry."""
+
+        self._entries_by_id.pop(entity_id)
+        self._entities_data.pop(entity_id, None)
+        self.removed.append(entity_id)
 
     def entry(self, entity_id: str) -> FakeRegistryEntry:
         """Return the stored entry, raising if it is missing."""
@@ -891,13 +899,13 @@ async def test_consumption_scheduler_handles_dst_transitions(
     runtime.consumption_schedule_unsub()
 
 @pytest.mark.asyncio
-async def test_async_setup_entry_disables_legacy_energy_entities(
+async def test_async_setup_entry_removes_legacy_energy_entities(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
     store_instances,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Ensure legacy totals are disabled and guidance is logged during setup."""
+    """Ensure legacy totals are removed and guidance is logged during setup."""
 
     caplog.set_level(logging.INFO)
     hass = FakeHass()
@@ -951,13 +959,10 @@ async def test_async_setup_entry_disables_legacy_energy_entities(
     assert await async_setup_entry(hass, entry)
     await hass.async_block_till_done()
 
-    legacy_entry = registry.entry("sensor.primary_energy_total")
-    assert legacy_entry.disabled_by is RegistryEntryDisabler.INTEGRATION
-    assert (
-        registry.entry("sensor.securemtr_primary_energy_kwh").disabled_by is None
-    )
+    assert registry.removed == ["sensor.primary_energy_total"]
+    assert registry.entry("sensor.securemtr_primary_energy_kwh").disabled_by is None
     assert any(
-        "Disabled legacy SecureMTR energy entity sensor.primary_energy_total" in message
+        "Removed legacy SecureMTR energy entity sensor.primary_energy_total" in message
         for message in caplog.messages
     )
 
