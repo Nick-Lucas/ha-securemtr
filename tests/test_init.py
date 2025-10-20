@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from itertools import accumulate
 from typing import Any, Awaitable, Callable, cast
 from types import ModuleType, SimpleNamespace
@@ -38,13 +38,21 @@ from custom_components.securemtr import (
     ATTR_ZONE,
     _entry_display_name,
     _async_fetch_controller,
+    _async_register_services,
+    _async_ensure_utility_meters,
     _build_controller,
     _energy_store_key,
     _load_statistics_options,
+    _read_zone_program,
+    _remove_legacy_energy_entities,
+    _resolve_anchor,
     async_setup,
     async_dispatch_runtime_update,
     async_run_with_reconnect,
+    _async_start_backend,
     coerce_end_time,
+    StatisticsOptions,
+    ZoneContext,
     async_setup_entry,
     async_unload_entry,
     ENERGY_STORE_VERSION,
@@ -67,6 +75,7 @@ from custom_components.securemtr.config_flow import (
     CONF_ANCHOR_STRATEGY,
     CONF_BOOST_ANCHOR,
     CONF_ELEMENT_POWER_KW,
+    CONF_PREFER_DEVICE_ENERGY,
     CONF_PRIMARY_ANCHOR,
     CONF_TIME_ZONE,
     DEFAULT_BOOST_ANCHOR,
@@ -83,6 +92,7 @@ from homeassistant.util import dt as dt_util
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_registry import RegistryEntryDisabler
 
 
@@ -2158,6 +2168,231 @@ async def test_async_fetch_controller_requires_connection() -> None:
         await _async_fetch_controller(entry, runtime)
 
 
+@pytest.mark.asyncio
+async def test_reset_service_validates_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure the reset service handles missing runtime and storage."""
+
+    hass = FakeHass()
+    _async_register_services(hass)
+
+    assert (DOMAIN, SERVICE_RESET_ENERGY) in hass.services.handlers
+
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN, SERVICE_RESET_ENERGY, {ATTR_ENTRY_ID: "missing"}
+        )
+
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    hass.data[DOMAIN]["entry"] = runtime
+
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN, SERVICE_RESET_ENERGY, {ATTR_ENTRY_ID: "entry"}
+        )
+
+    original_handlers = dict(hass.services.handlers)
+    _async_register_services(hass)
+    assert hass.services.handlers == original_handlers
+
+    store = SimpleNamespace()
+    runtime.energy_store = store
+    runtime.energy_accumulator = None
+
+    created: list[Any] = []
+
+    class DummyAccumulator:
+        def __init__(self, *, store: object) -> None:
+            created.append(store)
+            self._store = store
+            self.reset_calls: list[str] = []
+
+        async def async_load(self) -> None:
+            return None
+
+        async def async_reset_zone(self, zone: str) -> None:
+            self.reset_calls.append(zone)
+
+        def as_sensor_state(self) -> dict[str, Any]:
+            return {"primary": {"energy_sum": 0.0}}
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.EnergyAccumulator", DummyAccumulator
+    )
+    dispatch_calls: list[tuple[FakeHass, str]] = []
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_dispatch_runtime_update",
+        lambda hass_obj, entry_id: dispatch_calls.append((hass_obj, entry_id)),
+    )
+
+    await hass.services.async_call(
+        DOMAIN, SERVICE_RESET_ENERGY, {ATTR_ENTRY_ID: "entry", ATTR_ZONE: "primary"}
+    )
+
+    assert created == [store]
+    assert runtime.energy_accumulator is not None
+    assert dispatch_calls[-1] == (hass, "entry")
+
+
+def test_remove_legacy_energy_entities_skips_mismatches() -> None:
+    """Ensure mismatched registry entries are ignored."""
+
+    entry = DummyConfigEntry(entry_id="abc", data={})
+
+    class FakeRegistry:
+        def __init__(self) -> None:
+            self._entities_data = {
+                "sensor.primary_energy_total": SimpleNamespace(
+                    config_entry_id="other",
+                    unique_id="sensor.securemtr_primary_energy_total",
+                ),
+                "sensor.boost_energy_total": SimpleNamespace(
+                    config_entry_id="abc",
+                    unique_id="legacy-boost",
+                ),
+            }
+            self.removed: list[str] = []
+
+        def async_remove(self, entity_id: str) -> None:
+            self.removed.append(entity_id)
+
+    registry = FakeRegistry()
+    removed = _remove_legacy_energy_entities(registry, entry)
+    assert removed == []
+    assert registry.removed == []
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_utility_meters_requires_helper_methods() -> None:
+    """Skip helper creation when config_entries lacks required APIs."""
+
+    hass = FakeHass()
+
+    class PartialEntries:
+        def async_entries(self, _domain: str):
+            raise AssertionError("async_entries must not be called")
+
+    hass.config_entries = PartialEntries()
+    entry = DummyConfigEntry(entry_id="entry", data={})
+
+    await _async_ensure_utility_meters(hass, entry)
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_utility_meters_detects_existing_helpers() -> None:
+    """Avoid creating utility meters that already exist."""
+
+    hass = FakeHass()
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.added: list[ConfigEntry] = []
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == UTILITY_METER_DOMAIN
+            return [
+                SimpleNamespace(
+                    unique_id="securemtr_entry_primary_daily_utility_meter"
+                )
+            ]
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.added.append(entry_obj)
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert hass.config_entries.added
+
+
+@pytest.mark.asyncio
+async def test_async_start_backend_handles_unexpected_errors() -> None:
+    """Ensure unexpected login errors unblock waiting tasks."""
+
+    class ExplodingBackend(FakeBeanbagBackend):
+        async def login_and_connect(self, email: str, password: str):
+            raise RuntimeError("boom")
+
+    runtime = SecuremtrRuntimeData(backend=ExplodingBackend(object()))
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    await _async_start_backend(entry, runtime)
+    assert runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_async_run_with_reconnect_requires_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject backend operations when reconnection fails."""
+
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    entry = DummyConfigEntry(entry_id="entry", data={})
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_refresh_connection",
+        AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(BeanbagError):
+        await async_run_with_reconnect(entry, runtime, AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_async_run_with_reconnect_requires_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure missing session data triggers a BeanbagError."""
+
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    entry = DummyConfigEntry(entry_id="entry", data={})
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_refresh_connection",
+        AsyncMock(return_value=True),
+    )
+
+    with pytest.raises(BeanbagError):
+        await async_run_with_reconnect(entry, runtime, AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_async_run_with_reconnect_retries_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attempt reconnection once and propagate the final error."""
+
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.session = object()  # type: ignore[assignment]
+    runtime.websocket = SimpleNamespace(closed=False)
+    entry = DummyConfigEntry(entry_id="entry", data={})
+
+    refresh = AsyncMock(side_effect=[True, True])
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_refresh_connection", refresh
+    )
+    reset = AsyncMock()
+    monkeypatch.setattr("custom_components.securemtr._async_reset_connection", reset)
+
+    failing_operation = AsyncMock(
+        side_effect=[BeanbagError("fail"), BeanbagError("fail-again")]
+    )
+
+    with pytest.raises(BeanbagError):
+        await async_run_with_reconnect(entry, runtime, failing_operation)
+
+    assert failing_operation.await_count == 2
+    assert reset.await_count == 1
+    assert refresh.await_count == 2
+
+
 def test_runtime_update_signal_helper() -> None:
     """Ensure the runtime update signal embeds the entry id."""
 
@@ -2188,6 +2423,22 @@ def test_coerce_end_time_invalid_inputs() -> None:
     assert coerce_end_time(None) is None
     assert coerce_end_time(-1) is None
     assert coerce_end_time("oops") is None
+
+
+def test_coerce_end_time_rolls_forward(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adjust end times that have already passed to the next day."""
+
+    base = datetime(2024, 4, 5, 12, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("custom_components.securemtr.dt_util.now", lambda: base)
+    monkeypatch.setattr(
+        "custom_components.securemtr.dt_util.as_utc",
+        lambda value: value.astimezone(timezone.utc),
+    )
+
+    result = coerce_end_time(0)
+    assert result is not None
+    assert result.date() == (base + timedelta(days=1)).date()
 
 
 def test_build_controller_normalises_metadata() -> None:
@@ -2284,3 +2535,260 @@ def test_entry_display_name_falls_back_to_domain() -> None:
 
     entry = SimpleNamespace()
     assert _entry_display_name(entry) == DOMAIN
+
+
+def test_load_statistics_options_recovers_from_invalid_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise timezone fallbacks and option sanitisation."""
+
+    hass = FakeHass()
+    hass.config.time_zone = None
+    entry = DummyConfigEntry(
+        entry_id="options",
+        data={},
+        options={
+            CONF_TIME_ZONE: "",
+            CONF_ANCHOR_STRATEGY: "invalid",
+            CONF_ELEMENT_POWER_KW: "oops",
+            CONF_PREFER_DEVICE_ENERGY: False,
+        },
+    )
+    entry.hass = hass
+
+    import custom_components.securemtr.config_flow as config_flow_mod
+
+    monkeypatch.setattr(config_flow_mod, "DEFAULT_TIMEZONE", "")
+    monkeypatch.setattr(config_flow_mod, "ANCHOR_STRATEGIES", ("midpoint", "fixed"))
+    monkeypatch.setattr(config_flow_mod, "DEFAULT_ANCHOR_STRATEGY", "midpoint")
+    monkeypatch.setattr(config_flow_mod, "DEFAULT_ELEMENT_POWER_KW", 2.5)
+    monkeypatch.setattr(config_flow_mod, "DEFAULT_PREFER_DEVICE_ENERGY", True)
+
+    class StubZoneInfo:
+        def __init__(self, name: str | None) -> None:
+            if name in ("UTC", "Invalid/Zone"):
+                raise ZoneInfoNotFoundError()
+            self.key = name or "Europe/London"
+
+    monkeypatch.setattr("custom_components.securemtr.ZoneInfo", StubZoneInfo)
+    monkeypatch.setattr(
+        "custom_components.securemtr.dt_util.get_default_time_zone",
+        lambda: SimpleNamespace(key="UTC"),
+    )
+
+    options = _load_statistics_options(entry)
+
+    assert isinstance(options.timezone, StubZoneInfo)
+    assert options.timezone_name == ""
+    assert options.anchor_strategy == "midpoint"
+    assert options.fallback_power_kw == pytest.approx(2.5)
+    assert options.prefer_device_energy is False
+
+
+def test_load_statistics_options_enforces_positive_power() -> None:
+    """Coerce non-positive power values to the default scale."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="power",
+        data={},
+        options={CONF_ELEMENT_POWER_KW: -1},
+    )
+    entry.hass = hass
+
+    options = _load_statistics_options(entry)
+
+    assert options.fallback_power_kw == pytest.approx(DEFAULT_ELEMENT_POWER_KW)
+
+
+@pytest.mark.asyncio
+async def test_read_zone_program_handles_backend_error() -> None:
+    """Ensure Beanbag errors during program fetch return None."""
+
+    backend = SimpleNamespace(
+        read_weekly_program=AsyncMock(side_effect=BeanbagError("fail"))
+    )
+    runtime = SecuremtrRuntimeData(backend=backend)  # type: ignore[arg-type]
+    session = SimpleNamespace()
+    websocket = SimpleNamespace()
+
+    result = await _read_zone_program(
+        runtime, session, websocket, "gateway", "primary", "Entry"
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_read_zone_program_handles_unexpected_exception() -> None:
+    """Ensure unexpected errors are caught and return None."""
+
+    backend = SimpleNamespace(
+        read_weekly_program=AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    runtime = SecuremtrRuntimeData(backend=backend)  # type: ignore[arg-type]
+    session = SimpleNamespace()
+    websocket = SimpleNamespace()
+
+    result = await _read_zone_program(
+        runtime, session, websocket, "gateway", "boost", "Entry"
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_handles_empty_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure empty history responses clear the metrics log."""
+
+    class EmptyHistoryBackend(FakeBeanbagBackend):
+        async def read_energy_history(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            window_index: int = 1,
+        ) -> list[BeanbagEnergySample]:
+            self.energy_history_calls.append((gateway_id, window_index))
+            return []
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="empty",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    backend = EmptyHistoryBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller",
+        name="Unit",
+        gateway_id="gateway-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_refresh_connection",
+        AsyncMock(return_value=True),
+    )
+
+    await consumption_metrics(hass, entry)
+
+    assert runtime.consumption_metrics_log == []
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_uses_duration_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+    store_instances,
+) -> None:
+    """Prefer duration-based calibration when device energy is disabled."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="calibration",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        options={CONF_PREFER_DEVICE_ENERGY: False},
+    )
+
+    backend = FakeBeanbagBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller",
+        name="Unit",
+        gateway_id="gateway-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    created: list[tuple[bool, float, str]] = []
+
+    class CalibrationStub:
+        def __init__(self, use_scale: bool, scale: float, source: str) -> None:
+            self.use_scale = use_scale
+            self.scale = scale
+            self.source = source
+            created.append((use_scale, scale, source))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.EnergyCalibration", CalibrationStub
+    )
+
+    await consumption_metrics(hass, entry)
+
+    assert runtime.energy_store is not None
+    assert created[-2:] == [
+        (False, DEFAULT_ELEMENT_POWER_KW, "duration_power"),
+        (False, DEFAULT_ELEMENT_POWER_KW, "duration_power"),
+    ]
+    assert store_instances
+    assert store_instances[0].saved
+
+
+def test_resolve_anchor_fixed_strategy() -> None:
+    """Ensure the fixed anchor strategy returns the fallback anchor."""
+
+    options = StatisticsOptions(
+        timezone=ZoneInfo("UTC"),
+        timezone_name="UTC",
+        anchor_strategy="fixed",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(18, 0),
+        fallback_power_kw=2.5,
+        prefer_device_energy=True,
+    )
+    context = ZoneContext(
+        label="Primary",
+        energy_field="primary",
+        runtime_field="primary_runtime",
+        scheduled_field="primary_sched",
+        energy_suffix="primary",
+        runtime_suffix="runtime",
+        schedule_suffix="sched",
+        fallback_anchor=time(7, 30),
+        program=None,
+        canonical=None,
+    )
+    anchor = _resolve_anchor(date(2024, 4, 5), context, options, [])
+    assert anchor.hour == 7 and anchor.minute == 30
+
+
+def test_resolve_anchor_falls_back_when_schedule_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the safe fallback when no schedule anchor is available."""
+
+    options = StatisticsOptions(
+        timezone=ZoneInfo("UTC"),
+        timezone_name="UTC",
+        anchor_strategy="midpoint",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(18, 0),
+        fallback_power_kw=2.5,
+        prefer_device_energy=True,
+    )
+    context = ZoneContext(
+        label="Boost",
+        energy_field="boost",
+        runtime_field="boost_runtime",
+        scheduled_field="boost_sched",
+        energy_suffix="boost",
+        runtime_suffix="runtime",
+        schedule_suffix="sched",
+        fallback_anchor=time(8, 45),
+        program=None,
+        canonical=None,
+    )
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.choose_anchor", lambda *_args, **_kwargs: None
+    )
+
+    anchor = _resolve_anchor(date(2024, 4, 5), context, options, [])
+    assert anchor.hour == 8 and anchor.minute == 45
