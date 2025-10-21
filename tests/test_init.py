@@ -2486,6 +2486,116 @@ def test_reset_cumulative_energy_entities_skips_missing_entity_id() -> None:
     assert registry.updated == []
 
 
+def test_reset_cumulative_energy_entities_fallback_legacy_registry() -> None:
+    """Ensure registries without helper methods are still processed."""
+
+    entry = DummyConfigEntry(entry_id="abc", data={})
+    primary_entry = FakeRegistryEntry(
+        entity_id="sensor.securemtr_primary_energy_kwh",
+        unique_id="serial_primary_energy_total",
+        config_entry_id=entry.entry_id,
+        disabled_by=RegistryEntryDisabler.INTEGRATION,
+    )
+    legacy_entry = FakeRegistryEntry(
+        entity_id="sensor.primary_energy_total",
+        unique_id="serial_primary_energy_total",
+        config_entry_id=entry.entry_id,
+        disabled_by=None,
+    )
+
+    class LegacyRegistry:
+        def __init__(self) -> None:
+            self.entities: dict[str, FakeRegistryEntry] = {
+                primary_entry.entity_id: primary_entry,
+                legacy_entry.entity_id: legacy_entry,
+            }
+            self._entities_data = dict(self.entities)
+            self.updated: list[tuple[str, dict[str, object]]] = []
+            self.removed: list[str] = []
+
+        def async_update_entity(self, entity_id: str, **changes: object) -> None:
+            entry_obj = self.entities[entity_id]
+            for key, value in changes.items():
+                setattr(entry_obj, key, value)
+            self.updated.append((entity_id, dict(changes)))
+
+        def async_remove(self, entity_id: str) -> None:
+            self.entities.pop(entity_id, None)
+            self._entities_data.pop(entity_id, None)
+            self.removed.append(entity_id)
+
+    registry = LegacyRegistry()
+
+    result = securemtr_module._reset_cumulative_energy_entities(registry, entry)
+
+    assert result == [
+        "sensor.primary_energy_total",
+        "sensor.securemtr_primary_energy_kwh",
+    ]
+    assert registry.removed == ["sensor.primary_energy_total"]
+    assert registry.updated == [
+        ("sensor.securemtr_primary_energy_kwh", {"disabled_by": None})
+    ]
+    assert (
+        registry.entities["sensor.securemtr_primary_energy_kwh"].disabled_by is None
+    )
+
+
+def test_reset_cumulative_energy_entities_async_entries_helper() -> None:
+    """Ensure registries exposing async_entries are processed."""
+
+    entry = DummyConfigEntry(entry_id="abc", data={})
+    primary_entry = FakeRegistryEntry(
+        entity_id="sensor.securemtr_primary_energy_kwh",
+        unique_id="serial_primary_energy_total",
+        config_entry_id=entry.entry_id,
+        disabled_by=RegistryEntryDisabler.INTEGRATION,
+    )
+    boost_entry = FakeRegistryEntry(
+        entity_id="sensor.securemtr_boost_energy_kwh",
+        unique_id="serial_boost_energy_total",
+        config_entry_id=entry.entry_id,
+        disabled_by=RegistryEntryDisabler.INTEGRATION,
+    )
+
+    class AsyncEntriesRegistry:
+        def __init__(self) -> None:
+            self._entries = [primary_entry, boost_entry]
+            self.updated: list[tuple[str, dict[str, object]]] = []
+            self.removed: list[str] = []
+
+        def async_entries(self) -> list[FakeRegistryEntry]:
+            return list(self._entries)
+
+        def async_update_entity(self, entity_id: str, **changes: object) -> None:
+            for entry_obj in self._entries:
+                if entry_obj.entity_id == entity_id:
+                    for key, value in changes.items():
+                        setattr(entry_obj, key, value)
+                    break
+            self.updated.append((entity_id, dict(changes)))
+
+        def async_remove(self, entity_id: str) -> None:
+            self._entries = [
+                entry_obj for entry_obj in self._entries if entry_obj.entity_id != entity_id
+            ]
+            self.removed.append(entity_id)
+
+    registry = AsyncEntriesRegistry()
+
+    result = securemtr_module._reset_cumulative_energy_entities(registry, entry)
+
+    assert result == [
+        "sensor.securemtr_primary_energy_kwh",
+        "sensor.securemtr_boost_energy_kwh",
+    ]
+    assert registry.removed == []
+    assert registry.updated == [
+        ("sensor.securemtr_primary_energy_kwh", {"disabled_by": None}),
+        ("sensor.securemtr_boost_energy_kwh", {"disabled_by": None}),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_async_ensure_utility_meters_requires_helper_methods() -> None:
     """Skip helper creation when config_entries lacks required APIs."""

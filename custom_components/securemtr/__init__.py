@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 import logging
 from types import MappingProxyType
-from typing import Any, TypeVar
+from typing import Any, Iterable, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientSession, ClientWebSocketResponse
@@ -189,14 +189,41 @@ def _reset_cumulative_energy_entities(
 ) -> list[str]:
     """Remove stale totals and ensure the active sensors are enabled."""
 
-    try:
-        registry_entries = entity_registry.async_entries_for_config_entry(entry.entry_id)
-    except Exception:  # pragma: no cover - defensive guard
-        _LOGGER.exception(
-            "Unable to inspect entity registry while enabling SecureMTR energy entities: %s",
-            _entry_display_name(entry),
-        )
-        return []
+    fetch_for_entry = getattr(entity_registry, "async_entries_for_config_entry", None)
+    registry_entries: list[Any]
+    if callable(fetch_for_entry):
+        try:
+            registry_entries = list(fetch_for_entry(entry.entry_id))
+        except Exception:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unable to inspect entity registry while enabling SecureMTR energy entities: %s",
+                _entry_display_name(entry),
+            )
+            return []
+    else:
+        try:
+            candidates: Iterable[Any]
+            async_entries = getattr(entity_registry, "async_entries", None)
+            if callable(async_entries):
+                candidates = list(async_entries())
+            else:
+                stored = getattr(entity_registry, "entities", None)
+                if isinstance(stored, dict):
+                    candidates = stored.values()
+                else:
+                    data = getattr(entity_registry, "_entities_data", None)
+                    candidates = data.values() if isinstance(data, dict) else []
+            registry_entries = [
+                candidate
+                for candidate in candidates
+                if getattr(candidate, "config_entry_id", None) == entry.entry_id
+            ]
+        except Exception:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unable to inspect entity registry while enabling SecureMTR energy entities: %s",
+                _entry_display_name(entry),
+            )
+            return []
 
     updated_entities: list[str] = []
     removed_entities: list[str] = []
