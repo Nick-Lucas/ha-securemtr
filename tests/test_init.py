@@ -33,7 +33,7 @@ from custom_components.securemtr import (
     _load_statistics_options,
     _read_zone_program,
     _remove_legacy_energy_entities,
-    _enable_cumulative_energy_entities,
+    _reset_cumulative_energy_entities,
     _resolve_anchor,
     CONF_METER_DELTA_VALUES,
     CONF_METER_NET_CONSUMPTION,
@@ -1102,6 +1102,10 @@ async def test_async_setup_entry_removes_legacy_energy_entities(
     ]
     assert any(
         "Removed legacy SecureMTR energy entity sensor.primary_energy_total" in message
+        for message in caplog.messages
+    )
+    assert any(
+        "Enabled SecureMTR cumulative energy entities" in message
         for message in caplog.messages
     )
 
@@ -2390,8 +2394,8 @@ def test_remove_legacy_energy_entities_skips_mismatches() -> None:
     assert registry.removed == []
 
 
-def test_enable_cumulative_energy_entities_skips_non_matches() -> None:
-    """Ensure non-matching registry entries are ignored when enabling sensors."""
+def test_reset_cumulative_energy_entities_skips_non_matches() -> None:
+    """Ensure non-matching registry entries are ignored while enabling sensors."""
 
     entry = DummyConfigEntry(entry_id="abc", data={})
     registry = FakeEntityRegistry(
@@ -2423,8 +2427,62 @@ def test_enable_cumulative_energy_entities_skips_non_matches() -> None:
         ]
     )
 
-    enabled = securemtr_module._enable_cumulative_energy_entities(registry, entry)
-    assert enabled == []
+    enabled = securemtr_module._reset_cumulative_energy_entities(registry, entry)
+    assert enabled == [""]
+    assert registry.removed == [""]
+    assert registry.updated == []
+
+
+def test_reset_cumulative_energy_entities_enables_expected_entries() -> None:
+    """Ensure matching registry entries are enabled for the config entry."""
+
+    entry = DummyConfigEntry(entry_id="abc", data={})
+    registry = FakeEntityRegistry(
+        [
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_primary_energy_kwh",
+                unique_id="serial_primary_energy_total",
+                config_entry_id=entry.entry_id,
+                disabled_by=RegistryEntryDisabler.USER,
+            ),
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_boost_energy_kwh",
+                unique_id="serial_boost_energy_total",
+                config_entry_id=entry.entry_id,
+                disabled_by=RegistryEntryDisabler.INTEGRATION,
+            ),
+        ]
+    )
+
+    enabled = securemtr_module._reset_cumulative_energy_entities(registry, entry)
+    assert enabled == [
+        "sensor.securemtr_primary_energy_kwh",
+        "sensor.securemtr_boost_energy_kwh",
+    ]
+    assert registry.updated == [
+        ("sensor.securemtr_primary_energy_kwh", {"disabled_by": None}),
+        ("sensor.securemtr_boost_energy_kwh", {"disabled_by": None}),
+    ]
+
+
+def test_reset_cumulative_energy_entities_skips_missing_entity_id() -> None:
+    """Ensure entries without entity IDs are ignored safely."""
+
+    entry = DummyConfigEntry(entry_id="abc", data={})
+    registry = FakeEntityRegistry(
+        [
+            FakeRegistryEntry(
+                entity_id=None,  # type: ignore[arg-type]
+                unique_id="serial_primary_energy_total",
+                config_entry_id=entry.entry_id,
+                disabled_by=RegistryEntryDisabler.INTEGRATION,
+            )
+        ]
+    )
+
+    result = securemtr_module._reset_cumulative_energy_entities(registry, entry)
+    assert result == []
+    assert registry.removed == []
     assert registry.updated == []
 
 

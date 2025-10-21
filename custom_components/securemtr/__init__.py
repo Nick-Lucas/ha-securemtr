@@ -184,10 +184,10 @@ def _remove_legacy_energy_entities(
     return removed_entities
 
 
-def _enable_cumulative_energy_entities(
+def _reset_cumulative_energy_entities(
     entity_registry: er.EntityRegistry, entry: ConfigEntry
 ) -> list[str]:
-    """Ensure the cumulative energy entities for the entry are enabled."""
+    """Remove stale totals and ensure the active sensors are enabled."""
 
     try:
         registry_entries = entity_registry.async_entries_for_config_entry(entry.entry_id)
@@ -198,7 +198,8 @@ def _enable_cumulative_energy_entities(
         )
         return []
 
-    enabled_entities: list[str] = []
+    updated_entities: list[str] = []
+    removed_entities: list[str] = []
     for registry_entry in registry_entries:
         unique_id = getattr(registry_entry, "unique_id", "") or ""
         if not any(
@@ -207,12 +208,28 @@ def _enable_cumulative_energy_entities(
         ):
             continue
 
-        disabled_by = getattr(registry_entry, "disabled_by", None)
-        if disabled_by != er.RegistryEntryDisabler.INTEGRATION:
+        entity_id = getattr(registry_entry, "entity_id", None)
+        if entity_id is None:
             continue
 
-        entity_id = getattr(registry_entry, "entity_id", None)
-        if not entity_id:
+        zone = "primary" if unique_id.endswith("_primary_energy_total") else "boost"
+        expected_entity_id = f"sensor.securemtr_{zone}_energy_kwh"
+
+        if entity_id != expected_entity_id:
+            try:
+                entity_registry.async_remove(entity_id)
+            except Exception:  # pragma: no cover - defensive guard
+                _LOGGER.exception(
+                    "Unable to remove stale SecureMTR energy entity %s for %s",
+                    entity_id,
+                    _entry_display_name(entry),
+                )
+                continue
+            removed_entities.append(entity_id)
+            continue
+
+        disabled_by = getattr(registry_entry, "disabled_by", None)
+        if disabled_by is None:
             continue
 
         try:
@@ -225,16 +242,23 @@ def _enable_cumulative_energy_entities(
             )
             continue
 
-        enabled_entities.append(entity_id)
+        updated_entities.append(entity_id)
 
-    if enabled_entities:
+    if removed_entities:
         _LOGGER.info(
-            "Re-enabled SecureMTR cumulative energy entities for %s: %s",
+            "Removed stale SecureMTR energy entities for %s: %s",
             _entry_display_name(entry),
-            ", ".join(enabled_entities),
+            ", ".join(removed_entities),
         )
 
-    return enabled_entities
+    if updated_entities:
+        _LOGGER.info(
+            "Enabled SecureMTR cumulative energy entities for %s: %s",
+            _entry_display_name(entry),
+            ", ".join(updated_entities),
+        )
+
+    return removed_entities + updated_entities
 
 
 async def _async_retire_legacy_entities(
@@ -253,9 +277,6 @@ async def _async_retire_legacy_entities(
         return
 
     removed_entities = _remove_legacy_energy_entities(entity_registry, entry)
-    if not removed_entities:
-        _enable_cumulative_energy_entities(entity_registry, entry)
-        return
 
     for legacy_entity_id, replacement_entity_id in removed_entities:
         _LOGGER.info(
@@ -268,7 +289,7 @@ async def _async_retire_legacy_entities(
             replacement_entity_id,
         )
 
-    _enable_cumulative_energy_entities(entity_registry, entry)
+    _reset_cumulative_energy_entities(entity_registry, entry)
 
 
 async def _async_ensure_utility_meters(
