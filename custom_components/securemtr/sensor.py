@@ -11,7 +11,7 @@ from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import Entity
+from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData, runtime_update_signal
@@ -89,7 +89,7 @@ async def async_setup_entry(
     async_add_entities(sensors)
 
 
-class SecuremtrSensorEntity(Entity):
+class SecuremtrSensorEntity(SensorEntity):
     """Provide shared behaviour for Secure Meters sensors."""
 
     _attr_should_poll = False
