@@ -184,6 +184,59 @@ def _remove_legacy_energy_entities(
     return removed_entities
 
 
+def _enable_cumulative_energy_entities(
+    entity_registry: er.EntityRegistry, entry: ConfigEntry
+) -> list[str]:
+    """Ensure the cumulative energy entities for the entry are enabled."""
+
+    try:
+        registry_entries = entity_registry.async_entries_for_config_entry(entry.entry_id)
+    except Exception:  # pragma: no cover - defensive guard
+        _LOGGER.exception(
+            "Unable to inspect entity registry while enabling SecureMTR energy entities: %s",
+            _entry_display_name(entry),
+        )
+        return []
+
+    enabled_entities: list[str] = []
+    for registry_entry in registry_entries:
+        unique_id = getattr(registry_entry, "unique_id", "") or ""
+        if not any(
+            unique_id.endswith(suffix)
+            for suffix in ("_primary_energy_total", "_boost_energy_total")
+        ):
+            continue
+
+        disabled_by = getattr(registry_entry, "disabled_by", None)
+        if disabled_by != er.RegistryEntryDisabler.INTEGRATION:
+            continue
+
+        entity_id = getattr(registry_entry, "entity_id", None)
+        if not entity_id:
+            continue
+
+        try:
+            entity_registry.async_update_entity(entity_id, disabled_by=None)
+        except Exception:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unable to re-enable SecureMTR energy entity %s for %s",
+                entity_id,
+                _entry_display_name(entry),
+            )
+            continue
+
+        enabled_entities.append(entity_id)
+
+    if enabled_entities:
+        _LOGGER.info(
+            "Re-enabled SecureMTR cumulative energy entities for %s: %s",
+            _entry_display_name(entry),
+            ", ".join(enabled_entities),
+        )
+
+    return enabled_entities
+
+
 async def _async_retire_legacy_entities(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
@@ -201,6 +254,7 @@ async def _async_retire_legacy_entities(
 
     removed_entities = _remove_legacy_energy_entities(entity_registry, entry)
     if not removed_entities:
+        _enable_cumulative_energy_entities(entity_registry, entry)
         return
 
     for legacy_entity_id, replacement_entity_id in removed_entities:
@@ -213,6 +267,8 @@ async def _async_retire_legacy_entities(
             entry_identifier,
             replacement_entity_id,
         )
+
+    _enable_cumulative_energy_entities(entity_registry, entry)
 
 
 async def _async_ensure_utility_meters(
