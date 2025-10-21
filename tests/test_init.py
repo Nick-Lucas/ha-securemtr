@@ -32,8 +32,6 @@ from custom_components.securemtr import (
     _energy_store_key,
     _load_statistics_options,
     _read_zone_program,
-    _remove_legacy_energy_entities,
-    _reset_cumulative_energy_entities,
     _resolve_anchor,
     CONF_METER_DELTA_VALUES,
     CONF_METER_NET_CONSUMPTION,
@@ -246,30 +244,6 @@ async def test_close_client_session_invokes_async_close() -> None:
     session = StubSession()
     await securemtr_module._async_close_client_session(session)
     assert session.invoked
-
-
-@pytest.mark.asyncio
-async def test_retire_legacy_entities_no_removals(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure legacy retirement returns early when no entities are removed."""
-
-    hass = FakeHass()
-    entry = DummyConfigEntry(entry_id="no-removals", data={}, unique_id="uid")
-
-    class StubRegistry:
-        pass
-
-    monkeypatch.setattr(
-        "homeassistant.helpers.entity_registry.async_get", lambda hass_obj: StubRegistry()
-    )
-    monkeypatch.setattr(
-        securemtr_module,
-        "_remove_legacy_energy_entities",
-        lambda registry, entry_obj: [],
-    )
-
-    await securemtr_module._async_retire_legacy_entities(hass, entry)
-
-
 class FakeBeanbagBackend:
     """Capture login requests and provide canned responses."""
 
@@ -897,11 +871,6 @@ async def test_consumption_scheduler_fires_with_frozen_clock(
         "custom_components.securemtr._async_ensure_utility_meters",
         AsyncMock(),
     )
-    monkeypatch.setattr(
-        "custom_components.securemtr._async_retire_legacy_entities",
-        AsyncMock(),
-    )
-
     assert await async_setup_entry(hass, entry)
     await hass.async_block_till_done()
 
@@ -992,11 +961,6 @@ async def test_consumption_scheduler_handles_dst_transitions(
         "custom_components.securemtr._async_ensure_utility_meters",
         AsyncMock(),
     )
-    monkeypatch.setattr(
-        "custom_components.securemtr._async_retire_legacy_entities",
-        AsyncMock(),
-    )
-
     assert await async_setup_entry(hass, entry)
     await hass.async_block_till_done()
 
@@ -1026,83 +990,6 @@ async def test_consumption_scheduler_handles_dst_transitions(
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.consumption_schedule_unsub is not None
     runtime.consumption_schedule_unsub()
-
-@pytest.mark.asyncio
-async def test_async_setup_entry_removes_legacy_energy_entities(
-    monkeypatch: pytest.MonkeyPatch,
-    track_time_spy,
-    store_instances,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Ensure legacy totals are removed and guidance is logged during setup."""
-
-    caplog.set_level(logging.INFO)
-    hass = FakeHass()
-    track_time_spy(hass)
-    entry = DummyConfigEntry(
-        entry_id="legacy", data={"email": "user@example.com", "password": "digest"}
-    )
-
-    registry = FakeEntityRegistry(
-        [
-            FakeRegistryEntry(
-                entity_id="sensor.primary_energy_total",
-                unique_id="serial_1_primary_energy_total",
-                config_entry_id=entry.entry_id,
-            ),
-            FakeRegistryEntry(
-                entity_id="sensor.securemtr_primary_energy_kwh",
-                unique_id="serial_1_primary_energy_total",
-                config_entry_id=entry.entry_id,
-                disabled_by=RegistryEntryDisabler.INTEGRATION,
-            ),
-            FakeRegistryEntry(
-                entity_id="sensor.other_primary_energy_total",
-                unique_id="serial_2_primary_energy_total",
-                config_entry_id="other-entry",
-            ),
-        ]
-    )
-
-    monkeypatch.setattr(
-        "custom_components.securemtr.er.async_get", lambda hass_obj: registry
-    )
-    monkeypatch.setattr(
-        "custom_components.securemtr._async_start_backend",
-        lambda entry_obj, runtime: asyncio.sleep(0),
-    )
-    fake_metrics = AsyncMock()
-    monkeypatch.setattr(
-        "custom_components.securemtr.consumption_metrics", fake_metrics
-    )
-    monkeypatch.setattr(
-        "custom_components.securemtr.async_get_clientsession", lambda hass_obj: object()
-    )
-    monkeypatch.setattr(
-        "custom_components.securemtr.BeanbagBackend", lambda session: SimpleNamespace()
-    )
-    monkeypatch.setattr(
-        "custom_components.securemtr._async_ensure_utility_meters",
-        AsyncMock(),
-    )
-
-    assert await async_setup_entry(hass, entry)
-    await hass.async_block_till_done()
-
-    assert registry.removed == ["sensor.primary_energy_total"]
-    assert registry.entry("sensor.securemtr_primary_energy_kwh").disabled_by is None
-    assert registry.updated == [
-        ("sensor.securemtr_primary_energy_kwh", {"disabled_by": None})
-    ]
-    assert any(
-        "Removed legacy SecureMTR energy entity sensor.primary_energy_total" in message
-        for message in caplog.messages
-    )
-    assert any(
-        "Enabled SecureMTR cumulative energy entities" in message
-        for message in caplog.messages
-    )
-
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_handles_missing_gateways(
@@ -2358,183 +2245,6 @@ async def test_reset_service_validates_runtime(monkeypatch: pytest.MonkeyPatch) 
     assert created == [store]
     assert runtime.energy_accumulator is not None
     assert dispatch_calls[-1] == (hass, "entry")
-
-
-def test_remove_legacy_energy_entities_skips_mismatches() -> None:
-    """Ensure mismatched registry entries are ignored."""
-
-    entry = DummyConfigEntry(entry_id="abc", data={})
-
-    class FakeRegistry:
-        def __init__(self) -> None:
-            self._entities_data = {
-                "sensor.primary_energy_total": SimpleNamespace(
-                    config_entry_id="other",
-                    unique_id="sensor.securemtr_primary_energy_total",
-                ),
-                "sensor.boost_energy_total": SimpleNamespace(
-                    config_entry_id="abc",
-                    unique_id="legacy-boost",
-                ),
-            }
-            self.removed: list[str] = []
-
-        def async_remove(self, entity_id: str) -> None:
-            self.removed.append(entity_id)
-
-    registry = FakeRegistry()
-    removed = _remove_legacy_energy_entities(registry, entry)
-    assert removed == []
-    assert registry.removed == []
-
-
-def test_reset_cumulative_energy_entities_skips_non_matches() -> None:
-    """Ensure non-matching registry entries are ignored while enabling sensors."""
-
-    entry = DummyConfigEntry(entry_id="abc", data={})
-    registry = FakeEntityRegistry(
-        [
-            FakeRegistryEntry(
-                entity_id="sensor.other",
-                unique_id="serial_primary_misc",
-                config_entry_id=entry.entry_id,
-                disabled_by=RegistryEntryDisabler.INTEGRATION,
-            ),
-            FakeRegistryEntry(
-                entity_id="sensor.securemtr_primary_energy_kwh",
-                unique_id="serial_primary_energy_total",
-                config_entry_id=entry.entry_id,
-                disabled_by=None,
-            ),
-            FakeRegistryEntry(
-                entity_id="",
-                unique_id="serial_boost_energy_total",
-                config_entry_id=entry.entry_id,
-                disabled_by=RegistryEntryDisabler.INTEGRATION,
-            ),
-            FakeRegistryEntry(
-                entity_id="sensor.other_entry",
-                unique_id="serial_2_primary_energy_total",
-                config_entry_id="other-entry",
-                disabled_by=RegistryEntryDisabler.INTEGRATION,
-            ),
-        ]
-    )
-
-    enabled = securemtr_module._reset_cumulative_energy_entities(registry, entry)
-    assert enabled == [""]
-    assert registry.removed == [""]
-    assert registry.updated == []
-
-
-def test_reset_cumulative_energy_entities_enables_expected_entries() -> None:
-    """Ensure matching registry entries are enabled for the config entry."""
-
-    entry = DummyConfigEntry(entry_id="abc", data={})
-    registry = FakeEntityRegistry(
-        [
-            FakeRegistryEntry(
-                entity_id="sensor.securemtr_primary_energy_kwh",
-                unique_id="serial_primary_energy_total",
-                config_entry_id=entry.entry_id,
-                disabled_by=RegistryEntryDisabler.USER,
-            ),
-            FakeRegistryEntry(
-                entity_id="sensor.securemtr_boost_energy_kwh",
-                unique_id="serial_boost_energy_total",
-                config_entry_id=entry.entry_id,
-                disabled_by=RegistryEntryDisabler.INTEGRATION,
-            ),
-        ]
-    )
-
-    enabled = securemtr_module._reset_cumulative_energy_entities(registry, entry)
-    assert enabled == [
-        "sensor.securemtr_primary_energy_kwh",
-        "sensor.securemtr_boost_energy_kwh",
-    ]
-    assert registry.updated == [
-        ("sensor.securemtr_primary_energy_kwh", {"disabled_by": None}),
-        ("sensor.securemtr_boost_energy_kwh", {"disabled_by": None}),
-    ]
-
-
-def test_reset_cumulative_energy_entities_skips_missing_entity_id() -> None:
-    """Ensure entries without entity IDs are ignored safely."""
-
-    entry = DummyConfigEntry(entry_id="abc", data={})
-    registry = FakeEntityRegistry(
-        [
-            FakeRegistryEntry(
-                entity_id=None,  # type: ignore[arg-type]
-                unique_id="serial_primary_energy_total",
-                config_entry_id=entry.entry_id,
-                disabled_by=RegistryEntryDisabler.INTEGRATION,
-            )
-        ]
-    )
-
-    result = securemtr_module._reset_cumulative_energy_entities(registry, entry)
-    assert result == []
-    assert registry.removed == []
-    assert registry.updated == []
-
-
-def test_reset_cumulative_energy_entities_async_entries_helper() -> None:
-    """Ensure registries exposing async_entries are processed."""
-
-    entry = DummyConfigEntry(entry_id="abc", data={})
-    primary_entry = FakeRegistryEntry(
-        entity_id="sensor.securemtr_primary_energy_kwh",
-        unique_id="serial_primary_energy_total",
-        config_entry_id=entry.entry_id,
-        disabled_by=RegistryEntryDisabler.INTEGRATION,
-    )
-    boost_entry = FakeRegistryEntry(
-        entity_id="sensor.securemtr_boost_energy_kwh",
-        unique_id="serial_boost_energy_total",
-        config_entry_id=entry.entry_id,
-        disabled_by=RegistryEntryDisabler.INTEGRATION,
-    )
-
-    class AsyncEntriesRegistry:
-        def __init__(self) -> None:
-            self._entries = [primary_entry, boost_entry]
-            self.updated: list[tuple[str, dict[str, object]]] = []
-            self.removed: list[str] = []
-
-        def async_entries(self) -> list[FakeRegistryEntry]:
-            return list(self._entries)
-
-        def async_update_entity(self, entity_id: str, **changes: object) -> None:
-            for entry_obj in self._entries:
-                if entry_obj.entity_id == entity_id:
-                    for key, value in changes.items():
-                        setattr(entry_obj, key, value)
-                    break
-            self.updated.append((entity_id, dict(changes)))
-
-        def async_remove(self, entity_id: str) -> None:
-            self._entries = [
-                entry_obj for entry_obj in self._entries if entry_obj.entity_id != entity_id
-            ]
-            self.removed.append(entity_id)
-
-    registry = AsyncEntriesRegistry()
-
-    result = securemtr_module._reset_cumulative_energy_entities(registry, entry)
-
-    assert result == [
-        "sensor.securemtr_primary_energy_kwh",
-        "sensor.securemtr_boost_energy_kwh",
-    ]
-    assert registry.removed == []
-    assert registry.updated == [
-        ("sensor.securemtr_primary_energy_kwh", {"disabled_by": None}),
-        ("sensor.securemtr_boost_energy_kwh", {"disabled_by": None}),
-    ]
-
-
 @pytest.mark.asyncio
 async def test_async_ensure_utility_meters_requires_helper_methods() -> None:
     """Skip helper creation when config_entries lacks required APIs."""

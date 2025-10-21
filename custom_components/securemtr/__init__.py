@@ -24,7 +24,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
@@ -83,14 +83,6 @@ ENERGY_ZONES = ("primary", "boost")
 _RESET_SERVICE_FLAG = "_reset_service_registered"
 
 
-LEGACY_ENERGY_ENTITY_GUIDANCE: MappingProxyType[str, tuple[str, str]] = MappingProxyType(
-    {
-        "sensor.primary_energy_total": ("primary", "sensor.securemtr_primary_energy_kwh"),
-        "sensor.boost_energy_total": ("boost", "sensor.securemtr_boost_energy_kwh"),
-    }
-)
-
-
 _ResultT = TypeVar("_ResultT")
 
 
@@ -146,154 +138,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
         schema=schema,
     )
     domain_data[_RESET_SERVICE_FLAG] = True
-
-
-def _remove_legacy_energy_entities(
-    entity_registry: er.EntityRegistry, entry: ConfigEntry
-) -> list[tuple[str, str]]:
-    """Remove legacy total sensors for the config entry if present."""
-
-    removed_entities: list[tuple[str, str]] = []
-    for legacy_entity_id, guidance in LEGACY_ENERGY_ENTITY_GUIDANCE.items():
-        entry_record = None
-        entities_data = getattr(entity_registry, "_entities_data", None)
-        if isinstance(entities_data, dict):
-            entry_record = entities_data.get(legacy_entity_id)
-        if entry_record is None:
-            entities_index = getattr(entity_registry, "entities", None)
-            if entities_index is not None:
-                with suppress(Exception):
-                    entry_record = entities_index.get_entry(legacy_entity_id)
-        if entry_record is None:
-            continue
-        if entry_record.config_entry_id != entry.entry_id:
-            continue
-        zone, replacement_entity_id = guidance
-        expected_suffix = f"_{zone}_energy_total"
-        unique_id = getattr(entry_record, "unique_id", "") or ""
-        if expected_suffix and not unique_id.endswith(expected_suffix):
-            continue
-        try:
-            entity_registry.async_remove(legacy_entity_id)
-        except Exception:  # pragma: no cover - defensive guard
-            _LOGGER.exception(
-                "Unable to remove legacy SecureMTR energy entity %s", legacy_entity_id
-            )
-            continue
-        removed_entities.append((legacy_entity_id, replacement_entity_id))
-    return removed_entities
-
-
-def _reset_cumulative_energy_entities(
-    entity_registry: er.EntityRegistry, entry: ConfigEntry
-) -> list[str]:
-    """Remove stale totals and ensure the active sensors are enabled."""
-
-    try:
-        registry_entries = [
-            candidate
-            for candidate in entity_registry.async_entries()
-            if getattr(candidate, "config_entry_id", None) == entry.entry_id
-        ]
-    except Exception:  # pragma: no cover - defensive guard
-        _LOGGER.exception(
-            "Unable to inspect entity registry while enabling SecureMTR energy entities: %s",
-            _entry_display_name(entry),
-        )
-        return []
-
-    updated_entities: list[str] = []
-    removed_entities: list[str] = []
-    for registry_entry in registry_entries:
-        unique_id = getattr(registry_entry, "unique_id", "") or ""
-        if not any(
-            unique_id.endswith(suffix)
-            for suffix in ("_primary_energy_total", "_boost_energy_total")
-        ):
-            continue
-
-        entity_id = getattr(registry_entry, "entity_id", None)
-        if entity_id is None:
-            continue
-
-        zone = "primary" if unique_id.endswith("_primary_energy_total") else "boost"
-        expected_entity_id = f"sensor.securemtr_{zone}_energy_kwh"
-
-        if entity_id != expected_entity_id:
-            try:
-                entity_registry.async_remove(entity_id)
-            except Exception:  # pragma: no cover - defensive guard
-                _LOGGER.exception(
-                    "Unable to remove stale SecureMTR energy entity %s for %s",
-                    entity_id,
-                    _entry_display_name(entry),
-                )
-                continue
-            removed_entities.append(entity_id)
-            continue
-
-        disabled_by = getattr(registry_entry, "disabled_by", None)
-        if disabled_by is None:
-            continue
-
-        try:
-            entity_registry.async_update_entity(entity_id, disabled_by=None)
-        except Exception:  # pragma: no cover - defensive guard
-            _LOGGER.exception(
-                "Unable to re-enable SecureMTR energy entity %s for %s",
-                entity_id,
-                _entry_display_name(entry),
-            )
-            continue
-
-        updated_entities.append(entity_id)
-
-    if removed_entities:
-        _LOGGER.info(
-            "Removed stale SecureMTR energy entities for %s: %s",
-            _entry_display_name(entry),
-            ", ".join(removed_entities),
-        )
-
-    if updated_entities:
-        _LOGGER.info(
-            "Enabled SecureMTR cumulative energy entities for %s: %s",
-            _entry_display_name(entry),
-            ", ".join(updated_entities),
-        )
-
-    return removed_entities + updated_entities
-
-
-async def _async_retire_legacy_entities(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> None:
-    """Hide legacy entities so users choose the new cumulative sensors."""
-
-    entry_identifier = _entry_display_name(entry)
-    try:
-        entity_registry = er.async_get(hass)
-    except Exception:  # pragma: no cover - defensive guard
-        _LOGGER.exception(
-            "Unable to inspect entity registry for legacy SecureMTR entities: %s",
-            entry_identifier,
-        )
-        return
-
-    removed_entities = _remove_legacy_energy_entities(entity_registry, entry)
-
-    for legacy_entity_id, replacement_entity_id in removed_entities:
-        _LOGGER.info(
-            (
-                "Removed legacy SecureMTR energy entity %s for %s; "
-                "the replacement is %s"
-            ),
-            legacy_entity_id,
-            entry_identifier,
-            replacement_entity_id,
-        )
-
-    _reset_cumulative_energy_entities(entity_registry, entry)
 
 
 async def _async_ensure_utility_meters(
@@ -542,8 +386,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ENERGY_STORE_VERSION,
         _energy_store_key(entry),
     )
-
-    await _async_retire_legacy_entities(hass, entry)
 
     runtime.startup_task = hass.async_create_task(_async_start_backend(entry, runtime))
 
