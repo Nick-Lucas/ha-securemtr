@@ -36,6 +36,8 @@ async def async_setup_entry(
     """Set up the Secure Meters sensors for boost and statistics."""
 
     runtime: SecuremtrRuntimeData = hass.data[DOMAIN][entry.entry_id]
+    entry_label = getattr(entry, "title", None) or getattr(entry, "entry_id", DOMAIN)
+    _LOGGER.info("Starting SecureMTR sensor setup for %s", entry_label)
 
     try:
         await asyncio.wait_for(
@@ -50,16 +52,32 @@ async def async_setup_entry(
     if controller is None:
         raise HomeAssistantError("Secure Meters controller metadata was not available")
 
+    _LOGGER.info(
+        "Preparing SecureMTR sensor entities for %s using controller %s",
+        entry_label,
+        controller.identifier,
+    )
+
     zone_labels = {"primary": "Primary", "boost": "Boost"}
     sensors: list[SecuremtrSensorEntity] = [
         SecuremtrBoostEndsSensor(runtime, controller, entry.entry_id)
     ]
+    _LOGGER.debug(
+        "Prepared boost end-time sensor %s",
+        sensors[0].unique_id,
+    )
 
     for zone_key, label in zone_labels.items():
         sensors.append(
             SecuremtrEnergyTotalSensor(
                 runtime, controller, entry.entry_id, zone_key, label
             )
+        )
+        _LOGGER.info(
+            "Prepared SecureMTR %s energy sensor (entity_id=%s, unique_id=%s)",
+            label,
+            sensors[-1].entity_id,
+            sensors[-1].unique_id,
         )
         sensors.append(
             SecuremtrDailyDurationSensor(
@@ -85,8 +103,19 @@ async def async_setup_entry(
                 "scheduled_daily",
             )
         )
+        _LOGGER.debug(
+            "Prepared SecureMTR %s runtime/schedule sensors (unique_ids=%s, %s)",
+            label,
+            sensors[-2].unique_id,
+            sensors[-1].unique_id,
+        )
 
     async_add_entities(sensors)
+    _LOGGER.info(
+        "Registered %d SecureMTR sensor entities for %s",
+        len(sensors),
+        entry_label,
+    )
 
 
 class SecuremtrSensorEntity(SensorEntity):
