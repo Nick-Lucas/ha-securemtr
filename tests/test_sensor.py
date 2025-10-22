@@ -181,7 +181,7 @@ async def test_energy_sensors_report_totals() -> None:
     assert len(entities) == 7
     sensors_by_id = {entity.unique_id: entity for entity in entities}
 
-    primary_energy = sensors_by_id["serial_1_primary_energy_total"]
+    primary_energy = sensors_by_id["serial_1_primary_energy_kwh"]
     assert isinstance(primary_energy, SecuremtrEnergyTotalSensor)
     assert primary_energy.name == "SecureMTR Primary Energy kWh"
     assert primary_energy.entity_id == "sensor.securemtr_primary_energy_kwh"
@@ -201,7 +201,7 @@ async def test_energy_sensors_report_totals() -> None:
     assert device_info["identifiers"] == {(DOMAIN, "serial-1")}
     assert device_info["manufacturer"] == "Secure Meters"
 
-    boost_energy = sensors_by_id["serial_1_boost_energy_total"]
+    boost_energy = sensors_by_id["serial_1_boost_energy_kwh"]
     assert isinstance(boost_energy, SecuremtrEnergyTotalSensor)
     assert boost_energy.name == "SecureMTR Boost Energy kWh"
     assert boost_energy.entity_id == "sensor.securemtr_boost_energy_kwh"

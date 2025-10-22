@@ -208,7 +208,7 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
         super().__init__(runtime, controller, entry_id)
         self._zone = zone
         self._attr_name = f"SecureMTR {label} Energy kWh"
-        self._attr_unique_id = f"{self._identifier_slug()}_{zone}_energy_total"
+        self._attr_unique_id = f"{self._identifier_slug()}_{zone}_energy_kwh"
         self.entity_id = f"sensor.securemtr_{zone}_energy_kwh"
 
     def _zone_state(self) -> dict[str, object] | None:
