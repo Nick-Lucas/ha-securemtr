@@ -35,13 +35,11 @@ from custom_components.securemtr import (
 from custom_components.securemtr.beanbag import BeanbagGateway, BeanbagSession
 import custom_components.securemtr.config_flow as config_flow
 from custom_components.securemtr.config_flow import (
-    CONF_ANCHOR_STRATEGY,
     CONF_BOOST_ANCHOR,
     CONF_ELEMENT_POWER_KW,
     CONF_PREFER_DEVICE_ENERGY,
     CONF_PRIMARY_ANCHOR,
     DEFAULT_TIMEZONE,
-    DEFAULT_ANCHOR_STRATEGY,
     DEFAULT_BOOST_ANCHOR,
     DEFAULT_ELEMENT_POWER_KW,
     DEFAULT_PREFER_DEVICE_ENERGY,
@@ -367,7 +365,6 @@ async def test_options_flow_uses_default_values() -> None:
 
     assert defaults[CONF_PRIMARY_ANCHOR] == time.fromisoformat(DEFAULT_PRIMARY_ANCHOR)
     assert defaults[CONF_BOOST_ANCHOR] == time.fromisoformat(DEFAULT_BOOST_ANCHOR)
-    assert defaults[CONF_ANCHOR_STRATEGY] == DEFAULT_ANCHOR_STRATEGY
     assert defaults[CONF_ELEMENT_POWER_KW] == DEFAULT_ELEMENT_POWER_KW
     assert defaults[CONF_PREFER_DEVICE_ENERGY] == DEFAULT_PREFER_DEVICE_ENERGY
 
@@ -381,7 +378,6 @@ async def test_options_flow_prefers_stored_values() -> None:
             options={
                 CONF_PRIMARY_ANCHOR: "06:15",
                 CONF_BOOST_ANCHOR: "18:45:30",
-                CONF_ANCHOR_STRATEGY: "strange",
                 CONF_ELEMENT_POWER_KW: "3.1",
                 CONF_PREFER_DEVICE_ENERGY: False,
             }
@@ -394,7 +390,6 @@ async def test_options_flow_prefers_stored_values() -> None:
 
     assert defaults[CONF_PRIMARY_ANCHOR] == time(6, 15)
     assert defaults[CONF_BOOST_ANCHOR] == time(18, 45, 30)
-    assert defaults[CONF_ANCHOR_STRATEGY] == DEFAULT_ANCHOR_STRATEGY
     assert defaults[CONF_ELEMENT_POWER_KW] == pytest.approx(3.1)
     assert defaults[CONF_PREFER_DEVICE_ENERGY] is False
 
@@ -410,7 +405,6 @@ async def test_options_flow_creates_entry_with_serialized_times() -> None:
         {
             CONF_PRIMARY_ANCHOR: time(4, 30),
             CONF_BOOST_ANCHOR: time(19, 0, 15),
-            CONF_ANCHOR_STRATEGY: "fixed",
             CONF_ELEMENT_POWER_KW: 3.25,
             CONF_PREFER_DEVICE_ENERGY: False,
         }
@@ -421,7 +415,6 @@ async def test_options_flow_creates_entry_with_serialized_times() -> None:
         CONF_TIME_ZONE: "Europe/Paris",
         CONF_PRIMARY_ANCHOR: "04:30",
         CONF_BOOST_ANCHOR: "19:00:15",
-        CONF_ANCHOR_STRATEGY: "fixed",
         CONF_ELEMENT_POWER_KW: 3.25,
         CONF_PREFER_DEVICE_ENERGY: False,
     }
@@ -439,7 +432,6 @@ async def test_options_flow_falls_back_to_default_timezone(caplog: pytest.LogCap
             {
                 CONF_PRIMARY_ANCHOR: time(4, 30),
                 CONF_BOOST_ANCHOR: time(19, 0, 15),
-                CONF_ANCHOR_STRATEGY: "fixed",
                 CONF_ELEMENT_POWER_KW: 3.25,
                 CONF_PREFER_DEVICE_ENERGY: False,
             }
@@ -464,7 +456,6 @@ async def test_options_flow_handles_invalid_home_assistant_timezone(
             {
                 CONF_PRIMARY_ANCHOR: time(4, 30),
                 CONF_BOOST_ANCHOR: time(19, 0, 15),
-                CONF_ANCHOR_STRATEGY: "fixed",
                 CONF_ELEMENT_POWER_KW: 3.25,
                 CONF_PREFER_DEVICE_ENERGY: False,
             }

@@ -5,7 +5,7 @@
 The integration refreshes cumulative energy state shortly after **01:00** in the controller's configured timezone. The nightly job executes the following steps for each of the seven history samples returned by the Beanbag API:
 
 1. **Report-day assignment.** Convert the sample timestamp from UTC to the configured timezone, subtract one day (because the controller reports the day that just finished), and store the resulting calendar date. The helper `assign_report_day()` handles daylight-saving gaps and folds.
-2. **Schedule analysis.** Fetch the primary and boost weekly programs, normalise them with `canonicalize_weekly()`, and build day-specific intervals via `day_intervals()`. Depending on the selected anchor strategy (`midpoint`, `start`, or `end`), choose an anchor timestamp inside the longest interval with `choose_anchor()`. If no interval matches, fall back to `safe_anchor_datetime()` using the configured anchor times.
+2. **Schedule analysis.** Fetch the primary and boost weekly programs, normalise them with `canonicalize_weekly()`, and build day-specific intervals via `day_intervals()`. Regardless of the intervals detected, anchor each day with `safe_anchor_datetime()` using the user-configured primary and boost anchor times.
 3. **Energy calibration.** Compare the device-reported energy with the runtime-derived estimate. When the ratio matches `ln(10)` within tolerance, keep the reported value (`EnergyCalibration.use_scale=True`). Otherwise derive energy from runtime minutes and the configured fallback power.
 4. **Energy accumulation.** Feed the per-day totals into the `EnergyAccumulator`, which maintains the monotonic sums for the primary and boost sensors and persists the rolling ledger of processed days (`ledger`, `cumulative_kwh`, `last_processed_day`). Persistence occurs on every increment so that subsequent imports can skip duplicates, detect resets, and survive restarts without losing totals. The accumulator updates Home Assistant sensor state directly—no calls to `async_add_external_statistics` or other recorder APIs are required.
 5. **Reset support.** When an operator calls the `securemtr.reset_energy_accumulator` service, the accumulator clears the ledger for the requested zone and dispatches a runtime update so the energy sensors immediately report `0 kWh` until fresh samples arrive.
@@ -15,7 +15,7 @@ Key helpers live in `utils.py` and `schedule.py`. Update `docs/function_map.txt`
 
 ## Logging
 
-The nightly pipeline emits INFO-level records for each processed day that note the report date, input kWh, and the updated cumulative total. Detailed sample metadata—including the selected anchor and runtime scheduling context—remains available at DEBUG level. When totals change, another INFO log summarises the new cumulative energy values so you can confirm the sensors match expectations.
+The nightly pipeline emits INFO-level records for each processed day that note the report date, input kWh, and the updated cumulative total. Detailed sample metadata—including the configured anchor timestamp and runtime scheduling context—remains available at DEBUG level. When totals change, another INFO log summarises the new cumulative energy values so you can confirm the sensors match expectations.
 
 ## QA checklist
 
