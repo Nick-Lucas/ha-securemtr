@@ -1050,7 +1050,9 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                     canonical=context.canonical,
                 )
 
-            anchor = _resolve_anchor(report_day, context, options, intervals)
+            anchor, anchor_source = _resolve_anchor(
+                report_day, context, options, intervals
+            )
 
             runtime_minutes = float(row.get(context.runtime_field, 0.0))
             runtime_hours = max(runtime_minutes, 0.0) / 60.0
@@ -1059,11 +1061,12 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
             scheduled_hours = max(scheduled_minutes, 0.0) / 60.0
 
             _LOGGER.debug(
-                "%s energy sample for %s on %s (updated=%s): anchor=%s energy=%.3f runtime_h=%.2f scheduled_h=%.2f intervals=%d",
+                "%s energy sample for %s on %s (updated=%s): anchor_source=%s anchor=%s energy=%.3f runtime_h=%.2f scheduled_h=%.2f intervals=%d",
                 context.label,
                 entry_identifier,
                 report_day.isoformat(),
                 updated,
+                anchor_source,
                 anchor.isoformat(),
                 energy_value,
                 runtime_hours,
@@ -1257,19 +1260,33 @@ def _resolve_anchor(
     report_day: date,
     context: ZoneContext,
     options: StatisticsOptions,
-    _intervals: Iterable[tuple[datetime, datetime]],
-) -> datetime:
+    intervals: Iterable[tuple[datetime, datetime]],
+) -> tuple[datetime, str]:
     """Select an anchor for the provided day and schedule context."""
 
-    anchor = safe_anchor_datetime(report_day, context.fallback_anchor, options.timezone)
+    schedule_anchor: datetime | None = None
+    for start, end in intervals:
+        if end <= start:
+            continue
+        if schedule_anchor is None or start < schedule_anchor:
+            schedule_anchor = start
+
+    anchor_source = "configured"
+    if schedule_anchor is not None:
+        anchor = schedule_anchor
+        anchor_source = "schedule"
+    else:
+        anchor = safe_anchor_datetime(report_day, context.fallback_anchor, options.timezone)
+
     _LOGGER.debug(
-        "%s anchor configured for %s on %s: %s",
+        "%s anchor for %s on %s using %s: %s",
         context.label,
         options.timezone_name,
         report_day.isoformat(),
+        anchor_source,
         anchor.isoformat(),
     )
-    return anchor
+    return anchor, anchor_source
 
 
 def _normalize_identifier(value: Any) -> str | None:

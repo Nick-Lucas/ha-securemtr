@@ -2712,8 +2712,8 @@ async def test_consumption_metrics_uses_duration_calibration(
     assert store_instances[0].saved
 
 
-def test_resolve_anchor_uses_configured_time() -> None:
-    """Return the configured anchor time regardless of schedule intervals."""
+def test_resolve_anchor_prefers_schedule_on_time() -> None:
+    """Use the schedule on time when intervals are available."""
 
     options = StatisticsOptions(
         timezone=ZoneInfo("UTC"),
@@ -2738,13 +2738,24 @@ def test_resolve_anchor_uses_configured_time() -> None:
 
     dummy_intervals = [
         (
+            datetime(2024, 4, 5, 5, 0, tzinfo=ZoneInfo("UTC")),
+            datetime(2024, 4, 5, 5, 0, tzinfo=ZoneInfo("UTC")),
+        ),
+        (
             datetime(2024, 4, 5, 1, 0, tzinfo=ZoneInfo("UTC")),
             datetime(2024, 4, 5, 2, 0, tzinfo=ZoneInfo("UTC")),
-        )
+        ),
+        (
+            datetime(2024, 4, 5, 3, 0, tzinfo=ZoneInfo("UTC")),
+            datetime(2024, 4, 5, 4, 0, tzinfo=ZoneInfo("UTC")),
+        ),
     ]
 
-    anchor = _resolve_anchor(date(2024, 4, 5), context, options, dummy_intervals)
-    assert anchor.hour == 7 and anchor.minute == 30
+    anchor, source = _resolve_anchor(
+        date(2024, 4, 5), context, options, dummy_intervals
+    )
+    assert anchor.hour == 1 and anchor.minute == 0
+    assert source == "schedule"
 
 
 def test_resolve_anchor_handles_missing_schedule() -> None:
@@ -2771,5 +2782,6 @@ def test_resolve_anchor_handles_missing_schedule() -> None:
         canonical=None,
     )
 
-    anchor = _resolve_anchor(date(2024, 4, 5), context, options, [])
+    anchor, source = _resolve_anchor(date(2024, 4, 5), context, options, [])
     assert anchor.hour == 8 and anchor.minute == 45
+    assert source == "configured"
