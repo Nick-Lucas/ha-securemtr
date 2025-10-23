@@ -19,18 +19,15 @@ from . import DOMAIN
 
 CONF_PRIMARY_ANCHOR = "primary_anchor"
 CONF_BOOST_ANCHOR = "boost_anchor"
-CONF_ANCHOR_STRATEGY = "anchor_strategy"
 CONF_ELEMENT_POWER_KW = "element_power_kw"
 CONF_PREFER_DEVICE_ENERGY = "prefer_device_energy"
 
 DEFAULT_TIMEZONE = "Europe/London"
 DEFAULT_PRIMARY_ANCHOR = "03:00"
 DEFAULT_BOOST_ANCHOR = "17:00"
-DEFAULT_ANCHOR_STRATEGY = "midpoint"
 DEFAULT_ELEMENT_POWER_KW = 2.85
 DEFAULT_PREFER_DEVICE_ENERGY = True
 
-ANCHOR_STRATEGIES: tuple[str, ...] = ("midpoint", "start", "end", "fixed")
 _DEFAULT_PRIMARY_TIME = time.fromisoformat(DEFAULT_PRIMARY_ANCHOR)
 _DEFAULT_BOOST_TIME = time.fromisoformat(DEFAULT_BOOST_ANCHOR)
 
@@ -177,17 +174,12 @@ class SecuremtrOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_TIME_ZONE: timezone_name,
                     CONF_PRIMARY_ANCHOR: _serialize_anchor(primary_anchor),
                     CONF_BOOST_ANCHOR: _serialize_anchor(boost_anchor),
-                    CONF_ANCHOR_STRATEGY: user_input[CONF_ANCHOR_STRATEGY],
                     CONF_ELEMENT_POWER_KW: user_input[CONF_ELEMENT_POWER_KW],
                     CONF_PREFER_DEVICE_ENERGY: user_input[CONF_PREFER_DEVICE_ENERGY],
                 },
             )
 
         options = self._config_entry.options
-        anchor_strategy = options.get(CONF_ANCHOR_STRATEGY, DEFAULT_ANCHOR_STRATEGY)
-        if anchor_strategy not in ANCHOR_STRATEGIES:
-            anchor_strategy = DEFAULT_ANCHOR_STRATEGY
-
         primary_anchor_default = _anchor_option_to_time(
             options.get(CONF_PRIMARY_ANCHOR), _DEFAULT_PRIMARY_TIME
         )
@@ -205,9 +197,6 @@ class SecuremtrOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_BOOST_ANCHOR,
                     default=boost_anchor_default,
                 ): selector({"time": {}}),
-                vol.Required(
-                    CONF_ANCHOR_STRATEGY, default=anchor_strategy
-                ): vol.In(ANCHOR_STRATEGIES),
                 vol.Required(
                     CONF_ELEMENT_POWER_KW,
                     default=float(

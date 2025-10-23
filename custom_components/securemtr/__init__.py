@@ -40,7 +40,7 @@ from .beanbag import (
     WeeklyProgram,
 )
 from .energy import EnergyAccumulator
-from .schedule import canonicalize_weekly, choose_anchor, day_intervals
+from .schedule import canonicalize_weekly, day_intervals
 from .utils import (
     EnergyCalibration,
     assign_report_day,
@@ -250,7 +250,6 @@ class StatisticsOptions:
 
     timezone: ZoneInfo
     timezone_name: str
-    anchor_strategy: str
     primary_anchor: time
     boost_anchor: time
     fallback_power_kw: float
@@ -975,10 +974,9 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     for zone_key, calibration in calibrations.items():
         context = contexts[zone_key]
         _LOGGER.info(
-            "%s calibration for %s (strategy=%s): use_scale=%s scale=%.6f source=%s",
+            "%s calibration for %s: use_scale=%s scale=%.6f source=%s",
             context.label,
             entry_identifier,
-            options.anchor_strategy,
             calibration.use_scale,
             calibration.scale,
             calibration.source,
@@ -1133,13 +1131,10 @@ def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
     """Derive statistics options from the configuration entry."""
 
     from .config_flow import (  # Import lazily to avoid circular dependency.  # noqa: PLC0415
-        ANCHOR_STRATEGIES,
-        CONF_ANCHOR_STRATEGY,
         CONF_BOOST_ANCHOR,
         CONF_ELEMENT_POWER_KW,
         CONF_PREFER_DEVICE_ENERGY,
         CONF_PRIMARY_ANCHOR,
-        DEFAULT_ANCHOR_STRATEGY,
         DEFAULT_BOOST_ANCHOR,
         DEFAULT_ELEMENT_POWER_KW,
         DEFAULT_PREFER_DEVICE_ENERGY,
@@ -1198,10 +1193,6 @@ def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
         timezone_name = DEFAULT_TIMEZONE
         timezone = ZoneInfo(DEFAULT_TIMEZONE)
 
-    anchor_strategy = options.get(CONF_ANCHOR_STRATEGY, DEFAULT_ANCHOR_STRATEGY)
-    if anchor_strategy not in ANCHOR_STRATEGIES:
-        anchor_strategy = DEFAULT_ANCHOR_STRATEGY
-
     primary_anchor = _anchor_option_to_time(
         options.get(CONF_PRIMARY_ANCHOR),
         time.fromisoformat(DEFAULT_PRIMARY_ANCHOR),
@@ -1225,7 +1216,6 @@ def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
     return StatisticsOptions(
         timezone=timezone,
         timezone_name=timezone_name,
-        anchor_strategy=anchor_strategy,
         primary_anchor=primary_anchor,
         boost_anchor=boost_anchor,
         fallback_power_kw=fallback_power_kw,
@@ -1267,41 +1257,19 @@ def _resolve_anchor(
     report_day: date,
     context: ZoneContext,
     options: StatisticsOptions,
-    intervals: Iterable[tuple[datetime, datetime]],
+    _intervals: Iterable[tuple[datetime, datetime]],
 ) -> datetime:
     """Select an anchor for the provided day and schedule context."""
 
-    if options.anchor_strategy == "fixed":
-        anchor = safe_anchor_datetime(report_day, context.fallback_anchor, options.timezone)
-        _LOGGER.debug(
-            "%s fixed anchor selected for %s on %s: %s",
-            context.label,
-            options.timezone_name,
-            report_day.isoformat(),
-            anchor.isoformat(),
-        )
-        return anchor
-
-    anchor = choose_anchor(list(intervals), strategy=options.anchor_strategy)
-    if anchor is not None:
-        _LOGGER.debug(
-            "%s schedule anchor selected via %s on %s: %s",
-            context.label,
-            options.anchor_strategy,
-            report_day.isoformat(),
-            anchor.isoformat(),
-        )
-        return anchor
-
-    fallback = safe_anchor_datetime(report_day, context.fallback_anchor, options.timezone)
+    anchor = safe_anchor_datetime(report_day, context.fallback_anchor, options.timezone)
     _LOGGER.debug(
-        "%s fallback anchor used for %s on %s: %s",
+        "%s anchor configured for %s on %s: %s",
         context.label,
         options.timezone_name,
         report_day.isoformat(),
-        fallback.isoformat(),
+        anchor.isoformat(),
     )
-    return fallback
+    return anchor
 
 
 def _normalize_identifier(value: Any) -> str | None:

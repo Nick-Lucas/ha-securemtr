@@ -69,7 +69,6 @@ from custom_components.securemtr.beanbag import (
     WeeklyProgram,
 )
 from custom_components.securemtr.config_flow import (
-    CONF_ANCHOR_STRATEGY,
     CONF_BOOST_ANCHOR,
     CONF_ELEMENT_POWER_KW,
     CONF_PREFER_DEVICE_ENERGY,
@@ -2533,7 +2532,6 @@ def test_load_statistics_options_recovers_from_invalid_timezone(
         data={},
         options={
             CONF_TIME_ZONE: "",
-            CONF_ANCHOR_STRATEGY: "invalid",
             CONF_ELEMENT_POWER_KW: "oops",
             CONF_PREFER_DEVICE_ENERGY: False,
         },
@@ -2543,8 +2541,6 @@ def test_load_statistics_options_recovers_from_invalid_timezone(
     import custom_components.securemtr.config_flow as config_flow_mod
 
     monkeypatch.setattr(config_flow_mod, "DEFAULT_TIMEZONE", "")
-    monkeypatch.setattr(config_flow_mod, "ANCHOR_STRATEGIES", ("midpoint", "fixed"))
-    monkeypatch.setattr(config_flow_mod, "DEFAULT_ANCHOR_STRATEGY", "midpoint")
     monkeypatch.setattr(config_flow_mod, "DEFAULT_ELEMENT_POWER_KW", 2.5)
     monkeypatch.setattr(config_flow_mod, "DEFAULT_PREFER_DEVICE_ENERGY", True)
 
@@ -2564,7 +2560,8 @@ def test_load_statistics_options_recovers_from_invalid_timezone(
 
     assert isinstance(options.timezone, StubZoneInfo)
     assert options.timezone_name == ""
-    assert options.anchor_strategy == "midpoint"
+    assert options.primary_anchor == time.fromisoformat(DEFAULT_PRIMARY_ANCHOR)
+    assert options.boost_anchor == time.fromisoformat(DEFAULT_BOOST_ANCHOR)
     assert options.fallback_power_kw == pytest.approx(2.5)
     assert options.prefer_device_energy is False
 
@@ -2715,13 +2712,12 @@ async def test_consumption_metrics_uses_duration_calibration(
     assert store_instances[0].saved
 
 
-def test_resolve_anchor_fixed_strategy() -> None:
-    """Ensure the fixed anchor strategy returns the fallback anchor."""
+def test_resolve_anchor_uses_configured_time() -> None:
+    """Return the configured anchor time regardless of schedule intervals."""
 
     options = StatisticsOptions(
         timezone=ZoneInfo("UTC"),
         timezone_name="UTC",
-        anchor_strategy="fixed",
         primary_anchor=time(6, 0),
         boost_anchor=time(18, 0),
         fallback_power_kw=2.5,
@@ -2739,19 +2735,24 @@ def test_resolve_anchor_fixed_strategy() -> None:
         program=None,
         canonical=None,
     )
-    anchor = _resolve_anchor(date(2024, 4, 5), context, options, [])
+
+    dummy_intervals = [
+        (
+            datetime(2024, 4, 5, 1, 0, tzinfo=ZoneInfo("UTC")),
+            datetime(2024, 4, 5, 2, 0, tzinfo=ZoneInfo("UTC")),
+        )
+    ]
+
+    anchor = _resolve_anchor(date(2024, 4, 5), context, options, dummy_intervals)
     assert anchor.hour == 7 and anchor.minute == 30
 
 
-def test_resolve_anchor_falls_back_when_schedule_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Use the safe fallback when no schedule anchor is available."""
+def test_resolve_anchor_handles_missing_schedule() -> None:
+    """Fallback to the configured anchor when no schedule data exists."""
 
     options = StatisticsOptions(
         timezone=ZoneInfo("UTC"),
         timezone_name="UTC",
-        anchor_strategy="midpoint",
         primary_anchor=time(6, 0),
         boost_anchor=time(18, 0),
         fallback_power_kw=2.5,
@@ -2768,10 +2769,6 @@ def test_resolve_anchor_falls_back_when_schedule_missing(
         fallback_anchor=time(8, 45),
         program=None,
         canonical=None,
-    )
-
-    monkeypatch.setattr(
-        "custom_components.securemtr.choose_anchor", lambda *_args, **_kwargs: None
     )
 
     anchor = _resolve_anchor(date(2024, 4, 5), context, options, [])
