@@ -21,6 +21,10 @@ Control your **Secure Meters E7+ Smart Water Heater Controller** from **Home Ass
 
 > Install the integration (via HACS or manual copy) before you use the “Add integration” button.
 
+![Secure Meters E7+ controller](docs/images/e7plus-controller.jpg)
+
+*The E7+ Smart Water Heater Controller*
+
 ## Who is this for?
 
 For anyone using the **E7+ Wifi-enabled Smart Water Heater Controller** from Secure Meters. If you already manage your water heater with the Secure Controls mobile app and want the same control inside Home Assistant, this integration is for you.
