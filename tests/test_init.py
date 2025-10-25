@@ -9,12 +9,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from itertools import accumulate
 from typing import Any, Awaitable, Callable, cast
-from types import ModuleType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
 from aiohttp import ClientSession
 
+from homeassistant import config_entries as hass_config_entries
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -33,6 +34,7 @@ from custom_components.securemtr import (
     _load_statistics_options,
     _read_zone_program,
     _resolve_anchor,
+    _utility_meter_identifier,
     CONF_METER_DELTA_VALUES,
     CONF_METER_NET_CONSUMPTION,
     CONF_METER_OFFSET,
@@ -520,6 +522,7 @@ class FakeConfigEntries:
         self.forwarded: list[tuple[str, ...]] = []
         self.unloaded: list[tuple[str, ...]] = []
         self.added: list[ConfigEntry] = []
+        self.removed: list[str] = []
         self._entries: dict[str, ConfigEntry] = {}
         self._order: list[str] = []
 
@@ -558,6 +561,15 @@ class FakeConfigEntries:
         if domain is not None:
             entries = [entry for entry in entries if entry.domain == domain]
         return list(entries)
+
+    async def async_remove(self, entry_id: str) -> None:
+        """Record helper removals and drop them from storage."""
+
+        self.removed.append(entry_id)
+        if entry_id in self._entries:
+            self._entries.pop(entry_id)
+        if entry_id in self._order:
+            self._order.remove(entry_id)
 
 
 @dataclass(slots=True)
@@ -812,10 +824,10 @@ async def test_async_setup_entry_starts_backend(
     assert {
         meter.unique_id for meter in meters
     } == {
-        "securemtr_1_primary_daily_utility_meter",
-        "securemtr_1_primary_weekly_utility_meter",
-        "securemtr_1_boost_daily_utility_meter",
-        "securemtr_1_boost_weekly_utility_meter",
+        "securemtr_user_example_com_primary_daily_utility_meter",
+        "securemtr_user_example_com_primary_weekly_utility_meter",
+        "securemtr_user_example_com_boost_daily_utility_meter",
+        "securemtr_user_example_com_boost_weekly_utility_meter",
     }
 
     expected_sources = {
@@ -2266,30 +2278,167 @@ async def test_async_ensure_utility_meters_detects_existing_helpers() -> None:
 
     hass = FakeHass()
 
+    existing_helper = ConfigEntry(
+        data={},
+        domain=UTILITY_METER_DOMAIN,
+        title="SecureMTR Primary Energy Daily",
+        version=2,
+        minor_version=2,
+        source=hass_config_entries.SOURCE_SYSTEM,
+        unique_id="securemtr_user_example_com_primary_daily_utility_meter",
+        options={CONF_SOURCE_SENSOR: "sensor.securemtr_primary_energy_kwh"},
+        discovery_keys=MappingProxyType({}),
+        entry_id="securemtr_um_user_example_com_primary_daily",
+        subentries_data=(),
+    )
+
     class HelperEntries:
         def __init__(self) -> None:
+            self.entries: list[ConfigEntry] = [existing_helper]
             self.added: list[ConfigEntry] = []
+            self.removed: list[str] = []
 
-        def async_entries(self, domain: str) -> list[Any]:
+        def async_entries(self, domain: str) -> list[ConfigEntry]:
             assert domain == UTILITY_METER_DOMAIN
-            return [
-                SimpleNamespace(
-                    unique_id="securemtr_entry_primary_daily_utility_meter"
-                )
-            ]
+            return list(self.entries)
 
         async def async_add(self, entry_obj: ConfigEntry) -> None:
             self.added.append(entry_obj)
+            self.entries.append(entry_obj)
+
+        async def async_remove(self, entry_id: str) -> None:
+            self.removed.append(entry_id)
+            self.entries = [
+                entry for entry in self.entries if entry.entry_id != entry_id
+            ]
 
     hass.config_entries = HelperEntries()
     entry = DummyConfigEntry(
         entry_id="entry",
+        unique_id="user@example.com",
         data={"email": "user@example.com", "password": "digest"},
     )
 
     await _async_ensure_utility_meters(hass, entry)
 
-    assert hass.config_entries.added
+    assert len(hass.config_entries.added) == 3
+    assert hass.config_entries.removed == []
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_utility_meters_skips_new_style_helpers() -> None:
+    """Ensure existing helpers with stable IDs are reused without duplicates."""
+
+    hass = FakeHass()
+
+    existing_helper = ConfigEntry(
+        data={},
+        domain=UTILITY_METER_DOMAIN,
+        title="SecureMTR Primary Energy Daily",
+        version=2,
+        minor_version=2,
+        source=hass_config_entries.SOURCE_SYSTEM,
+        unique_id="securemtr_user_example_com_primary_daily_utility_meter",
+        options={CONF_SOURCE_SENSOR: "sensor.securemtr_primary_energy_kwh"},
+        discovery_keys=MappingProxyType({}),
+        entry_id="securemtr_um_user_example_com_primary_daily",
+        subentries_data=(),
+    )
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.entries: list[ConfigEntry] = [existing_helper]
+            self.added: list[ConfigEntry] = []
+            self.removed: list[str] = []
+
+        def async_entries(self, domain: str) -> list[ConfigEntry]:
+            assert domain == UTILITY_METER_DOMAIN
+            return list(self.entries)
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.added.append(entry_obj)
+            self.entries.append(entry_obj)
+
+        async def async_remove(self, entry_id: str) -> None:
+            self.removed.append(entry_id)
+            self.entries = [
+                entry for entry in self.entries if entry.entry_id != entry_id
+            ]
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="user@example.com",
+        data={},
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert hass.config_entries.removed == []
+    assert sum(
+        1
+        for helper in hass.config_entries.entries
+        if helper.unique_id
+        == "securemtr_user_example_com_primary_daily_utility_meter"
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_utility_meters_removes_legacy_helpers() -> None:
+    """Replace legacy helpers built from entry IDs with stable identifiers."""
+
+    hass = FakeHass()
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.entries: list[Any] = [
+                SimpleNamespace(
+                    unique_id="securemtr_entry_primary_daily_utility_meter",
+                    entry_id="securemtr_um_entry_primary_daily",
+                    domain=UTILITY_METER_DOMAIN,
+                    options={
+                        CONF_SOURCE_SENSOR: "sensor.securemtr_primary_energy_kwh"
+                    },
+                )
+            ]
+            self.added: list[ConfigEntry] = []
+            self.removed: list[str] = []
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == UTILITY_METER_DOMAIN
+            return list(self.entries)
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.added.append(entry_obj)
+            self.entries.append(entry_obj)
+
+        async def async_remove(self, entry_id: str) -> None:
+            self.removed.append(entry_id)
+            self.entries = [
+                entry for entry in self.entries if entry.entry_id != entry_id
+            ]
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="user@example.com",
+        data={},
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert hass.config_entries.removed == ["securemtr_um_entry_primary_daily"]
+
+    new_unique_id = "securemtr_user_example_com_primary_daily_utility_meter"
+    assert (
+        sum(1 for helper in hass.config_entries.entries if helper.unique_id == new_unique_id)
+        == 1
+    )
+
+    assert all(
+        helper.entry_id != "securemtr_um_entry_primary_daily"
+        for helper in hass.config_entries.entries
+    )
 
 
 @pytest.mark.asyncio
@@ -2518,6 +2667,34 @@ def test_entry_display_name_falls_back_to_domain() -> None:
 
     entry = SimpleNamespace()
     assert _entry_display_name(entry) == DOMAIN
+
+
+def test_utility_meter_identifier_prefers_serial() -> None:
+    """Ensure the helper uses the stored serial number when available."""
+
+    entry = SimpleNamespace(
+        data={"serial_number": " Serial-01 "}, unique_id="ignored", entry_id="entry"
+    )
+
+    assert _utility_meter_identifier(entry) == "serial_01"
+
+
+def test_utility_meter_identifier_uses_unique_id() -> None:
+    """Ensure the helper falls back to the config entry unique ID."""
+
+    entry = SimpleNamespace(data={}, unique_id="User@Example.Com", entry_id="entry")
+
+    assert _utility_meter_identifier(entry) == "user_example_com"
+
+
+def test_utility_meter_identifier_has_safe_fallbacks() -> None:
+    """Ensure entry IDs and domain constants provide deterministic slugs."""
+
+    entry = SimpleNamespace(data={}, unique_id=None, entry_id="Entry-5")
+    assert _utility_meter_identifier(entry) == "entry_5"
+
+    entry = SimpleNamespace(data={}, unique_id=None, entry_id=None)
+    assert _utility_meter_identifier(entry) == DOMAIN
 
 
 def test_load_statistics_options_recovers_from_invalid_timezone(
