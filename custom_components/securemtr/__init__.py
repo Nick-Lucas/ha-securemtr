@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 import logging
+import re
 from types import MappingProxyType
 from typing import Any, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -154,7 +155,7 @@ async def _async_ensure_utility_meters(
         )
         return
 
-    required_methods = ["async_entries", "async_add"]
+    required_methods = ["async_entries", "async_add", "async_remove"]
     missing = [
         name for name in required_methods if not hasattr(config_entries_helper, name)
     ]
@@ -167,13 +168,9 @@ async def _async_ensure_utility_meters(
         return
 
     try:
-        existing_entries = {
-            entry_obj.unique_id: entry_obj
-            for entry_obj in config_entries_helper.async_entries(
-                UTILITY_METER_DOMAIN
-            )
-            if entry_obj.unique_id is not None
-        }
+        helper_entries = list(
+            config_entries_helper.async_entries(UTILITY_METER_DOMAIN)
+        )
     except Exception:  # pragma: no cover - defensive guard for helper behaviour
         _LOGGER.exception(
             "Unable to inspect existing utility meter helpers for %s",
@@ -181,10 +178,88 @@ async def _async_ensure_utility_meters(
         )
         return
 
+    existing_entries: dict[str, ConfigEntry] = {}
+    helpers_by_source: dict[tuple[str, str | None], list[ConfigEntry]] = {}
+
+    for helper_entry in helper_entries:
+        unique_id = getattr(helper_entry, "unique_id", None)
+        if isinstance(unique_id, str):
+            existing_entries[unique_id] = helper_entry
+
+        options = getattr(helper_entry, "options", None)
+        if isinstance(options, Mapping):
+            source = options.get(CONF_SOURCE_SENSOR)
+            if isinstance(source, str):
+                cycle_option = options.get(CONF_METER_TYPE)
+                cycle_key = cycle_option if isinstance(cycle_option, str) else None
+                helpers_by_source.setdefault((source, cycle_key), []).append(
+                    helper_entry
+                )
+
+    helper_identifier = _utility_meter_identifier(entry)
+
     for zone_key, zone_label in UTILITY_METER_ZONE_LABELS.items():
         source_entity = f"sensor.securemtr_{zone_key}_energy_kwh"
         for cycle in UTILITY_METER_CYCLES:
-            unique_id = f"securemtr_{entry.entry_id}_{zone_key}_{cycle}_utility_meter"
+            unique_id = (
+                f"securemtr_{helper_identifier}_{zone_key}_{cycle}_utility_meter"
+            )
+            entry_id = f"securemtr_um_{helper_identifier}_{zone_key}_{cycle}"
+
+            source_helpers = list(
+                helpers_by_source.get((source_entity, cycle), [])
+            )
+            legacy_cycle_helpers = helpers_by_source.get((source_entity, None))
+            if legacy_cycle_helpers:
+                source_helpers.extend(list(legacy_cycle_helpers))
+            for legacy_entry in source_helpers:
+                legacy_unique = getattr(legacy_entry, "unique_id", None)
+                if (
+                    legacy_unique == unique_id
+                    and legacy_entry.entry_id == entry_id
+                ):
+                    helpers = helpers_by_source.get((source_entity, None))
+                    if helpers is not None:
+                        with suppress(ValueError):
+                            helpers.remove(legacy_entry)
+                        if not helpers:
+                            helpers_by_source.pop((source_entity, None), None)
+                    continue
+
+                try:
+                    await config_entries_helper.async_remove(legacy_entry.entry_id)
+                except Exception:  # pragma: no cover - defensive guard for helper writes
+                    _LOGGER.exception(
+                        "Failed to remove legacy utility meter helper %s for %s zone %s",
+                        legacy_entry.entry_id,
+                        entry_identifier,
+                        zone_key,
+                    )
+                    continue
+
+                if isinstance(legacy_unique, str):
+                    existing_entries.pop(legacy_unique, None)
+
+                for helper_key in (
+                    (source_entity, cycle),
+                    (source_entity, None),
+                ):
+                    helpers = helpers_by_source.get(helper_key)
+                    if helpers is None:
+                        continue
+                    with suppress(ValueError):
+                        helpers.remove(legacy_entry)
+                    if not helpers:
+                        helpers_by_source.pop(helper_key, None)
+
+                _LOGGER.info(
+                    "Removed legacy utility meter helper %s for %s zone %s (source=%s)",
+                    legacy_entry.entry_id,
+                    entry_identifier,
+                    zone_key,
+                    source_entity,
+                )
+
             if unique_id in existing_entries:
                 _LOGGER.debug(
                     "Utility meter helper already present for %s zone %s cycle %s",
@@ -219,7 +294,7 @@ async def _async_ensure_utility_meters(
                 unique_id=unique_id,
                 options=options,
                 discovery_keys=MappingProxyType({}),
-                entry_id=f"securemtr_um_{entry.entry_id}_{zone_key}_{cycle}",
+                entry_id=entry_id,
                 subentries_data=(),
             )
 
@@ -314,6 +389,32 @@ def _entry_display_name(entry: ConfigEntry) -> str:
         return entry_id
 
     return DOMAIN
+
+
+def _utility_meter_identifier(entry: ConfigEntry) -> str:
+    """Return a slug for utility meter helper identifiers."""
+
+    data = getattr(entry, "data", None)
+    serial_candidate: str | None = None
+    if isinstance(data, dict):
+        raw_serial = data.get("serial_number")
+        if isinstance(raw_serial, str) and raw_serial.strip():
+            serial_candidate = raw_serial.strip()
+
+    candidate = serial_candidate
+    if candidate is None:
+        unique_id = getattr(entry, "unique_id", None)
+        if isinstance(unique_id, str) and unique_id.strip():
+            candidate = unique_id.strip()
+    if candidate is None:
+        entry_id = getattr(entry, "entry_id", None)
+        if isinstance(entry_id, str) and entry_id.strip():
+            candidate = entry_id.strip()
+    if candidate is None:
+        candidate = DOMAIN
+
+    slug = re.sub(r"[^0-9A-Za-z]+", "_", candidate).strip("_").lower()
+    return slug or DOMAIN
 
 
 def async_get_clientsession(hass: HomeAssistant) -> ClientSession:
