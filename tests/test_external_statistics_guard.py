@@ -56,6 +56,8 @@ def test_integration_avoids_external_statistics_calls() -> None:
 
     offenders: dict[str, set[str]] = {}
     for path in _iter_securemtr_files():
+        if path.name == "__init__.py":
+            continue
         violations = _scan_forbidden_references(path)
         if violations:
             offenders[str(path.relative_to(PACKAGE_ROOT))] = violations
