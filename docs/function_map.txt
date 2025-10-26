@@ -17,6 +17,7 @@ custom_components.securemtr.__init__.consumption_metrics: Import daily energy sa
 custom_components.securemtr.__init__._energy_store_key: Return the persistent storage key for accumulated energy state.
 custom_components.securemtr.__init__._load_statistics_options: Derive statistics options from the configuration entry using the Home Assistant timezone when available.
 custom_components.securemtr.__init__._read_zone_program: Fetch the weekly program for a zone, returning None on failure.
+custom_components.securemtr.__init__._build_zone_statistics_samples: Return statistic samples for a runtime segment anchored to a day.
 custom_components.securemtr.__init__._resolve_anchor: Prefer the earliest schedule "on" datetime, falling back to the configured anchor.
 custom_components.securemtr.__init__._normalize_identifier: Return a sanitized identifier candidate when possible.
 custom_components.securemtr.__init__.runtime_update_signal: Return the dispatcher signal name for runtime updates.
@@ -109,6 +110,7 @@ custom_components.securemtr.utils.EnergyCalibration: Describe energy calibration
 custom_components.securemtr.utils.to_local: Convert a timestamp into an aware datetime in the provided timezone.
 custom_components.securemtr.utils.assign_report_day: Return the SecureMTR reporting day for an aware timestamp in a ZoneInfo timezone.
 custom_components.securemtr.utils.safe_anchor_datetime: Return an aware datetime within the requested day, skipping DST gaps and preferring the later fold when overlaps occur.
+custom_components.securemtr.utils.split_runtime_segments: Return hour-aligned runtime segments capped at the reporting day boundary.
 custom_components.securemtr.utils.calibrate_energy_scale: Return calibration data describing how to interpret device energy.
 custom_components.securemtr.utils.energy_from_row: Compute energy for a row using calibration or fallback duration power.
 custom_components.securemtr.utils.cumulative_update: Return the updated cumulative value from the provided delta.

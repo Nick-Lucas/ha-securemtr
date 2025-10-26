@@ -84,13 +84,68 @@ def safe_anchor_datetime(day: date, anchor: time | None, tz: tzinfo) -> datetime
     candidate = minute_map[selected_minute]
     if anchor_time.second or anchor_time.microsecond:
         candidate_utc = dt_util.as_utc(candidate)
-        candidate = (candidate_utc + timedelta(
-            seconds=anchor_time.second,
-            microseconds=anchor_time.microsecond,
-        )).astimezone(tz)
+        candidate = (
+            candidate_utc
+            + timedelta(
+                seconds=anchor_time.second,
+                microseconds=anchor_time.microsecond,
+            )
+        ).astimezone(tz)
 
     day_end = datetime(day.year, day.month, day.day, 23, 59, 59, 999999, tzinfo=tz)
     return min(candidate, day_end)
+
+
+def split_runtime_segments(
+    anchor: datetime, runtime_hours: float, total_energy_kwh: float
+) -> list[tuple[datetime, float, float]]:
+    """Return hour-aligned runtime segments capped at the day boundary."""
+
+    if anchor.tzinfo is None or anchor.utcoffset() is None:
+        raise ValueError("split_runtime_segments requires an aware datetime anchor")
+
+    if runtime_hours <= 0 or total_energy_kwh <= 0:
+        return []
+
+    day_start = anchor.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    segments: list[tuple[datetime, float]] = []
+    current_start = anchor
+    remaining_hours = runtime_hours
+
+    while remaining_hours > 0 and current_start < day_end:
+        hour_start = current_start.replace(minute=0, second=0, microsecond=0)
+        next_hour = hour_start + timedelta(hours=1)
+        slot_end = min(next_hour, day_end)
+        slot_seconds = (slot_end - current_start).total_seconds()
+        slot_hours = min(remaining_hours, max(slot_seconds / 3600.0, 0.0))
+        if slot_hours <= 0:  # pragma: no cover - defensive guard for zero-length slots
+            break
+
+        segments.append((current_start, slot_hours))
+        remaining_hours -= slot_hours
+        current_start = current_start + timedelta(seconds=slot_hours * 3600.0)
+
+    if not segments:  # pragma: no cover - runtime guards prevent empty collections
+        return []
+
+    total_duration = sum(duration for _, duration in segments)
+    if total_duration <= 0:  # pragma: no cover - defensive guard against precision loss
+        return []
+
+    remaining_energy = total_energy_kwh
+    scaled_segments: list[tuple[datetime, float, float]] = []
+    for index, (slot_start, slot_hours) in enumerate(segments):
+        if index == len(segments) - 1:
+            slot_energy = remaining_energy
+        else:
+            slot_energy = (slot_hours / total_duration) * total_energy_kwh
+            remaining_energy -= slot_energy
+
+        scaled_segments.append((slot_start, slot_hours, max(slot_energy, 0.0)))
+
+    return scaled_segments
 
 
 def _collect_ratios(
@@ -165,7 +220,9 @@ def energy_from_row(
             return energy
 
     duration_raw = row.get(duration_field)
-    duration_minutes = float(duration_raw) if isinstance(duration_raw, (int, float)) else 0.0
+    duration_minutes = (
+        float(duration_raw) if isinstance(duration_raw, (int, float)) else 0.0
+    )
     if duration_minutes <= 0:
         return 0.0
 
@@ -178,4 +235,3 @@ def cumulative_update(current: float | None, delta: float) -> float:
 
     base = current or 0.0
     return base + delta
-

@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from itertools import accumulate
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, Iterable, cast
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, call
 
@@ -91,6 +91,10 @@ from custom_components.securemtr.utils import assign_report_day
 from homeassistant.util import dt as dt_util
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from homeassistant.const import UnitOfEnergy
+from homeassistant.components.recorder.statistics import (
+    StatisticData,
+    StatisticMetaData,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_registry import RegistryEntryDisabler
 
@@ -153,6 +157,16 @@ def store_instances(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
     monkeypatch.setattr("custom_components.securemtr.Store", factory)
     return instances
+
+
+@pytest.fixture(autouse=True)
+def stub_external_statistics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent recorder statistics writes during tests."""
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 @pytest.mark.asyncio
@@ -245,6 +259,8 @@ async def test_close_client_session_invokes_async_close() -> None:
     session = StubSession()
     await securemtr_module._async_close_client_session(session)
     assert session.invoked
+
+
 class FakeBeanbagBackend:
     """Capture login requests and provide canned responses."""
 
@@ -731,9 +747,7 @@ async def test_async_setup_entry_starts_backend(
     """Verify that setup schedules the Beanbag login and stores runtime data."""
 
     fake_metrics = AsyncMock()
-    monkeypatch.setattr(
-        "custom_components.securemtr.consumption_metrics", fake_metrics
-    )
+    monkeypatch.setattr("custom_components.securemtr.consumption_metrics", fake_metrics)
 
     hass = FakeHass()
     callbacks = track_time_spy(hass)
@@ -821,9 +835,7 @@ async def test_async_setup_entry_starts_backend(
 
     meters = hass.config_entries.async_entries(UTILITY_METER_DOMAIN)
     assert len(meters) == 4
-    assert {
-        meter.unique_id for meter in meters
-    } == {
+    assert {meter.unique_id for meter in meters} == {
         "securemtr_user_example_com_primary_daily_utility_meter",
         "securemtr_user_example_com_primary_weekly_utility_meter",
         "securemtr_user_example_com_boost_daily_utility_meter",
@@ -863,9 +875,7 @@ async def test_consumption_scheduler_fires_with_frozen_clock(
     )
 
     fake_metrics = AsyncMock()
-    monkeypatch.setattr(
-        "custom_components.securemtr.consumption_metrics", fake_metrics
-    )
+    monkeypatch.setattr("custom_components.securemtr.consumption_metrics", fake_metrics)
     monkeypatch.setattr(
         "custom_components.securemtr.async_get_clientsession",
         lambda hass_obj: object(),
@@ -953,9 +963,7 @@ async def test_consumption_scheduler_handles_dst_transitions(
     )
 
     fake_metrics = AsyncMock()
-    monkeypatch.setattr(
-        "custom_components.securemtr.consumption_metrics", fake_metrics
-    )
+    monkeypatch.setattr("custom_components.securemtr.consumption_metrics", fake_metrics)
     monkeypatch.setattr(
         "custom_components.securemtr.async_get_clientsession",
         lambda hass_obj: object(),
@@ -1001,6 +1009,7 @@ async def test_consumption_scheduler_handles_dst_transitions(
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.consumption_schedule_unsub is not None
     runtime.consumption_schedule_unsub()
+
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_handles_missing_gateways(
@@ -1432,9 +1441,7 @@ async def test_consumption_metrics_refreshes_history(
     await consumption_metrics(hass, entry)
 
     assert len(backend.login_calls) == initial_logins + 1
-    assert backend.energy_history_calls[initial_history_count:] == [
-        ("gateway-1", 1)
-    ]
+    assert backend.energy_history_calls[initial_history_count:] == [("gateway-1", 1)]
     assert backend.program_calls[initial_program_calls:] == [
         ("primary", "gateway-1"),
         ("boost", "gateway-1"),
@@ -1467,9 +1474,7 @@ async def test_consumption_metrics_refreshes_history(
     assert runtime.consumption_metrics_log == expected_log
 
     fallback_power = 2.85
-    primary_energy = [
-        (120 + offset * 10) / 60 * fallback_power for offset in offsets
-    ]
+    primary_energy = [(120 + offset * 10) / 60 * fallback_power for offset in offsets]
     primary_cumulative = list(accumulate(primary_energy))
     boost_energy = [(offset * 5) / 60 * fallback_power for offset in offsets]
     boost_cumulative = list(accumulate(boost_energy))
@@ -1493,9 +1498,7 @@ async def test_consumption_metrics_refreshes_history(
     assert len(persisted["primary"]["ledger"]) == len(primary_energy)
     assert persisted["boost"]["last_processed_day"] == expected_last_day
     assert persisted["boost"]["series_start"] == expected_first_day
-    assert persisted["boost"]["cumulative_kwh"] == pytest.approx(
-        boost_cumulative[-1]
-    )
+    assert persisted["boost"]["cumulative_kwh"] == pytest.approx(boost_cumulative[-1])
     assert len(persisted["boost"]["ledger"]) == len(boost_energy)
 
     energy_state = runtime.energy_state
@@ -1505,9 +1508,7 @@ async def test_consumption_metrics_refreshes_history(
     )
     assert energy_state["primary"]["last_day"] == expected_last_day
     assert energy_state["primary"]["series_start"] == expected_first_day
-    assert energy_state["boost"]["energy_sum"] == pytest.approx(
-        boost_cumulative[-1]
-    )
+    assert energy_state["boost"]["energy_sum"] == pytest.approx(boost_cumulative[-1])
     assert energy_state["boost"]["last_day"] == expected_last_day
     assert energy_state["boost"]["series_start"] == expected_first_day
 
@@ -1616,26 +1617,6 @@ async def test_consumption_metrics_processes_only_new_days(
     fake_session = object()
     backend = FakeBeanbagBackend(fake_session)
 
-    forbidden_module = ModuleType("homeassistant.components.recorder.statistics")
-
-    def _forbidden(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("External statistics writes must not be invoked")
-
-    forbidden_module.async_add_external_statistics = _forbidden  # type: ignore[attr-defined]
-    recorder_module = ModuleType("homeassistant.components.recorder")
-    recorder_module.statistics = forbidden_module  # type: ignore[attr-defined]
-    parent_components = sys.modules.get("homeassistant.components")
-    if parent_components is None:
-        parent_components = ModuleType("homeassistant.components")
-        monkeypatch.setitem(sys.modules, "homeassistant.components", parent_components)
-    monkeypatch.setattr(parent_components, "recorder", recorder_module, raising=False)
-    monkeypatch.setitem(sys.modules, "homeassistant.components.recorder", recorder_module)
-    monkeypatch.setitem(
-        sys.modules,
-        "homeassistant.components.recorder.statistics",
-        forbidden_module,
-    )
-
     monkeypatch.setattr(
         "custom_components.securemtr.async_get_clientsession",
         lambda hass_obj: fake_session,
@@ -1711,12 +1692,121 @@ async def test_consumption_metrics_processes_only_new_days(
     assert saved_state["boost"]["cumulative_kwh"] > sum(boost_energy[:4])
 
     messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        "Updated cumulative energy state" in message for message in messages
-    ), messages
+    assert any("Updated cumulative energy state" in message for message in messages), (
+        messages
+    )
     assert any(
         "SecureMTR" in message and "energy on" in message for message in messages
     ), messages
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_emits_hourly_statistics(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+) -> None:
+    """Split runtime energy into hour-aligned statistics samples."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-hourly",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+    entry.hass = hass
+    entry.options = {
+        CONF_TIME_ZONE: "Europe/London",
+        CONF_PRIMARY_ANCHOR: "05:00:00",
+        CONF_BOOST_ANCHOR: "05:00:00",
+        CONF_PREFER_DEVICE_ENERGY: True,
+    }
+
+    class SegmentBackend(FakeBeanbagBackend):
+        async def read_energy_history(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            window_index: int = 1,
+        ) -> list[BeanbagEnergySample]:
+            self.energy_history_calls.append((gateway_id, window_index))
+            sample_day = datetime(2023, 12, 3, tzinfo=timezone.utc)
+            return [
+                BeanbagEnergySample(
+                    timestamp=int(sample_day.timestamp()),
+                    primary_energy_kwh=2.17,
+                    boost_energy_kwh=0.0,
+                    primary_scheduled_minutes=130,
+                    primary_active_minutes=130,
+                    boost_scheduled_minutes=0,
+                    boost_active_minutes=0,
+                )
+            ]
+
+        async def read_weekly_program(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            zone: str,
+        ) -> WeeklyProgram | None:
+            self.program_calls.append((zone, gateway_id))
+            return None
+
+    backend = SegmentBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+",
+        gateway_id="gateway-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    captured: list[tuple[StatisticMetaData, list[StatisticData]]] = []
+
+    def capture_statistics(
+        _hass: HomeAssistant,
+        metadata: StatisticMetaData,
+        statistics: Iterable[StatisticData],
+    ) -> None:
+        captured.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        capture_statistics,
+    )
+
+    await consumption_metrics(hass, entry)
+
+    assert len(captured) == 1
+    metadata, samples = captured[0]
+    assert metadata["statistic_id"] == "sensor.securemtr_primary_energy_kwh"
+    assert metadata["source"] == DOMAIN
+    assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
+    assert metadata["has_sum"] is True
+    assert metadata["has_mean"] is False
+
+    assert len(samples) == 3
+    starts = [sample["start"] for sample in samples]
+    assert [start.hour for start in starts] == [5, 6, 7]
+    assert all(start.tzinfo == ZoneInfo("Europe/London") for start in starts)
+
+    sums = [sample["sum"] for sample in samples]
+    assert sums == pytest.approx([2.85, 5.7, 6.175])
+    deltas = [
+        samples[0]["sum"],
+        samples[1]["sum"] - samples[0]["sum"],
+        samples[2]["sum"] - samples[1]["sum"],
+    ]
+    assert deltas == pytest.approx([2.85, 2.85, 0.475])
+    states = [sample["state"] for sample in samples]
+    assert states == pytest.approx(sums)
 
 
 @pytest.mark.asyncio
@@ -1824,9 +1914,7 @@ async def test_energy_dashboard_flow_validates_sensor_states(
 
     assert primary_sensor.device_class == DEVICE_CLASS_ENERGY
     assert primary_sensor.state_class == STATE_CLASS_TOTAL_INCREASING
-    assert (
-        primary_sensor.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
-    )
+    assert primary_sensor.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
     assert boost_sensor.device_class == DEVICE_CLASS_ENERGY
 
     first_day_iso = assign_report_day(
@@ -1887,12 +1975,10 @@ async def test_energy_dashboard_flow_validates_sensor_states(
         ).isoformat()
 
         expected_primary = sum(
-            (sample.primary_active_minutes / 60) * fallback_power_kw
-            for sample in batch
+            (sample.primary_active_minutes / 60) * fallback_power_kw for sample in batch
         )
         expected_boost = sum(
-            (sample.boost_active_minutes / 60) * fallback_power_kw
-            for sample in batch
+            (sample.boost_active_minutes / 60) * fallback_power_kw for sample in batch
         )
 
         primary_state = energy_state["primary"]
@@ -1922,9 +2008,7 @@ async def test_energy_dashboard_flow_validates_sensor_states(
         }
 
         persisted = store_instances[0].saved[-1]
-        assert persisted["primary"]["cumulative_kwh"] == pytest.approx(
-            expected_primary
-        )
+        assert persisted["primary"]["cumulative_kwh"] == pytest.approx(expected_primary)
         assert persisted["boost"]["cumulative_kwh"] == pytest.approx(expected_boost)
         assert len(persisted["primary"]["ledger"]) == len(batch)
         assert len(persisted["boost"]["ledger"]) == len(batch)
@@ -2256,6 +2340,8 @@ async def test_reset_service_validates_runtime(monkeypatch: pytest.MonkeyPatch) 
     assert created == [store]
     assert runtime.energy_accumulator is not None
     assert dispatch_calls[-1] == (hass, "entry")
+
+
 @pytest.mark.asyncio
 async def test_async_ensure_utility_meters_requires_helper_methods() -> None:
     """Skip helper creation when config_entries lacks required APIs."""
@@ -2375,12 +2461,15 @@ async def test_async_ensure_utility_meters_skips_new_style_helpers() -> None:
     await _async_ensure_utility_meters(hass, entry)
 
     assert hass.config_entries.removed == []
-    assert sum(
-        1
-        for helper in hass.config_entries.entries
-        if helper.unique_id
-        == "securemtr_user_example_com_primary_daily_utility_meter"
-    ) == 1
+    assert (
+        sum(
+            1
+            for helper in hass.config_entries.entries
+            if helper.unique_id
+            == "securemtr_user_example_com_primary_daily_utility_meter"
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -2396,9 +2485,7 @@ async def test_async_ensure_utility_meters_removes_legacy_helpers() -> None:
                     unique_id="securemtr_entry_primary_daily_utility_meter",
                     entry_id="securemtr_um_entry_primary_daily",
                     domain=UTILITY_METER_DOMAIN,
-                    options={
-                        CONF_SOURCE_SENSOR: "sensor.securemtr_primary_energy_kwh"
-                    },
+                    options={CONF_SOURCE_SENSOR: "sensor.securemtr_primary_energy_kwh"},
                 )
             ]
             self.added: list[ConfigEntry] = []
@@ -2431,7 +2518,11 @@ async def test_async_ensure_utility_meters_removes_legacy_helpers() -> None:
 
     new_unique_id = "securemtr_user_example_com_primary_daily_utility_meter"
     assert (
-        sum(1 for helper in hass.config_entries.entries if helper.unique_id == new_unique_id)
+        sum(
+            1
+            for helper in hass.config_entries.entries
+            if helper.unique_id == new_unique_id
+        )
         == 1
     )
 

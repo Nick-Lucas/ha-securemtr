@@ -15,6 +15,7 @@ from custom_components.securemtr.utils import (
     calibrate_energy_scale,
     cumulative_update,
     energy_from_row,
+    split_runtime_segments,
     safe_anchor_datetime,
     to_local,
 )
@@ -152,6 +153,33 @@ def test_safe_anchor_datetime_clamps_to_end_of_day_with_seconds() -> None:
     tz = _ForwardTZ()
     anchor = safe_anchor_datetime(date(2024, 4, 1), time(23, 59, 30), tz)
     assert anchor == datetime(2024, 4, 1, 23, 59, 59, 999999, tzinfo=tz)
+
+
+def test_split_runtime_segments_requires_aware_anchor() -> None:
+    """split_runtime_segments should reject naive anchors."""
+
+    with pytest.raises(ValueError):
+        split_runtime_segments(datetime(2024, 4, 1, 5, 0), 1.0, 1.0)
+
+
+def test_split_runtime_segments_handles_zero_runtime_or_energy() -> None:
+    """split_runtime_segments should return an empty list for zero runtime or energy."""
+
+    anchor = datetime(2024, 4, 1, 5, tzinfo=ZoneInfo("Europe/London"))
+    assert split_runtime_segments(anchor, 0.0, 1.0) == []
+    assert split_runtime_segments(anchor, 1.0, 0.0) == []
+
+
+def test_split_runtime_segments_truncates_at_day_boundary() -> None:
+    """split_runtime_segments should cap segments at the end of the day."""
+
+    anchor = datetime(2024, 4, 1, 23, tzinfo=ZoneInfo("Europe/London"))
+    segments = split_runtime_segments(anchor, 3.0, 4.5)
+    assert len(segments) == 1
+    slot_start, slot_hours, slot_energy = segments[0]
+    assert slot_start.hour == 23
+    assert slot_hours == pytest.approx(1.0)
+    assert slot_energy == pytest.approx(4.5)
 
 
 def test_calibrate_energy_scale_prefers_device_scaling() -> None:

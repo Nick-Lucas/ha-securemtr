@@ -15,6 +15,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientSession, ClientWebSocketResponse
 from homeassistant import config_entries as hass_config_entries
+from homeassistant.components.recorder.statistics import (
+    StatisticData,
+    StatisticMetaData,
+    async_add_external_statistics,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_EMAIL,
@@ -22,6 +27,7 @@ from homeassistant.const import (
     CONF_PASSWORD,
     CONF_TIME_ZONE,
     EVENT_HOMEASSISTANT_CLOSE,
+    UnitOfEnergy,
 )
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
@@ -48,6 +54,7 @@ from .utils import (
     calibrate_energy_scale,
     energy_from_row,
     safe_anchor_datetime,
+    split_runtime_segments,
 )
 
 DOMAIN = "securemtr"
@@ -127,9 +134,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         await accumulator.async_reset_zone(zone)
 
         runtime.energy_state = accumulator.as_sensor_state()
-        _LOGGER.info(
-            "Reset cumulative energy state for %s zone %s", entry_id, zone
-        )
+        _LOGGER.info("Reset cumulative energy state for %s zone %s", entry_id, zone)
         async_dispatch_runtime_update(hass, entry_id)
 
     hass.services.async_register(
@@ -141,9 +146,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     domain_data[_RESET_SERVICE_FLAG] = True
 
 
-async def _async_ensure_utility_meters(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> None:
+async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Create daily and weekly utility_meter helpers for the entry if needed."""
 
     entry_identifier = _entry_display_name(entry)
@@ -168,9 +171,7 @@ async def _async_ensure_utility_meters(
         return
 
     try:
-        helper_entries = list(
-            config_entries_helper.async_entries(UTILITY_METER_DOMAIN)
-        )
+        helper_entries = list(config_entries_helper.async_entries(UTILITY_METER_DOMAIN))
     except Exception:  # pragma: no cover - defensive guard for helper behaviour
         _LOGGER.exception(
             "Unable to inspect existing utility meter helpers for %s",
@@ -206,18 +207,13 @@ async def _async_ensure_utility_meters(
             )
             entry_id = f"securemtr_um_{helper_identifier}_{zone_key}_{cycle}"
 
-            source_helpers = list(
-                helpers_by_source.get((source_entity, cycle), [])
-            )
+            source_helpers = list(helpers_by_source.get((source_entity, cycle), []))
             legacy_cycle_helpers = helpers_by_source.get((source_entity, None))
             if legacy_cycle_helpers:
                 source_helpers.extend(list(legacy_cycle_helpers))
             for legacy_entry in source_helpers:
                 legacy_unique = getattr(legacy_entry, "unique_id", None)
-                if (
-                    legacy_unique == unique_id
-                    and legacy_entry.entry_id == entry_id
-                ):
+                if legacy_unique == unique_id and legacy_entry.entry_id == entry_id:
                     helpers = helpers_by_source.get((source_entity, None))
                     if helpers is not None:
                         with suppress(ValueError):
@@ -228,7 +224,9 @@ async def _async_ensure_utility_meters(
 
                 try:
                     await config_entries_helper.async_remove(legacy_entry.entry_id)
-                except Exception:  # pragma: no cover - defensive guard for helper writes
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive guard for helper writes
                     _LOGGER.exception(
                         "Failed to remove legacy utility meter helper %s for %s zone %s",
                         legacy_entry.entry_id,
@@ -269,9 +267,7 @@ async def _async_ensure_utility_meters(
                 )
                 continue
 
-            meter_name = (
-                f"SecureMTR {zone_label} Energy {cycle.capitalize()}"
-            )
+            meter_name = f"SecureMTR {zone_label} Energy {cycle.capitalize()}"
             options: dict[str, Any] = {
                 CONF_NAME: meter_name,
                 CONF_SOURCE_SENSOR: source_entity,
@@ -824,7 +820,9 @@ async def _async_fetch_controller(
     runtime.timed_boost_enabled = state_snapshot.timed_boost_enabled
     runtime.timed_boost_active = state_snapshot.timed_boost_active
     runtime.timed_boost_end_minute = state_snapshot.timed_boost_end_minute
-    runtime.timed_boost_end_time = coerce_end_time(state_snapshot.timed_boost_end_minute)
+    runtime.timed_boost_end_time = coerce_end_time(
+        state_snapshot.timed_boost_end_minute
+    )
 
     return _build_controller(metadata, gateway)
 
@@ -1110,11 +1108,15 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     energy_changed = False
     runtime_updated = False
 
+    statistics_samples: dict[str, list[StatisticData]] = {}
+
     for zone_key, context in contexts.items():
         calibration = calibrations[zone_key]
         latest_runtime_hours: float | None = None
         latest_scheduled_hours: float | None = None
         latest_day: date | None = None
+        running_sum = accumulator.zone_total(zone_key)
+        zone_records: list[StatisticData] = []
 
         for row in processed_rows:
             report_day: date = row["report_day"]
@@ -1127,12 +1129,13 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 options.fallback_power_kw,
             )
             energy_value = max(0.0, energy_value)
+            before_total = running_sum
             updated = await accumulator.async_add_day(
                 zone_key, report_day, energy_value
             )
+            zone_total = accumulator.zone_total(zone_key)
             if updated:
                 energy_changed = True
-                zone_total = accumulator.zone_total(zone_key)
                 _LOGGER.info(
                     "SecureMTR %s energy on %s for %s: day=%.3f kWh cumulative=%.3f kWh",
                     context.label,
@@ -1175,9 +1178,30 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 len(intervals),
             )
 
+            segment_energy = zone_total - before_total
+            if (
+                updated
+                and runtime_hours > 0
+                and energy_value > 0
+                and segment_energy > 0
+            ):
+                records = _build_zone_statistics_samples(
+                    anchor,
+                    runtime_hours,
+                    segment_energy,
+                    before_total,
+                )
+                if records:
+                    zone_records.extend(records)
+
+            running_sum = zone_total
+
             latest_runtime_hours = runtime_hours
             latest_scheduled_hours = scheduled_hours
             latest_day = report_day
+
+        if zone_records:
+            statistics_samples[zone_key] = zone_records
 
         if latest_day is not None:
             runtime_updated = True
@@ -1215,6 +1239,17 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         }
 
     runtime.statistics_recent = recent_measurements
+
+    for zone_key, samples in statistics_samples.items():
+        metadata: StatisticMetaData = {
+            "has_mean": False,
+            "has_sum": True,
+            "name": None,
+            "source": DOMAIN,
+            "statistic_id": f"sensor.securemtr_{zone_key}_energy_kwh",
+            "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
+        }
+        async_add_external_statistics(hass, metadata, samples)
 
     if runtime_updated:
         async_dispatch_runtime_update(hass, entry.entry_id)
@@ -1357,6 +1392,35 @@ async def _read_zone_program(
     return None
 
 
+def _build_zone_statistics_samples(
+    anchor: datetime,
+    runtime_hours: float,
+    segment_energy: float,
+    before_total: float,
+) -> list[StatisticData]:
+    """Return statistic samples for a runtime segment anchored to a day."""
+
+    if runtime_hours <= 0 or segment_energy <= 0:
+        return []
+
+    segments = split_runtime_segments(anchor, runtime_hours, segment_energy)
+    cumulative = before_total
+    records: list[StatisticData] = []
+    for slot_start, _slot_hours, slot_energy in segments:
+        if slot_energy <= 0:
+            continue
+        cumulative += slot_energy
+        records.append(
+            StatisticData(
+                start=slot_start,
+                sum=cumulative,
+                state=cumulative,
+            )
+        )
+
+    return records
+
+
 def _resolve_anchor(
     report_day: date,
     context: ZoneContext,
@@ -1377,7 +1441,9 @@ def _resolve_anchor(
         anchor = schedule_anchor
         anchor_source = "schedule"
     else:
-        anchor = safe_anchor_datetime(report_day, context.fallback_anchor, options.timezone)
+        anchor = safe_anchor_datetime(
+            report_day, context.fallback_anchor, options.timezone
+        )
 
     _LOGGER.debug(
         "%s anchor for %s on %s using %s: %s",
