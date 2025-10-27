@@ -33,6 +33,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
@@ -200,27 +201,59 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
 
     helper_identifier = _utility_meter_identifier(entry)
 
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime = domain_state.get(entry.entry_id)
+    controller = getattr(runtime, "controller", None)
+    energy_entity_ids = _energy_sensor_entity_ids(hass, entry, controller)
+
     for zone_key, zone_label in UTILITY_METER_ZONE_LABELS.items():
-        source_entity = f"sensor.securemtr_{zone_key}_energy_kwh"
+        source_entity = energy_entity_ids.get(zone_key)
+        if source_entity is None:
+            continue
+        legacy_source = f"sensor.securemtr_{zone_key}_energy_kwh"
+        fallback_source = (
+            f"sensor.{DOMAIN}_{_controller_slug(entry, None)}_{zone_key}_energy_kwh"
+        )
+        source_candidates = [source_entity]
+        if legacy_source != source_entity:
+            source_candidates.append(legacy_source)
+        if fallback_source not in source_candidates:
+            source_candidates.append(fallback_source)
         for cycle in UTILITY_METER_CYCLES:
             unique_id = (
                 f"securemtr_{helper_identifier}_{zone_key}_{cycle}_utility_meter"
             )
             entry_id = f"securemtr_um_{helper_identifier}_{zone_key}_{cycle}"
 
-            source_helpers = list(helpers_by_source.get((source_entity, cycle), []))
-            legacy_cycle_helpers = helpers_by_source.get((source_entity, None))
-            if legacy_cycle_helpers:
-                source_helpers.extend(list(legacy_cycle_helpers))
+            source_helpers: list[ConfigEntry] = []
+            for candidate in source_candidates:
+                source_helpers.extend(helpers_by_source.get((candidate, cycle), []))
+                legacy_cycle_helpers = helpers_by_source.get((candidate, None))
+                if legacy_cycle_helpers:
+                    source_helpers.extend(list(legacy_cycle_helpers))
+
+            seen_entries: set[str] = set()
             for legacy_entry in source_helpers:
+                if legacy_entry.entry_id in seen_entries:
+                    continue
+                seen_entries.add(legacy_entry.entry_id)
                 legacy_unique = getattr(legacy_entry, "unique_id", None)
-                if legacy_unique == unique_id and legacy_entry.entry_id == entry_id:
-                    helpers = helpers_by_source.get((source_entity, None))
-                    if helpers is not None:
-                        with suppress(ValueError):
-                            helpers.remove(legacy_entry)
-                        if not helpers:
-                            helpers_by_source.pop((source_entity, None), None)
+                meter_type = legacy_entry.options.get(CONF_METER_TYPE)
+                if (
+                    legacy_unique == unique_id
+                    and legacy_entry.entry_id == entry_id
+                    and legacy_entry.options.get(CONF_SOURCE_SENSOR) == source_entity
+                    and (meter_type == cycle or meter_type is None)
+                ):
+                    for candidate in source_candidates:
+                        for helper_key in ((candidate, cycle), (candidate, None)):
+                            helpers = helpers_by_source.get(helper_key)
+                            if helpers is None:
+                                continue
+                            with suppress(ValueError):
+                                helpers.remove(legacy_entry)
+                            if not helpers:
+                                helpers_by_source.pop(helper_key, None)
                     continue
 
                 try:
@@ -239,17 +272,15 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                 if isinstance(legacy_unique, str):
                     existing_entries.pop(legacy_unique, None)
 
-                for helper_key in (
-                    (source_entity, cycle),
-                    (source_entity, None),
-                ):
-                    helpers = helpers_by_source.get(helper_key)
-                    if helpers is None:
-                        continue
-                    with suppress(ValueError):
-                        helpers.remove(legacy_entry)
-                    if not helpers:
-                        helpers_by_source.pop(helper_key, None)
+                for candidate in source_candidates:
+                    for helper_key in ((candidate, cycle), (candidate, None)):
+                        helpers = helpers_by_source.get(helper_key)
+                        if helpers is None:
+                            continue
+                        with suppress(ValueError):
+                            helpers.remove(legacy_entry)
+                        if not helpers:
+                            helpers_by_source.pop(helper_key, None)
 
                 _LOGGER.info(
                     "Removed legacy utility meter helper %s for %s zone %s (source=%s)",
@@ -259,14 +290,21 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                     source_entity,
                 )
 
-            if unique_id in existing_entries:
-                _LOGGER.debug(
-                    "Utility meter helper already present for %s zone %s cycle %s",
-                    entry_identifier,
-                    zone_key,
-                    cycle,
-                )
-                continue
+            existing_entry = existing_entries.get(unique_id)
+            if existing_entry is not None:
+                existing_meter_type = existing_entry.options.get(CONF_METER_TYPE)
+                if (
+                    existing_entry.options.get(CONF_SOURCE_SENSOR) == source_entity
+                    and (existing_meter_type == cycle or existing_meter_type is None)
+                ):
+                    _LOGGER.debug(
+                        "Utility meter helper already present for %s zone %s cycle %s",
+                        entry_identifier,
+                        zone_key,
+                        cycle,
+                    )
+                    continue
+                existing_entries.pop(unique_id, None)
 
             meter_name = f"SecureMTR {zone_label} Energy {cycle.capitalize()}"
             options: dict[str, Any] = {
@@ -349,6 +387,7 @@ class SecuremtrRuntimeData:
     """Track runtime Beanbag backend state for a config entry."""
 
     backend: BeanbagBackend
+    config_entry: ConfigEntry | None = None
     http_session: ClientSession | None = None
     session: BeanbagSession | None = None
     websocket: ClientWebSocketResponse | None = None
@@ -372,6 +411,7 @@ class SecuremtrRuntimeData:
     energy_state: dict[str, Any] | None = None
     energy_accumulator: EnergyAccumulator | None = None
     statistics_recent: dict[str, Any] | None = None
+    energy_entity_ids: dict[str, str] = field(default_factory=dict)
 
 
 def _entry_display_name(entry: ConfigEntry) -> str:
@@ -412,6 +452,87 @@ def _utility_meter_identifier(entry: ConfigEntry) -> str:
 
     slug = re.sub(r"[^0-9A-Za-z]+", "_", candidate).strip("_").lower()
     return slug or DOMAIN
+
+
+def _slugify_identifier(identifier: str) -> str:
+    """Return a slug representation matching entity identifier rules."""
+
+    return (
+        "".join(ch.lower() if ch.isalnum() else "_" for ch in identifier).strip("_")
+        or DOMAIN
+    )
+
+
+def _controller_slug(
+    entry: ConfigEntry, controller: "SecuremtrController" | None
+) -> str:
+    """Return the identifier slug for a controller or entry metadata."""
+
+    candidate: str | None = None
+    if controller is not None:
+        candidate = controller.serial_number or controller.identifier
+
+    if not candidate:
+        data = getattr(entry, "data", None)
+        if isinstance(data, Mapping):
+            raw_serial = data.get("serial_number")
+            if isinstance(raw_serial, str) and raw_serial.strip():
+                candidate = raw_serial.strip()
+
+    if not candidate:
+        unique_id = getattr(entry, "unique_id", None)
+        if isinstance(unique_id, str) and unique_id.strip():
+            candidate = unique_id.strip()
+
+    if not candidate:
+        entry_id = getattr(entry, "entry_id", None)
+        if isinstance(entry_id, str) and entry_id.strip():
+            candidate = entry_id.strip()
+
+    if not candidate:
+        candidate = DOMAIN
+
+    return _slugify_identifier(candidate)
+
+
+def _energy_sensor_entity_ids(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    controller: "SecuremtrController" | None,
+) -> dict[str, str]:
+    """Return the energy sensor entity IDs for each controller zone."""
+
+    registry = er.async_get(hass)
+    entity_ids: dict[str, str] = {}
+    suffixes = {zone: f"_{zone}_energy_kwh" for zone in ENERGY_ZONES}
+
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime = domain_state.get(entry.entry_id)
+    if runtime is not None:
+        runtime_ids = getattr(runtime, "energy_entity_ids", None)
+        if isinstance(runtime_ids, dict):
+            for zone, entity_id in runtime_ids.items():
+                if zone in suffixes and isinstance(entity_id, str):
+                    entity_ids[zone] = entity_id
+
+    for reg_entry in registry.async_entries():
+        if getattr(reg_entry, "config_entry_id", None) != entry.entry_id:
+            continue
+        if getattr(reg_entry, "platform", None) != DOMAIN:
+            continue
+        unique_id = getattr(reg_entry, "unique_id", None)
+        entity_id = getattr(reg_entry, "entity_id", None)
+        if not isinstance(unique_id, str) or not isinstance(entity_id, str):
+            continue
+        for zone, suffix in suffixes.items():
+            if unique_id.endswith(suffix):
+                entity_ids[zone] = entity_id
+
+    slug = _controller_slug(entry, controller)
+    for zone, suffix in suffixes.items():
+        entity_ids.setdefault(zone, f"sensor.{DOMAIN}_{slug}{suffix}")
+
+    return entity_ids
 
 
 def async_get_clientsession(hass: HomeAssistant) -> ClientSession:
@@ -476,6 +597,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime = SecuremtrRuntimeData(
         backend=BeanbagBackend(session), http_session=session
     )
+    runtime.config_entry = entry
     hass.data[DOMAIN][entry.entry_id] = runtime
 
     runtime.energy_store = Store(
@@ -484,7 +606,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _energy_store_key(entry),
     )
 
-    runtime.startup_task = hass.async_create_task(_async_start_backend(entry, runtime))
+    runtime.startup_task = hass.async_create_task(
+        _async_start_backend(hass, entry, runtime)
+    )
 
     def _queue_consumption_refresh() -> None:
         """Schedule the asynchronous consumption metrics task safely."""
@@ -604,7 +728,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_start_backend(
-    entry: ConfigEntry, runtime: SecuremtrRuntimeData
+    hass: HomeAssistant, entry: ConfigEntry, runtime: SecuremtrRuntimeData
 ) -> None:
     """Authenticate with Beanbag and establish the WebSocket connection."""
 
@@ -662,6 +786,8 @@ async def _async_start_backend(
         )
     finally:
         runtime.controller_ready.set()
+
+    await _async_ensure_utility_meters(hass, entry)
 
     _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
 
@@ -1241,8 +1367,12 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     runtime.statistics_recent = recent_measurements
 
+    energy_entity_ids = _energy_sensor_entity_ids(hass, entry, controller)
+
     for zone_key, samples in statistics_samples.items():
-        statistic_id = f"sensor.securemtr_{zone_key}_energy_kwh"
+        statistic_id = energy_entity_ids.get(zone_key)
+        if statistic_id is None:
+            continue
         statistic_domain = split_statistic_id(statistic_id)[0]
         if "." in statistic_domain:
             statistic_domain = statistic_domain.split(".", 1)[0]

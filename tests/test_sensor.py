@@ -23,6 +23,11 @@ from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.exceptions import HomeAssistantError
 
 
+SERIAL_SLUG = "serial_1"
+PRIMARY_ENERGY_ENTITY_ID = f"sensor.securemtr_{SERIAL_SLUG}_primary_energy_kwh"
+BOOST_ENERGY_ENTITY_ID = f"sensor.securemtr_{SERIAL_SLUG}_boost_energy_kwh"
+
+
 @dataclass(slots=True)
 class DummyEntry:
     """Provide the minimal config entry attributes."""
@@ -186,7 +191,7 @@ async def test_energy_sensors_report_totals() -> None:
     primary_energy = sensors_by_id["serial_1_primary_energy_kwh"]
     assert isinstance(primary_energy, SecuremtrEnergyTotalSensor)
     assert primary_energy.name == "SecureMTR Primary Energy kWh"
-    assert primary_energy.entity_id == "sensor.securemtr_primary_energy_kwh"
+    assert primary_energy.entity_id == PRIMARY_ENERGY_ENTITY_ID
     assert primary_energy.native_value == pytest.approx(12.5)
     assert (
         primary_energy.native_unit_of_measurement
@@ -203,10 +208,30 @@ async def test_energy_sensors_report_totals() -> None:
     assert device_info["identifiers"] == {(DOMAIN, "serial-1")}
     assert device_info["manufacturer"] == "Secure Meters"
 
+    runtime.energy_entity_ids = {}
+    runtime.config_entry = DummyEntry(entry_id="entry")
+    loop = asyncio.get_running_loop()
+    primary_energy.hass = SimpleNamespace(
+        async_create_task=lambda coro: loop.create_task(coro),
+        data={},
+        loop=loop,
+    )
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "custom_components.securemtr._async_ensure_utility_meters",
+            _noop,
+        )
+        await primary_energy.async_added_to_hass()
+    assert runtime.energy_entity_ids["primary"] == PRIMARY_ENERGY_ENTITY_ID
+
     boost_energy = sensors_by_id["serial_1_boost_energy_kwh"]
     assert isinstance(boost_energy, SecuremtrEnergyTotalSensor)
     assert boost_energy.name == "SecureMTR Boost Energy kWh"
-    assert boost_energy.entity_id == "sensor.securemtr_boost_energy_kwh"
+    assert boost_energy.entity_id == BOOST_ENERGY_ENTITY_ID
     assert boost_energy.native_value == pytest.approx(4.75)
     assert boost_energy.extra_state_attributes == {
         "last_report_day": "2024-03-01",
