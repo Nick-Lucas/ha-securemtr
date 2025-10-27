@@ -19,6 +19,7 @@ from homeassistant.components.recorder.statistics import (
     StatisticData,
     StatisticMetaData,
     async_add_external_statistics,
+    split_statistic_id,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -1241,12 +1242,16 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     runtime.statistics_recent = recent_measurements
 
     for zone_key, samples in statistics_samples.items():
+        statistic_id = f"sensor.securemtr_{zone_key}_energy_kwh"
+        statistic_domain = split_statistic_id(statistic_id)[0]
+        if "." in statistic_domain:
+            statistic_domain = statistic_domain.split(".", 1)[0]
         metadata: StatisticMetaData = {
             "has_mean": False,
             "has_sum": True,
             "name": None,
-            "source": DOMAIN,
-            "statistic_id": f"sensor.securemtr_{zone_key}_energy_kwh",
+            "source": statistic_domain,
+            "statistic_id": statistic_id,
             "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
         }
         async_add_external_statistics(hass, metadata, samples)

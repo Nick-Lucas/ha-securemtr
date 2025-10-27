@@ -95,6 +95,7 @@ from homeassistant.const import UnitOfEnergy
 from homeassistant.components.recorder.statistics import (
     StatisticData,
     StatisticMetaData,
+    split_statistic_id,
 )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_registry import RegistryEntryDisabler
@@ -164,9 +165,19 @@ def store_instances(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 def stub_external_statistics(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prevent recorder statistics writes during tests."""
 
+    def _assert_metadata(
+        _hass: HomeAssistant,
+        metadata: StatisticMetaData,
+        _statistics: Iterable[StatisticData],
+    ) -> None:
+        domain = split_statistic_id(metadata["statistic_id"])[0]
+        if "." in domain:
+            domain = domain.split(".", 1)[0]
+        assert metadata["source"] == domain
+
     monkeypatch.setattr(
         "custom_components.securemtr.async_add_external_statistics",
-        lambda *_args, **_kwargs: None,
+        _assert_metadata,
     )
 
 
@@ -1776,6 +1787,10 @@ async def test_consumption_metrics_emits_hourly_statistics(
         metadata: StatisticMetaData,
         statistics: Iterable[StatisticData],
     ) -> None:
+        domain = split_statistic_id(metadata["statistic_id"])[0]
+        if "." in domain:
+            domain = domain.split(".", 1)[0]
+        assert metadata["source"] == domain
         captured.append((metadata, list(statistics)))
 
     monkeypatch.setattr(
@@ -1788,7 +1803,7 @@ async def test_consumption_metrics_emits_hourly_statistics(
     assert len(captured) == 1
     metadata, samples = captured[0]
     assert metadata["statistic_id"] == "sensor.securemtr_primary_energy_kwh"
-    assert metadata["source"] == DOMAIN
+    assert metadata["source"] == "sensor"
     assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
     assert metadata["has_sum"] is True
     assert metadata["has_mean"] is False
