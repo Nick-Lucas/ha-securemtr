@@ -245,8 +245,22 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
         super().__init__(runtime, controller, entry_id)
         self._zone = zone
         self._attr_name = f"SecureMTR {label} Energy kWh"
-        self._attr_unique_id = f"{self._identifier_slug()}_{zone}_energy_kwh"
-        self.entity_id = f"sensor.securemtr_{zone}_energy_kwh"
+        identifier_slug = self._identifier_slug()
+        self._attr_unique_id = f"{identifier_slug}_{zone}_energy_kwh"
+        self.entity_id = f"sensor.securemtr_{identifier_slug}_{zone}_energy_kwh"
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        runtime_ids = getattr(self._runtime, "energy_entity_ids", None)
+        if isinstance(runtime_ids, dict):
+            runtime_ids[self._zone] = self.entity_id
+
+        hass = self.hass
+        runtime_entry = getattr(self._runtime, "config_entry", None)
+        if hass is not None and runtime_entry is not None:
+            from . import _async_ensure_utility_meters  # noqa: PLC0415
+
+            hass.async_create_task(_async_ensure_utility_meters(hass, runtime_entry))
 
     def _zone_state(self) -> dict[str, object] | None:
         """Return the persisted energy state for the zone."""

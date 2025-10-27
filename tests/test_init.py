@@ -32,9 +32,11 @@ from custom_components.securemtr import (
     _build_controller,
     _build_zone_statistics_samples,
     _energy_store_key,
+    _energy_sensor_entity_ids,
     _load_statistics_options,
     _read_zone_program,
     _resolve_anchor,
+    _controller_slug,
     _utility_meter_identifier,
     CONF_METER_DELTA_VALUES,
     CONF_METER_NET_CONSUMPTION,
@@ -89,6 +91,7 @@ from custom_components.securemtr.sensor import (
     async_setup_entry as sensor_async_setup_entry,
 )
 from custom_components.securemtr.utils import assign_report_day
+from custom_components.securemtr.entity import slugify_identifier
 from homeassistant.util import dt as dt_util
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from homeassistant.const import UnitOfEnergy
@@ -99,6 +102,15 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_registry import RegistryEntryDisabler
+
+
+PRIMARY_SERIAL_SLUG = "serial_1"
+PRIMARY_ENERGY_ENTITY_ID = f"sensor.securemtr_{PRIMARY_SERIAL_SLUG}_primary_energy_kwh"
+BOOST_ENERGY_ENTITY_ID = f"sensor.securemtr_{PRIMARY_SERIAL_SLUG}_boost_energy_kwh"
+IDENTIFIER_SLUG = "controller_1"
+IDENTIFIER_PRIMARY_ENERGY_ENTITY_ID = (
+    f"sensor.securemtr_{IDENTIFIER_SLUG}_primary_energy_kwh"
+)
 
 
 @dataclass(slots=True)
@@ -698,6 +710,7 @@ class FakeHass:
         self._tasks: list[asyncio.Task[Any]] = []
         self.config_entries = FakeConfigEntries()
         self.config = SimpleNamespace(time_zone=DEFAULT_TIMEZONE)
+        self.entity_registry = FakeEntityRegistry([])
         self.services = FakeServiceRegistry()
         try:
             self.loop = asyncio.get_running_loop()
@@ -720,6 +733,16 @@ class FakeHass:
 
     def verify_event_loop_thread(self, _caller: str) -> None:
         """Stub verification hook for dispatcher calls."""
+
+
+@pytest.fixture(autouse=True)
+def entity_registry_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch entity registry lookups to return the fake registry."""
+
+    monkeypatch.setattr(
+        "homeassistant.helpers.entity_registry.async_get",
+        lambda hass: hass.entity_registry,
+    )
 
 
 @pytest.fixture
@@ -854,10 +877,7 @@ async def test_async_setup_entry_starts_backend(
         "securemtr_user_example_com_boost_weekly_utility_meter",
     }
 
-    expected_sources = {
-        "sensor.securemtr_primary_energy_kwh",
-        "sensor.securemtr_boost_energy_kwh",
-    }
+    expected_sources = {PRIMARY_ENERGY_ENTITY_ID, BOOST_ENERGY_ENTITY_ID}
 
     for meter in meters:
         assert meter.options[CONF_SOURCE_SENSOR] in expected_sources
@@ -1798,11 +1818,22 @@ async def test_consumption_metrics_emits_hourly_statistics(
         capture_statistics,
     )
 
+    hass.entity_registry = FakeEntityRegistry(
+        [
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_custom_primary_energy",
+                unique_id=f"{IDENTIFIER_SLUG}_primary_energy_kwh",
+                config_entry_id=entry.entry_id,
+                platform=DOMAIN,
+            )
+        ]
+    )
+
     await consumption_metrics(hass, entry)
 
     assert len(captured) == 1
     metadata, samples = captured[0]
-    assert metadata["statistic_id"] == "sensor.securemtr_primary_energy_kwh"
+    assert metadata["statistic_id"] == "sensor.securemtr_custom_primary_energy"
     assert metadata["source"] == "sensor"
     assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
     assert metadata["has_sum"] is True
@@ -1823,6 +1854,97 @@ async def test_consumption_metrics_emits_hourly_statistics(
     assert deltas == pytest.approx([2.85, 2.85, 0.475])
     states = [sample["state"] for sample in samples]
     assert states == pytest.approx(sums)
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_skips_statistics_without_entity(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+) -> None:
+    """Skip statistic publishing when no entity ID can be resolved."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-missing",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+    entry.hass = hass
+    entry.options = {CONF_TIME_ZONE: "Europe/London"}
+
+    class DualZoneBackend(FakeBeanbagBackend):
+        async def read_energy_history(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            window_index: int = 1,
+        ) -> list[BeanbagEnergySample]:
+            sample_day = datetime(2024, 1, 5, tzinfo=timezone.utc)
+            return [
+                BeanbagEnergySample(
+                    timestamp=int(sample_day.timestamp()),
+                    primary_energy_kwh=4.0,
+                    boost_energy_kwh=1.0,
+                    primary_scheduled_minutes=120,
+                    primary_active_minutes=120,
+                    boost_scheduled_minutes=60,
+                    boost_active_minutes=60,
+                )
+            ]
+
+        async def read_weekly_program(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            zone: str,
+        ) -> WeeklyProgram | None:
+            return None
+
+    backend = DualZoneBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+",
+        gateway_id="gateway-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    captured: list[tuple[StatisticMetaData, list[StatisticData]]] = []
+
+    def capture_statistics(
+        _hass: HomeAssistant,
+        metadata: StatisticMetaData,
+        statistics: Iterable[StatisticData],
+    ) -> None:
+        captured.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        capture_statistics,
+    )
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        lambda *args, **kwargs: {
+            "primary": "sensor.securemtr_primary_custom",
+            "boost": None,
+        },
+    )
+
+    await consumption_metrics(hass, entry)
+
+    assert len(captured) == 1
+    metadata, samples = captured[0]
+    assert metadata["statistic_id"] == "sensor.securemtr_primary_custom"
+    assert all(sample["sum"] >= 0 for sample in samples)
 
 
 @pytest.mark.asyncio
@@ -1920,13 +2042,10 @@ async def test_energy_dashboard_flow_validates_sensor_states(
         if isinstance(entity, SecuremtrEnergyTotalSensor)
     }
 
-    assert set(energy_entities) == {
-        "sensor.securemtr_primary_energy_kwh",
-        "sensor.securemtr_boost_energy_kwh",
-    }
+    assert set(energy_entities) == {PRIMARY_ENERGY_ENTITY_ID, BOOST_ENERGY_ENTITY_ID}
 
-    primary_sensor = energy_entities["sensor.securemtr_primary_energy_kwh"]
-    boost_sensor = energy_entities["sensor.securemtr_boost_energy_kwh"]
+    primary_sensor = energy_entities[PRIMARY_ENERGY_ENTITY_ID]
+    boost_sensor = energy_entities[BOOST_ENERGY_ENTITY_ID]
 
     assert primary_sensor.device_class == DEVICE_CLASS_ENERGY
     assert primary_sensor.state_class == STATE_CLASS_TOTAL_INCREASING
@@ -2380,6 +2499,9 @@ async def test_async_ensure_utility_meters_detects_existing_helpers() -> None:
 
     hass = FakeHass()
 
+    source_slug = slugify_identifier("user@example.com")
+    source_entity = f"sensor.securemtr_{source_slug}_primary_energy_kwh"
+
     existing_helper = ConfigEntry(
         data={},
         domain=UTILITY_METER_DOMAIN,
@@ -2388,7 +2510,7 @@ async def test_async_ensure_utility_meters_detects_existing_helpers() -> None:
         minor_version=2,
         source=hass_config_entries.SOURCE_SYSTEM,
         unique_id="securemtr_user_example_com_primary_daily_utility_meter",
-        options={CONF_SOURCE_SENSOR: "sensor.securemtr_primary_energy_kwh"},
+        options={CONF_SOURCE_SENSOR: source_entity},
         discovery_keys=MappingProxyType({}),
         entry_id="securemtr_um_user_example_com_primary_daily",
         subentries_data=(),
@@ -2433,6 +2555,9 @@ async def test_async_ensure_utility_meters_skips_new_style_helpers() -> None:
 
     hass = FakeHass()
 
+    source_slug = slugify_identifier("user@example.com")
+    source_entity = f"sensor.securemtr_{source_slug}_primary_energy_kwh"
+
     existing_helper = ConfigEntry(
         data={},
         domain=UTILITY_METER_DOMAIN,
@@ -2441,7 +2566,7 @@ async def test_async_ensure_utility_meters_skips_new_style_helpers() -> None:
         minor_version=2,
         source=hass_config_entries.SOURCE_SYSTEM,
         unique_id="securemtr_user_example_com_primary_daily_utility_meter",
-        options={CONF_SOURCE_SENSOR: "sensor.securemtr_primary_energy_kwh"},
+        options={CONF_SOURCE_SENSOR: source_entity},
         discovery_keys=MappingProxyType({}),
         entry_id="securemtr_um_user_example_com_primary_daily",
         subentries_data=(),
@@ -2549,6 +2674,259 @@ async def test_async_ensure_utility_meters_removes_legacy_helpers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_ensure_utility_meters_ignores_missing_zone_entities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip helper creation when no entity is resolved for a zone."""
+
+    hass = FakeHass()
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.entries: list[ConfigEntry] = []
+            self.added: list[ConfigEntry] = []
+            self.removed: list[str] = []
+
+        def async_entries(self, domain: str) -> list[ConfigEntry]:
+            assert domain == UTILITY_METER_DOMAIN
+            return list(self.entries)
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.added.append(entry_obj)
+            self.entries.append(entry_obj)
+
+        async def async_remove(self, entry_id: str) -> None:  # pragma: no cover - guard
+            self.removed.append(entry_id)
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    def _fake_energy_ids(*args: Any, **kwargs: Any) -> dict[str, str | None]:
+        return {
+            "primary": "sensor.securemtr_custom_primary_energy_kwh",
+            "boost": None,
+        }
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        _fake_energy_ids,
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert hass.config_entries.removed == []
+    assert len(hass.config_entries.added) == 2
+    assert all(
+        "boost" not in helper.unique_id for helper in hass.config_entries.entries
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_utility_meters_deduplicates_helper_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure duplicate helper listings are only processed once."""
+
+    hass = FakeHass()
+
+    duplicate_helper = ConfigEntry(
+        data={},
+        domain=UTILITY_METER_DOMAIN,
+        title="SecureMTR Primary Energy Daily",
+        version=2,
+        minor_version=2,
+        source=hass_config_entries.SOURCE_SYSTEM,
+        unique_id="securemtr_entry_primary_daily_utility_meter",
+        options={
+            CONF_SOURCE_SENSOR: "sensor.securemtr_entry_primary_energy_kwh",
+            CONF_METER_TYPE: "daily",
+        },
+        discovery_keys=MappingProxyType({}),
+        entry_id="securemtr_um_entry_primary_daily",
+        subentries_data=(),
+    )
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.entries: list[ConfigEntry] = [duplicate_helper, duplicate_helper]
+            self.added: list[ConfigEntry] = []
+            self.removed: list[str] = []
+
+        def async_entries(self, domain: str) -> list[ConfigEntry]:
+            assert domain == UTILITY_METER_DOMAIN
+            return list(self.entries)
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.added.append(entry_obj)
+            self.entries.append(entry_obj)
+
+        async def async_remove(self, entry_id: str) -> None:
+            self.removed.append(entry_id)
+            self.entries = [
+                entry for entry in self.entries if entry.entry_id != entry_id
+            ]
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    def _fake_energy_ids(*args: Any, **kwargs: Any) -> dict[str, str]:
+        return {"primary": "sensor.securemtr_entry_primary_energy_kwh"}
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        _fake_energy_ids,
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert hass.config_entries.removed == ["securemtr_um_entry_primary_daily"]
+    assert len(hass.config_entries.added) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_utility_meters_replaces_mismatched_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replace helpers when the source sensor no longer matches."""
+
+    hass = FakeHass()
+
+    mismatched_helper = ConfigEntry(
+        data={},
+        domain=UTILITY_METER_DOMAIN,
+        title="SecureMTR Primary Energy Daily",
+        version=2,
+        minor_version=2,
+        source=hass_config_entries.SOURCE_SYSTEM,
+        unique_id="securemtr_user_example_com_primary_daily_utility_meter",
+        options={
+            CONF_SOURCE_SENSOR: "sensor.securemtr_primary_energy_kwh",
+            CONF_METER_TYPE: "daily",
+        },
+        discovery_keys=MappingProxyType({}),
+        entry_id="securemtr_um_user_example_com_primary_daily",
+        subentries_data=(),
+    )
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.entries: list[ConfigEntry] = [mismatched_helper]
+            self.added: list[ConfigEntry] = []
+            self.removed: list[str] = []
+
+        def async_entries(self, domain: str) -> list[ConfigEntry]:
+            assert domain == UTILITY_METER_DOMAIN
+            return list(self.entries)
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.added.append(entry_obj)
+            self.entries.append(entry_obj)
+
+        async def async_remove(self, entry_id: str) -> None:
+            self.removed.append(entry_id)
+            self.entries = [
+                entry for entry in self.entries if entry.entry_id != entry_id
+            ]
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    def _fake_energy_ids(*args: Any, **kwargs: Any) -> dict[str, str]:
+        return {"primary": "sensor.securemtr_entry_primary_energy_kwh"}
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        _fake_energy_ids,
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert hass.config_entries.removed == [mismatched_helper.entry_id]
+    assert any(
+        helper.options.get(CONF_SOURCE_SENSOR)
+        == "sensor.securemtr_entry_primary_energy_kwh"
+        for helper in hass.config_entries.added
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_utility_meters_updates_untracked_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create new helpers when the existing entry is missing a source sensor."""
+
+    hass = FakeHass()
+
+    missing_source_helper = ConfigEntry(
+        data={},
+        domain=UTILITY_METER_DOMAIN,
+        title="SecureMTR Primary Energy Daily",
+        version=2,
+        minor_version=2,
+        source=hass_config_entries.SOURCE_SYSTEM,
+        unique_id="securemtr_user_example_com_primary_daily_utility_meter",
+        options={CONF_METER_TYPE: "daily"},
+        discovery_keys=MappingProxyType({}),
+        entry_id="securemtr_um_user_example_com_primary_daily",
+        subentries_data=(),
+    )
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.entries: list[ConfigEntry] = [missing_source_helper]
+            self.added: list[ConfigEntry] = []
+            self.removed: list[str] = []
+
+        def async_entries(self, domain: str) -> list[ConfigEntry]:
+            assert domain == UTILITY_METER_DOMAIN
+            return list(self.entries)
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.added.append(entry_obj)
+            self.entries.append(entry_obj)
+
+        async def async_remove(self, entry_id: str) -> None:
+            self.removed.append(entry_id)
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    def _fake_energy_ids(*args: Any, **kwargs: Any) -> dict[str, str]:
+        return {"primary": "sensor.securemtr_entry_primary_energy_kwh"}
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        _fake_energy_ids,
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert hass.config_entries.removed == []
+    assert len(hass.config_entries.added) == 2
+    assert any(
+        helper.options.get(CONF_SOURCE_SENSOR)
+        == "sensor.securemtr_entry_primary_energy_kwh"
+        for helper in hass.config_entries.added
+    )
+
+
+@pytest.mark.asyncio
 async def test_async_start_backend_handles_unexpected_errors() -> None:
     """Ensure unexpected login errors unblock waiting tasks."""
 
@@ -2562,7 +2940,9 @@ async def test_async_start_backend_handles_unexpected_errors() -> None:
         data={"email": "user@example.com", "password": "digest"},
     )
 
-    await _async_start_backend(entry, runtime)
+    hass = FakeHass()
+
+    await _async_start_backend(hass, entry, runtime)
     assert runtime.controller_ready.is_set()
 
 
@@ -2802,6 +3182,91 @@ def test_utility_meter_identifier_has_safe_fallbacks() -> None:
 
     entry = SimpleNamespace(data={}, unique_id=None, entry_id=None)
     assert _utility_meter_identifier(entry) == DOMAIN
+
+
+def test_controller_slug_prefers_controller_serial() -> None:
+    """Prefer the controller serial number when available."""
+
+    entry = DummyConfigEntry(entry_id="entry", data={})
+    controller = SecuremtrController(
+        identifier="controller-1",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number="SER-123",
+    )
+    assert _controller_slug(entry, controller) == slugify_identifier("SER-123")
+
+
+def test_controller_slug_uses_entry_serial_data() -> None:
+    """Use the entry's stored serial when the controller is unavailable."""
+
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"serial_number": " Device-99 "},
+    )
+    assert _controller_slug(entry, None) == slugify_identifier("Device-99")
+
+
+def test_controller_slug_falls_back_to_entry_id() -> None:
+    """Use the entry identifier when serial metadata is missing."""
+
+    entry = DummyConfigEntry(entry_id="Entry Identifier", data={}, unique_id=None)
+    assert _controller_slug(entry, None) == slugify_identifier("Entry Identifier")
+
+
+def test_controller_slug_defaults_to_domain() -> None:
+    """Default to the domain slug when no identifiers are provided."""
+
+    entry = DummyConfigEntry(entry_id=" ", data={}, unique_id=None)
+    assert _controller_slug(entry, None) == DOMAIN
+
+
+def test_energy_sensor_entity_ids_prioritizes_runtime_and_registry() -> None:
+    """Resolve energy sensor entity IDs from runtime data and the registry."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="User@Example.Com",
+        data={"serial_number": "SER-1"},
+    )
+
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.energy_entity_ids = {"primary": "sensor.override_primary"}
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    hass.entity_registry = FakeEntityRegistry(
+        [
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_custom_boost_energy",
+                unique_id="ser_1_boost_energy_kwh",
+                config_entry_id=entry.entry_id,
+                platform=DOMAIN,
+            ),
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_wrong_entry",
+                unique_id="ser_1_primary_energy_kwh",
+                config_entry_id="other",
+                platform=DOMAIN,
+            ),
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_wrong_platform",
+                unique_id="ser_1_primary_energy_kwh",
+                config_entry_id=entry.entry_id,
+                platform="binary_sensor",
+            ),
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_invalid_unique",
+                unique_id=123,  # type: ignore[arg-type]
+                config_entry_id=entry.entry_id,
+                platform=DOMAIN,
+            ),
+        ]
+    )
+
+    result = _energy_sensor_entity_ids(hass, entry, None)
+    assert result["primary"] == "sensor.override_primary"
+    assert result["boost"] == "sensor.securemtr_custom_boost_energy"
 
 
 def test_load_statistics_options_recovers_from_invalid_timezone(
