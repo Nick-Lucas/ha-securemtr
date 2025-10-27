@@ -30,6 +30,7 @@ from custom_components.securemtr import (
     _async_register_services,
     _async_ensure_utility_meters,
     _build_controller,
+    _build_zone_statistics_samples,
     _energy_store_key,
     _load_statistics_options,
     _read_zone_program,
@@ -3053,3 +3054,41 @@ def test_resolve_anchor_handles_missing_schedule() -> None:
     anchor, source = _resolve_anchor(date(2024, 4, 5), context, options, [])
     assert anchor.hour == 8 and anchor.minute == 45
     assert source == "configured"
+
+
+def test_build_zone_samples_rejects_non_positive_inputs() -> None:
+    """Return no samples when runtime or energy lacks a positive value."""
+
+    anchor = datetime(2024, 4, 5, 12, 0, tzinfo=ZoneInfo("UTC"))
+
+    assert not _build_zone_statistics_samples(anchor, 0.0, 1.0, 0.0)
+    assert not _build_zone_statistics_samples(anchor, 1.0, 0.0, 0.0)
+
+
+def test_build_zone_samples_skips_zero_energy_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ignore runtime segments that provide no energy contribution."""
+
+    anchor = datetime(2024, 4, 5, 6, 0, tzinfo=ZoneInfo("UTC"))
+
+    def fake_segments(
+        _anchor: datetime, _runtime: float, _energy: float
+    ) -> list[tuple[datetime, float, float]]:
+        return [
+            (anchor, 0.5, 0.0),
+            (anchor + timedelta(hours=1), 0.5, 1.5),
+        ]
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.split_runtime_segments",
+        fake_segments,
+    )
+
+    samples = _build_zone_statistics_samples(anchor, 1.0, 1.5, 2.0)
+
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample["start"] == anchor + timedelta(hours=1)
+    assert sample["sum"] == pytest.approx(3.5)
+    assert sample["state"] == pytest.approx(3.5)
