@@ -123,6 +123,8 @@ async def test_sensor_reports_end_time() -> None:
 
     runtime.websocket = None
     assert sensor.available is False
+    runtime.controller = None
+    assert sensor.available is False
 
 
 @pytest.mark.asyncio
@@ -212,6 +214,11 @@ async def test_energy_sensors_report_totals() -> None:
         "offset_kwh": 1.25,
     }
 
+    runtime.websocket = None
+    assert primary_energy.available is True
+    assert primary_energy.native_value == pytest.approx(12.5)
+    assert boost_energy.available is True
+
     primary_runtime = sensors_by_id["serial_1_primary_runtime_daily"]
     assert isinstance(primary_runtime, SecuremtrDailyDurationSensor)
     assert primary_runtime.native_value == pytest.approx(3.25)
@@ -264,3 +271,36 @@ async def test_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(HomeAssistantError):
         await async_setup_entry(hass, entry, lambda entities: None)
+
+
+@pytest.mark.asyncio
+async def test_energy_sensor_available_with_cached_state() -> None:
+    """Ensure energy totals remain available without an active websocket."""
+
+    runtime = _create_runtime()
+    runtime.websocket = None
+    runtime.energy_state = {
+        "primary": {
+            "energy_sum": 9.5,
+            "last_day": "2024-02-01",
+            "series_start": "2024-01-01",
+            "offset_kwh": 0.0,
+        }
+    }
+
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[SecuremtrSensorEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    energy_sensors = [
+        entity for entity in entities if isinstance(entity, SecuremtrEnergyTotalSensor)
+    ]
+    assert energy_sensors
+
+    primary_energy = next(
+        sensor for sensor in energy_sensors if sensor.unique_id.endswith("primary_energy_kwh")
+    )
+    assert primary_energy.available is True
+    assert primary_energy.native_value == pytest.approx(9.5)
