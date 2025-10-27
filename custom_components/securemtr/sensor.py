@@ -142,9 +142,17 @@ class SecuremtrSensorEntity(SensorEntity):
     def available(self) -> bool:
         """Return whether the backend is currently connected."""
 
-        return (
-            self._runtime.websocket is not None and self._runtime.controller is not None
-        )
+        if self._runtime.controller is None:
+            return False
+
+        if self._runtime.websocket is not None:
+            return True
+
+        energy_state = self._runtime.energy_state
+        if isinstance(energy_state, dict) and energy_state:
+            return True
+
+        return False
 
     async def async_added_to_hass(self) -> None:
         """Register dispatcher callbacks when added to Home Assistant."""
