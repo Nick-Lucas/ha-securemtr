@@ -17,6 +17,7 @@ from aiohttp import ClientSession, ClientWebSocketResponse
 from homeassistant import config_entries as hass_config_entries
 from homeassistant.components.recorder.statistics import (
     StatisticData,
+    StatisticMeanType,
     StatisticMetaData,
     async_add_external_statistics,
     split_statistic_id,
@@ -515,9 +516,7 @@ def _energy_sensor_entity_ids(
                 if zone in suffixes and isinstance(entity_id, str):
                     entity_ids[zone] = entity_id
 
-    for reg_entry in registry.async_entries():
-        if getattr(reg_entry, "config_entry_id", None) != entry.entry_id:
-            continue
+    for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         if getattr(reg_entry, "platform", None) != DOMAIN:
             continue
         unique_id = getattr(reg_entry, "unique_id", None)
@@ -1377,12 +1376,13 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         if "." in statistic_domain:
             statistic_domain = statistic_domain.split(".", 1)[0]
         metadata: StatisticMetaData = {
-            "has_mean": False,
             "has_sum": True,
+            "mean_type": StatisticMeanType.NONE,
             "name": None,
             "source": statistic_domain,
             "statistic_id": statistic_id,
             "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
+            "unit_class": "energy",
         }
         async_add_external_statistics(hass, metadata, samples)
 
