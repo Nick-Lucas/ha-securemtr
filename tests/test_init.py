@@ -632,7 +632,10 @@ class FakeEntityRegistry:
             entry.entity_id: entry for entry in entries
         }
         self._entities_data = dict(self._entries_by_id)
-        self.entities = SimpleNamespace(get_entry=self._entries_by_id.get)
+        self.entities = SimpleNamespace(
+            get_entry=self._entries_by_id.get,
+            get_entries_for_config_entry_id=self._entries_for_config_entry_id,
+        )
         self.updated: list[tuple[str, dict[str, object]]] = []
         self.removed: list[str] = []
 
@@ -640,6 +643,17 @@ class FakeEntityRegistry:
         """Return all registered entries."""
 
         return list(self._entries_by_id.values())
+
+    def _entries_for_config_entry_id(
+        self, config_entry_id: str
+    ) -> list[FakeRegistryEntry]:
+        """Return registered entries for a given config entry."""
+
+        return [
+            entry
+            for entry in self._entries_by_id.values()
+            if entry.config_entry_id == config_entry_id
+        ]
 
     def async_get(self, entity_id: str) -> FakeRegistryEntry | None:
         """Return an entity entry if present."""

@@ -516,9 +516,7 @@ def _energy_sensor_entity_ids(
                 if zone in suffixes and isinstance(entity_id, str):
                     entity_ids[zone] = entity_id
 
-    for reg_entry in registry.async_entries():
-        if getattr(reg_entry, "config_entry_id", None) != entry.entry_id:
-            continue
+    for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         if getattr(reg_entry, "platform", None) != DOMAIN:
             continue
         unique_id = getattr(reg_entry, "unique_id", None)
