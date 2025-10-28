@@ -97,6 +97,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from homeassistant.const import UnitOfEnergy
 from homeassistant.components.recorder.statistics import (
     StatisticData,
+    StatisticMeanType,
     StatisticMetaData,
     split_statistic_id,
 )
@@ -1837,7 +1838,7 @@ async def test_consumption_metrics_emits_hourly_statistics(
     assert metadata["source"] == "sensor"
     assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
     assert metadata["has_sum"] is True
-    assert metadata["has_mean"] is False
+    assert metadata["mean_type"] is StatisticMeanType.NONE
 
     assert len(samples) == 3
     starts = [sample["start"] for sample in samples]
