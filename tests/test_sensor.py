@@ -190,7 +190,7 @@ async def test_energy_sensors_report_totals() -> None:
 
     primary_energy = sensors_by_id["serial_1_primary_energy_kwh"]
     assert isinstance(primary_energy, SecuremtrEnergyTotalSensor)
-    assert primary_energy.name == "SecureMTR Primary Energy kWh"
+    assert primary_energy.translation_key == "primary_energy_total"
     assert primary_energy.entity_id == PRIMARY_ENERGY_ENTITY_ID
     assert primary_energy.native_value == pytest.approx(12.5)
     assert (
@@ -230,7 +230,7 @@ async def test_energy_sensors_report_totals() -> None:
 
     boost_energy = sensors_by_id["serial_1_boost_energy_kwh"]
     assert isinstance(boost_energy, SecuremtrEnergyTotalSensor)
-    assert boost_energy.name == "SecureMTR Boost Energy kWh"
+    assert boost_energy.translation_key == "boost_energy_total"
     assert boost_energy.entity_id == BOOST_ENERGY_ENTITY_ID
     assert boost_energy.native_value == pytest.approx(4.75)
     assert boost_energy.extra_state_attributes == {

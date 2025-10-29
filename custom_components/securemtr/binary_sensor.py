@@ -15,12 +15,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import (
-    DOMAIN,
-    SecuremtrController,
-    SecuremtrRuntimeData,
-    runtime_update_signal,
-)
+from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData, runtime_update_signal
 from .entity import build_device_info, slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
@@ -122,7 +117,7 @@ class SecuremtrBoostActiveBinarySensor(_SecuremtrBaseBinarySensor):
 
         super().__init__(runtime, controller, entry_id)
         self._attr_unique_id = f"{self._identifier_slug()}_boost_active"
-        self._attr_name = "Boost Active"
+        self._attr_translation_key = "boost_active"
 
     @property
     def is_on(self) -> bool:
