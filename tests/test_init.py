@@ -97,6 +97,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from homeassistant.const import UnitOfEnergy
 from homeassistant.components.recorder.statistics import (
     StatisticData,
+    StatisticMeanType,
     StatisticMetaData,
     split_statistic_id,
 )
@@ -631,7 +632,10 @@ class FakeEntityRegistry:
             entry.entity_id: entry for entry in entries
         }
         self._entities_data = dict(self._entries_by_id)
-        self.entities = SimpleNamespace(get_entry=self._entries_by_id.get)
+        self.entities = SimpleNamespace(
+            get_entry=self._entries_by_id.get,
+            get_entries_for_config_entry_id=self._entries_for_config_entry_id,
+        )
         self.updated: list[tuple[str, dict[str, object]]] = []
         self.removed: list[str] = []
 
@@ -639,6 +643,17 @@ class FakeEntityRegistry:
         """Return all registered entries."""
 
         return list(self._entries_by_id.values())
+
+    def _entries_for_config_entry_id(
+        self, config_entry_id: str
+    ) -> list[FakeRegistryEntry]:
+        """Return registered entries for a given config entry."""
+
+        return [
+            entry
+            for entry in self._entries_by_id.values()
+            if entry.config_entry_id == config_entry_id
+        ]
 
     def async_get(self, entity_id: str) -> FakeRegistryEntry | None:
         """Return an entity entry if present."""
@@ -1837,7 +1852,7 @@ async def test_consumption_metrics_emits_hourly_statistics(
     assert metadata["source"] == "sensor"
     assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
     assert metadata["has_sum"] is True
-    assert metadata["has_mean"] is False
+    assert metadata["mean_type"] is StatisticMeanType.NONE
 
     assert len(samples) == 3
     starts = [sample["start"] for sample in samples]
@@ -2927,23 +2942,40 @@ async def test_async_ensure_utility_meters_updates_untracked_helper(
 
 
 @pytest.mark.asyncio
-async def test_async_start_backend_handles_unexpected_errors() -> None:
-    """Ensure unexpected login errors unblock waiting tasks."""
+async def test_async_start_backend_retries_after_login_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry backend startup until the controller metadata is available."""
 
-    class ExplodingBackend(FakeBeanbagBackend):
-        async def login_and_connect(self, email: str, password: str):
-            raise RuntimeError("boom")
+    class FlakyBackend(FakeBeanbagBackend):
+        def __init__(self, session: object) -> None:
+            super().__init__(session)
+            self.attempt = 0
 
-    runtime = SecuremtrRuntimeData(backend=ExplodingBackend(object()))
+        async def login_and_connect(
+            self, email: str, password: str
+        ) -> tuple[BeanbagSession, FakeWebSocket]:
+            self.attempt += 1
+            self.login_calls.append((email, password))
+            if self.attempt < 3:
+                raise BeanbagError("temporary failure")
+            return await super().login_and_connect(email, password)
+
+    runtime = SecuremtrRuntimeData(backend=FlakyBackend(object()))
     entry = DummyConfigEntry(
         entry_id="entry",
         data={"email": "user@example.com", "password": "digest"},
     )
 
     hass = FakeHass()
+    monkeypatch.setattr("custom_components.securemtr._LOGIN_RETRY_DELAY", 0)
 
     await _async_start_backend(hass, entry, runtime)
+
+    assert runtime.controller is not None
     assert runtime.controller_ready.is_set()
+    assert runtime.backend.attempt == 3
+    assert len(runtime.backend.login_calls) >= 3
 
 
 @pytest.mark.asyncio

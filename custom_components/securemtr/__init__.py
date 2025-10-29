@@ -17,6 +17,7 @@ from aiohttp import ClientSession, ClientWebSocketResponse
 from homeassistant import config_entries as hass_config_entries
 from homeassistant.components.recorder.statistics import (
     StatisticData,
+    StatisticMeanType,
     StatisticMetaData,
     async_add_external_statistics,
     split_statistic_id,
@@ -91,6 +92,7 @@ ATTR_ENTRY_ID = "entry_id"
 ATTR_ZONE = "zone"
 ENERGY_ZONES = ("primary", "boost")
 _RESET_SERVICE_FLAG = "_reset_service_registered"
+_LOGIN_RETRY_DELAY = 5.0
 
 
 _ResultT = TypeVar("_ResultT")
@@ -515,9 +517,7 @@ def _energy_sensor_entity_ids(
                 if zone in suffixes and isinstance(entity_id, str):
                     entity_ids[zone] = entity_id
 
-    for reg_entry in registry.async_entries():
-        if getattr(reg_entry, "config_entry_id", None) != entry.entry_id:
-            continue
+    for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         if getattr(reg_entry, "platform", None) != DOMAIN:
             continue
         unique_id = getattr(reg_entry, "unique_id", None)
@@ -743,53 +743,67 @@ async def _async_start_backend(
 
     _LOGGER.info("Starting Beanbag backend for %s", entry_identifier)
 
-    try:
-        session, websocket = await runtime.backend.login_and_connect(
-            email, password_digest
-        )
-    except BeanbagError as error:
-        _LOGGER.error(
-            "Failed to initialize Beanbag backend for %s: %s", entry_identifier, error
-        )
-        runtime.controller_ready.set()
-        return
-    except Exception:
-        _LOGGER.exception(
-            "Unexpected error while initializing Beanbag backend for %s",
-            entry_identifier,
-        )
-        runtime.controller_ready.set()
-        return
-
-    runtime.session = session
-    runtime.websocket = websocket
+    controller: SecuremtrController | None = None
 
     try:
-        controller = await _async_fetch_controller(entry, runtime)
-    except BeanbagError as error:
-        _LOGGER.error(
-            "Unable to fetch securemtr controller details for %s: %s",
-            entry_identifier,
-            error,
-        )
-    except Exception:
-        _LOGGER.exception(
-            "Unexpected error while fetching securemtr controller for %s",
-            entry_identifier,
-        )
-    else:
-        runtime.controller = controller
-        _LOGGER.info(
-            "Discovered securemtr controller %s (%s)",
-            controller.identifier,
-            controller.name,
-        )
+        while controller is None:
+            try:
+                session, websocket = await runtime.backend.login_and_connect(
+                    email, password_digest
+                )
+            except BeanbagError as error:
+                _LOGGER.error(
+                    "Failed to initialize Beanbag backend for %s: %s",
+                    entry_identifier,
+                    error,
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Unexpected error while initializing Beanbag backend for %s",
+                    entry_identifier,
+                )
+            else:
+                runtime.session = session
+                runtime.websocket = websocket
+
+                try:
+                    controller = await _async_fetch_controller(entry, runtime)
+                except BeanbagError as error:
+                    _LOGGER.error(
+                        "Unable to fetch securemtr controller details for %s: %s",
+                        entry_identifier,
+                        error,
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "Unexpected error while fetching securemtr controller for %s",
+                        entry_identifier,
+                    )
+                else:
+                    runtime.controller = controller
+                    _LOGGER.info(
+                        "Discovered securemtr controller %s (%s)",
+                        controller.identifier,
+                        controller.name,
+                    )
+                    break
+
+                await _async_reset_connection(runtime)
+
+            _LOGGER.info(
+                "Retrying Beanbag backend startup for %s in %.1f seconds",
+                entry_identifier,
+                _LOGIN_RETRY_DELAY,
+            )
+            await asyncio.sleep(_LOGIN_RETRY_DELAY)
+
+        await _async_ensure_utility_meters(hass, entry)
+        _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
+    except asyncio.CancelledError:
+        _LOGGER.info("Beanbag backend startup cancelled for %s", entry_identifier)
+        raise
     finally:
         runtime.controller_ready.set()
-
-    await _async_ensure_utility_meters(hass, entry)
-
-    _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
 
 
 async def _async_refresh_connection(
@@ -1377,12 +1391,13 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         if "." in statistic_domain:
             statistic_domain = statistic_domain.split(".", 1)[0]
         metadata: StatisticMetaData = {
-            "has_mean": False,
             "has_sum": True,
+            "mean_type": StatisticMeanType.NONE,
             "name": None,
             "source": statistic_domain,
             "statistic_id": statistic_id,
             "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
+            "unit_class": "energy",
         }
         async_add_external_statistics(hass, metadata, samples)
 
