@@ -131,6 +131,8 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert timed_switch.device_info["model"] == "E7+"
     assert power_switch.translation_key == "controller_power"
     assert timed_switch.translation_key == "timed_boost"
+    assert power_switch.has_entity_name is True
+    assert timed_switch.has_entity_name is True
     assert power_switch.is_on is False
     assert timed_switch.is_on is False
 

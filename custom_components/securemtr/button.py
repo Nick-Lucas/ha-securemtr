@@ -92,6 +92,7 @@ class _SecuremtrBaseButton(ButtonEntity):
     """Provide shared behaviour for Secure Meters button entities."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,

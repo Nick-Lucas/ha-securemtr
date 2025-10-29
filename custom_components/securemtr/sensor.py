@@ -140,6 +140,7 @@ class SecuremtrSensorEntity(SensorEntity):
     """Provide shared behaviour for Secure Meters sensors."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
     _attr_device_class: str | None = None
     _attr_state_class: str | None = None
     _attr_native_unit_of_measurement: str | None = None

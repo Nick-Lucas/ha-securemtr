@@ -54,6 +54,7 @@ class _SecuremtrBaseBinarySensor(BinarySensorEntity):
     """Provide shared behaviour for Secure Meters binary sensors."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,

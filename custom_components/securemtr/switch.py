@@ -63,6 +63,7 @@ class _SecuremtrBaseSwitch(SwitchEntity):
     """Provide shared behaviour for Secure Meters switch entities."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,
