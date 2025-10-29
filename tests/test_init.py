@@ -2942,23 +2942,40 @@ async def test_async_ensure_utility_meters_updates_untracked_helper(
 
 
 @pytest.mark.asyncio
-async def test_async_start_backend_handles_unexpected_errors() -> None:
-    """Ensure unexpected login errors unblock waiting tasks."""
+async def test_async_start_backend_retries_after_login_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry backend startup until the controller metadata is available."""
 
-    class ExplodingBackend(FakeBeanbagBackend):
-        async def login_and_connect(self, email: str, password: str):
-            raise RuntimeError("boom")
+    class FlakyBackend(FakeBeanbagBackend):
+        def __init__(self, session: object) -> None:
+            super().__init__(session)
+            self.attempt = 0
 
-    runtime = SecuremtrRuntimeData(backend=ExplodingBackend(object()))
+        async def login_and_connect(
+            self, email: str, password: str
+        ) -> tuple[BeanbagSession, FakeWebSocket]:
+            self.attempt += 1
+            self.login_calls.append((email, password))
+            if self.attempt < 3:
+                raise BeanbagError("temporary failure")
+            return await super().login_and_connect(email, password)
+
+    runtime = SecuremtrRuntimeData(backend=FlakyBackend(object()))
     entry = DummyConfigEntry(
         entry_id="entry",
         data={"email": "user@example.com", "password": "digest"},
     )
 
     hass = FakeHass()
+    monkeypatch.setattr("custom_components.securemtr._LOGIN_RETRY_DELAY", 0)
 
     await _async_start_backend(hass, entry, runtime)
+
+    assert runtime.controller is not None
     assert runtime.controller_ready.is_set()
+    assert runtime.backend.attempt == 3
+    assert len(runtime.backend.login_calls) >= 3
 
 
 @pytest.mark.asyncio

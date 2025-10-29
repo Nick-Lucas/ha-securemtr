@@ -92,6 +92,7 @@ ATTR_ENTRY_ID = "entry_id"
 ATTR_ZONE = "zone"
 ENERGY_ZONES = ("primary", "boost")
 _RESET_SERVICE_FLAG = "_reset_service_registered"
+_LOGIN_RETRY_DELAY = 5.0
 
 
 _ResultT = TypeVar("_ResultT")
@@ -742,53 +743,67 @@ async def _async_start_backend(
 
     _LOGGER.info("Starting Beanbag backend for %s", entry_identifier)
 
-    try:
-        session, websocket = await runtime.backend.login_and_connect(
-            email, password_digest
-        )
-    except BeanbagError as error:
-        _LOGGER.error(
-            "Failed to initialize Beanbag backend for %s: %s", entry_identifier, error
-        )
-        runtime.controller_ready.set()
-        return
-    except Exception:
-        _LOGGER.exception(
-            "Unexpected error while initializing Beanbag backend for %s",
-            entry_identifier,
-        )
-        runtime.controller_ready.set()
-        return
-
-    runtime.session = session
-    runtime.websocket = websocket
+    controller: SecuremtrController | None = None
 
     try:
-        controller = await _async_fetch_controller(entry, runtime)
-    except BeanbagError as error:
-        _LOGGER.error(
-            "Unable to fetch securemtr controller details for %s: %s",
-            entry_identifier,
-            error,
-        )
-    except Exception:
-        _LOGGER.exception(
-            "Unexpected error while fetching securemtr controller for %s",
-            entry_identifier,
-        )
-    else:
-        runtime.controller = controller
-        _LOGGER.info(
-            "Discovered securemtr controller %s (%s)",
-            controller.identifier,
-            controller.name,
-        )
+        while controller is None:
+            try:
+                session, websocket = await runtime.backend.login_and_connect(
+                    email, password_digest
+                )
+            except BeanbagError as error:
+                _LOGGER.error(
+                    "Failed to initialize Beanbag backend for %s: %s",
+                    entry_identifier,
+                    error,
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Unexpected error while initializing Beanbag backend for %s",
+                    entry_identifier,
+                )
+            else:
+                runtime.session = session
+                runtime.websocket = websocket
+
+                try:
+                    controller = await _async_fetch_controller(entry, runtime)
+                except BeanbagError as error:
+                    _LOGGER.error(
+                        "Unable to fetch securemtr controller details for %s: %s",
+                        entry_identifier,
+                        error,
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "Unexpected error while fetching securemtr controller for %s",
+                        entry_identifier,
+                    )
+                else:
+                    runtime.controller = controller
+                    _LOGGER.info(
+                        "Discovered securemtr controller %s (%s)",
+                        controller.identifier,
+                        controller.name,
+                    )
+                    break
+
+                await _async_reset_connection(runtime)
+
+            _LOGGER.info(
+                "Retrying Beanbag backend startup for %s in %.1f seconds",
+                entry_identifier,
+                _LOGIN_RETRY_DELAY,
+            )
+            await asyncio.sleep(_LOGIN_RETRY_DELAY)
+
+        await _async_ensure_utility_meters(hass, entry)
+        _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
+    except asyncio.CancelledError:
+        _LOGGER.info("Beanbag backend startup cancelled for %s", entry_identifier)
+        raise
     finally:
         runtime.controller_ready.set()
-
-    await _async_ensure_utility_meters(hass, entry)
-
-    _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
 
 
 async def _async_refresh_connection(
