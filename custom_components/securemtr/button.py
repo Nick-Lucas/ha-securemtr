@@ -45,6 +45,15 @@ _DAY_NAMES: tuple[str, ...] = (
 )
 
 
+BOOST_BUTTON_TRANSLATION_KEYS: dict[int, str] = {
+    30: "boost_30_minutes",
+    60: "boost_60_minutes",
+    120: "boost_120_minutes",
+}
+
+DEFAULT_BOOST_TRANSLATION_KEY = "boost_custom_minutes"
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -146,7 +155,7 @@ class SecuremtrConsumptionMetricsButton(_SecuremtrBaseButton):
         super().__init__(runtime, controller, entry)
         slug = self._identifier_slug()
         self._attr_unique_id = f"{slug}_refresh_consumption"
-        self._attr_name = "Refresh Consumption Metrics"
+        self._attr_translation_key = "refresh_consumption_metrics"
 
     async def async_press(self) -> None:
         """Trigger an on-demand refresh of consumption metrics."""
@@ -171,7 +180,7 @@ class SecuremtrLogWeeklyScheduleButton(_SecuremtrBaseButton):
 
         super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_log_schedule"
-        self._attr_name = "Log Weekly Schedules"
+        self._attr_translation_key = "log_weekly_schedules"
 
     async def async_press(self) -> None:
         """Fetch the weekly programs for both zones and emit them to the log."""
@@ -284,7 +293,14 @@ class SecuremtrTimedBoostButton(_SecuremtrBaseButton):
         super().__init__(runtime, controller, entry)
         self._duration = duration_minutes
         self._attr_unique_id = f"{self._identifier_slug()}_boost_{duration_minutes}"
-        self._attr_name = f"Boost {duration_minutes} minutes"
+        translation_key = BOOST_BUTTON_TRANSLATION_KEYS.get(
+            duration_minutes, DEFAULT_BOOST_TRANSLATION_KEY
+        )
+        self._attr_translation_key = translation_key
+        if translation_key == DEFAULT_BOOST_TRANSLATION_KEY:
+            self._attr_translation_placeholders = {
+                "duration": str(duration_minutes)
+            }
 
     async def async_press(self) -> None:
         """Send the timed boost start command for the configured duration."""
@@ -342,7 +358,7 @@ class SecuremtrCancelBoostButton(_SecuremtrBaseButton):
 
         super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_boost_cancel"
-        self._attr_name = "Cancel Boost"
+        self._attr_translation_key = "cancel_boost"
 
     @property
     def available(self) -> bool:

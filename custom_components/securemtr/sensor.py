@@ -6,12 +6,12 @@ import asyncio
 from datetime import datetime
 import logging
 
+from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData, runtime_update_signal
@@ -26,6 +26,22 @@ STATE_CLASS_MEASUREMENT = "measurement"
 STATE_CLASS_TOTAL_INCREASING = "total_increasing"
 
 _CONTROLLER_WAIT_TIMEOUT = 15.0
+
+
+ZONE_ENTITY_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "primary": {
+        "label": "Primary",
+        "energy": "primary_energy_total",
+        "runtime": "primary_runtime_daily",
+        "scheduled": "primary_scheduled_daily",
+    },
+    "boost": {
+        "label": "Boost",
+        "energy": "boost_energy_total",
+        "runtime": "boost_runtime_daily",
+        "scheduled": "boost_scheduled_daily",
+    },
+}
 
 
 async def async_setup_entry(
@@ -58,7 +74,6 @@ async def async_setup_entry(
         controller.identifier,
     )
 
-    zone_labels = {"primary": "Primary", "boost": "Boost"}
     sensors: list[SecuremtrSensorEntity] = [
         SecuremtrBoostEndsSensor(runtime, controller, entry.entry_id)
     ]
@@ -67,10 +82,15 @@ async def async_setup_entry(
         sensors[0].unique_id,
     )
 
-    for zone_key, label in zone_labels.items():
+    for zone_key, zone_translations in ZONE_ENTITY_TRANSLATIONS.items():
+        label = zone_translations["label"]
         sensors.append(
             SecuremtrEnergyTotalSensor(
-                runtime, controller, entry.entry_id, zone_key, label
+                runtime,
+                controller,
+                entry.entry_id,
+                zone_key,
+                zone_translations["energy"],
             )
         )
         _LOGGER.info(
@@ -85,9 +105,8 @@ async def async_setup_entry(
                 controller,
                 entry.entry_id,
                 zone_key,
-                label,
                 "runtime",
-                "Runtime (Last Day)",
+                zone_translations["runtime"],
                 "runtime_daily",
             )
         )
@@ -97,9 +116,8 @@ async def async_setup_entry(
                 controller,
                 entry.entry_id,
                 zone_key,
-                label,
                 "scheduled",
-                "Scheduled (Last Day)",
+                zone_translations["scheduled"],
                 "scheduled_daily",
             )
         )
@@ -214,7 +232,7 @@ class SecuremtrBoostEndsSensor(SecuremtrSensorEntity):
 
         super().__init__(runtime, controller, entry_id)
         self._attr_unique_id = f"{self._identifier_slug()}_boost_ends"
-        self._attr_name = "Boost Ends"
+        self._attr_translation_key = "boost_ends"
 
     @property
     def native_value(self) -> datetime | None:
@@ -238,18 +256,20 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
         controller: SecuremtrController,
         entry_id: str,
         zone: str,
-        label: str,
+        translation_key: str,
     ) -> None:
         """Initialise the energy total sensor for the requested zone."""
 
         super().__init__(runtime, controller, entry_id)
         self._zone = zone
-        self._attr_name = f"SecureMTR {label} Energy kWh"
+        self._attr_translation_key = translation_key
         identifier_slug = self._identifier_slug()
         self._attr_unique_id = f"{identifier_slug}_{zone}_energy_kwh"
         self.entity_id = f"sensor.securemtr_{identifier_slug}_{zone}_energy_kwh"
 
     async def async_added_to_hass(self) -> None:
+        """Register created energy sensors with runtime context."""
+
         await super().async_added_to_hass()
         runtime_ids = getattr(self._runtime, "energy_entity_ids", None)
         if isinstance(runtime_ids, dict):
@@ -316,9 +336,8 @@ class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
         controller: SecuremtrController,
         entry_id: str,
         zone: str,
-        label: str,
         metric: str,
-        name_suffix: str,
+        translation_key: str,
         unique_suffix: str,
     ) -> None:
         """Initialise the daily duration sensor for the requested zone."""
@@ -326,7 +345,7 @@ class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
         super().__init__(runtime, controller, entry_id)
         self._zone = zone
         self._metric = metric
-        self._attr_name = f"{label} {name_suffix}"
+        self._attr_translation_key = translation_key
         self._attr_unique_id = (
             f"{self._identifier_slug()}_{zone}_{unique_suffix}"
         )
