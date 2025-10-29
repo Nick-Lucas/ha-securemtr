@@ -173,6 +173,8 @@ async def test_button_setup_creates_entities() -> None:
         boost_button.device_info["name"]
         == "E7+ Smart Water Heater Controller"
     )
+    assert boost_button.translation_key == "boost_60_minutes"
+    assert boost_button.has_entity_name is True
 
 
 @pytest.mark.asyncio
@@ -261,6 +263,19 @@ async def test_boost_button_requires_controller() -> None:
         await boost_button.async_press()
 
     assert backend.start_calls == []
+
+
+@pytest.mark.asyncio
+async def test_custom_duration_boost_button_uses_placeholders() -> None:
+    """Ensure custom boost durations expose the translation placeholder."""
+
+    runtime, _backend = _create_runtime()
+    entry = DummyEntry(entry_id="entry")
+    button = SecuremtrTimedBoostButton(runtime, runtime.controller, entry, 45)
+
+    assert button.translation_key == "boost_custom_minutes"
+    assert button.translation_placeholders == {"duration": "45"}
+    assert button.has_entity_name is True
 
 
 @pytest.mark.asyncio

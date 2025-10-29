@@ -21,8 +21,8 @@ from . import (
     async_run_with_reconnect,
     runtime_update_signal,
 )
-from .entity import build_device_info, slugify_identifier
 from .beanbag import BeanbagError
+from .entity import build_device_info, slugify_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ class _SecuremtrBaseSwitch(SwitchEntity):
     """Provide shared behaviour for Secure Meters switch entities."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -119,13 +120,13 @@ class SecuremtrPowerSwitch(_SecuremtrBaseSwitch):
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
-        entry_id: str,
+        entry: ConfigEntry,
     ) -> None:
         """Initialise the switch entity with runtime context."""
 
-        super().__init__(runtime, controller, entry_id)
+        super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_primary_power"
-        self._attr_name = "E7+ Controller"
+        self._attr_translation_key = "controller_power"
 
     @property
     def is_on(self) -> bool:
@@ -195,13 +196,13 @@ class SecuremtrTimedBoostSwitch(_SecuremtrBaseSwitch):
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
-        entry_id: str,
+        entry: ConfigEntry,
     ) -> None:
         """Initialise the timed boost switch for the controller."""
 
-        super().__init__(runtime, controller, entry_id)
+        super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_timed_boost"
-        self._attr_name = "Timed Boost"
+        self._attr_translation_key = "timed_boost"
 
     @property
     def is_on(self) -> bool:

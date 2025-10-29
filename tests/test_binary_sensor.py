@@ -66,6 +66,7 @@ async def test_binary_sensor_setup_and_state() -> None:
     assert sensor.available is True
     info = sensor.device_info
     assert info["name"] == "E7+ Smart Water Heater Controller"
+    assert sensor.has_entity_name is True
 
     runtime.timed_boost_active = True
     assert sensor.is_on is True
