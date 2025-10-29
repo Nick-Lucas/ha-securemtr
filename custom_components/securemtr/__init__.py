@@ -10,7 +10,7 @@ from datetime import date, datetime, time, timedelta
 import logging
 import re
 from types import MappingProxyType
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientSession, ClientWebSocketResponse
@@ -33,8 +33,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
@@ -93,6 +92,7 @@ ATTR_ZONE = "zone"
 ENERGY_ZONES = ("primary", "boost")
 _RESET_SERVICE_FLAG = "_reset_service_registered"
 _LOGIN_RETRY_DELAY = 5.0
+_MAX_IMMEDIATE_STARTUP_RETRIES = 2
 
 
 _ResultT = TypeVar("_ResultT")
@@ -394,6 +394,7 @@ class SecuremtrRuntimeData:
     session: BeanbagSession | None = None
     websocket: ClientWebSocketResponse | None = None
     startup_task: asyncio.Task[Any] | None = None
+    retry_task: asyncio.Task[Any] | None = None
     controller: SecuremtrController | None = None
     controller_ready: asyncio.Event = field(default_factory=asyncio.Event)
     command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -409,6 +410,8 @@ class SecuremtrRuntimeData:
     state_snapshot: BeanbagStateSnapshot | None = None
     consumption_metrics_log: list[dict[str, Any]] = field(default_factory=list)
     consumption_schedule_unsub: Callable[[], None] | None = None
+    consumption_refresh_callback: Callable[[], None] | None = None
+    consumption_refresh_pending: bool = False
     energy_store: Store[dict[str, Any]] | None = None
     energy_state: dict[str, Any] | None = None
     energy_accumulator: EnergyAccumulator | None = None
@@ -466,7 +469,7 @@ def _slugify_identifier(identifier: str) -> str:
 
 
 def _controller_slug(
-    entry: ConfigEntry, controller: "SecuremtrController" | None
+    entry: ConfigEntry, controller: SecuremtrController | None
 ) -> str:
     """Return the identifier slug for a controller or entry metadata."""
 
@@ -500,7 +503,7 @@ def _controller_slug(
 def _energy_sensor_entity_ids(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    controller: "SecuremtrController" | None,
+    controller: SecuremtrController | None,
 ) -> dict[str, str]:
     """Return the energy sensor entity IDs for each controller zone."""
 
@@ -659,6 +662,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         schedule_unsubs.clear()
 
     runtime.consumption_schedule_unsub = _unsubscribe_schedules
+    runtime.consumption_refresh_callback = _queue_consumption_refresh
 
     _LOGGER.debug(
         "Queuing immediate consumption metrics refresh for %s", entry_identifier
@@ -710,11 +714,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if runtime.consumption_schedule_unsub is not None:
         runtime.consumption_schedule_unsub()
         runtime.consumption_schedule_unsub = None
+    runtime.consumption_refresh_callback = None
 
     if runtime.startup_task is not None and not runtime.startup_task.done():
         runtime.startup_task.cancel()
         with suppress(asyncio.CancelledError):
             await runtime.startup_task
+
+    retry_task = runtime.retry_task
+    if retry_task is not None and not retry_task.done():
+        retry_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await retry_task
+    runtime.retry_task = None
 
     if runtime.websocket is not None and not runtime.websocket.closed:
         await runtime.websocket.close()
@@ -743,67 +755,202 @@ async def _async_start_backend(
 
     _LOGGER.info("Starting Beanbag backend for %s", entry_identifier)
 
-    controller: SecuremtrController | None = None
+    refresh_callback = runtime.consumption_refresh_callback
 
     try:
-        while controller is None:
-            try:
-                session, websocket = await runtime.backend.login_and_connect(
-                    email, password_digest
-                )
-            except BeanbagError as error:
-                _LOGGER.error(
-                    "Failed to initialize Beanbag backend for %s: %s",
-                    entry_identifier,
-                    error,
-                )
-            except Exception:
-                _LOGGER.exception(
-                    "Unexpected error while initializing Beanbag backend for %s",
-                    entry_identifier,
-                )
-            else:
-                runtime.session = session
-                runtime.websocket = websocket
+        outcome = await _async_attempt_backend_startup(
+            entry,
+            runtime,
+            email=email,
+            password_digest=password_digest,
+            entry_identifier=entry_identifier,
+        )
+        if outcome == "success":
+            await _async_ensure_utility_meters(hass, entry)
+            _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
+            if refresh_callback is not None and runtime.consumption_refresh_pending:
+                refresh_callback()
+            return
 
-                try:
-                    controller = await _async_fetch_controller(entry, runtime)
-                except BeanbagError as error:
-                    _LOGGER.error(
-                        "Unable to fetch securemtr controller details for %s: %s",
-                        entry_identifier,
-                        error,
-                    )
-                except Exception:
-                    _LOGGER.exception(
-                        "Unexpected error while fetching securemtr controller for %s",
-                        entry_identifier,
-                    )
-                else:
-                    runtime.controller = controller
-                    _LOGGER.info(
-                        "Discovered securemtr controller %s (%s)",
-                        controller.identifier,
-                        controller.name,
-                    )
+        if outcome == "retry" and _LOGIN_RETRY_DELAY <= 0:
+            for _ in range(_MAX_IMMEDIATE_STARTUP_RETRIES):
+                outcome = await _async_attempt_backend_startup(
+                    entry,
+                    runtime,
+                    email=email,
+                    password_digest=password_digest,
+                    entry_identifier=entry_identifier,
+                )
+                if outcome != "retry":
                     break
 
-                await _async_reset_connection(runtime)
+            if outcome == "success":
+                await _async_ensure_utility_meters(hass, entry)
+                _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
+                if (
+                    refresh_callback is not None
+                    and runtime.consumption_refresh_pending
+                ):
+                    refresh_callback()
+                return
 
-            _LOGGER.info(
-                "Retrying Beanbag backend startup for %s in %.1f seconds",
+            if outcome == "abort":
+                _LOGGER.error(
+                    "Aborting Beanbag backend startup for %s due to unexpected error",
+                    entry_identifier,
+                )
+                return
+
+        if outcome == "retry":
+            _async_queue_backend_retry(
+                hass,
+                entry,
+                runtime,
                 entry_identifier,
-                _LOGIN_RETRY_DELAY,
+                on_success=refresh_callback,
             )
-            await asyncio.sleep(_LOGIN_RETRY_DELAY)
+            return
 
-        await _async_ensure_utility_meters(hass, entry)
-        _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
+        _LOGGER.error(
+            "Aborting Beanbag backend startup for %s due to unexpected error",
+            entry_identifier,
+        )
     except asyncio.CancelledError:
         _LOGGER.info("Beanbag backend startup cancelled for %s", entry_identifier)
         raise
     finally:
         runtime.controller_ready.set()
+
+
+async def _async_attempt_backend_startup(
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    *,
+    email: str,
+    password_digest: str,
+    entry_identifier: str,
+) -> Literal["success", "retry", "abort"]:
+    """Attempt a single Beanbag login and controller discovery cycle."""
+
+    try:
+        session, websocket = await runtime.backend.login_and_connect(
+            email, password_digest
+        )
+    except BeanbagError as error:
+        _LOGGER.error(
+            "Failed to initialize Beanbag backend for %s: %s",
+            entry_identifier,
+            error,
+        )
+        return "retry"
+    except Exception:
+        _LOGGER.exception(
+            "Unexpected error while initializing Beanbag backend for %s",
+            entry_identifier,
+        )
+        return "abort"
+
+    runtime.session = session
+    runtime.websocket = websocket
+
+    try:
+        controller = await _async_fetch_controller(entry, runtime)
+    except BeanbagError as error:
+        _LOGGER.error(
+            "Unable to fetch securemtr controller details for %s: %s",
+            entry_identifier,
+            error,
+        )
+        result: Literal["retry", "abort"] = "retry"
+    except Exception:
+        _LOGGER.exception(
+            "Unexpected error while fetching securemtr controller for %s",
+            entry_identifier,
+        )
+        result = "abort"
+    else:
+        runtime.controller = controller
+        _LOGGER.info(
+            "Discovered securemtr controller %s (%s)",
+            controller.identifier,
+            controller.name,
+        )
+        return "success"
+
+    if result == "retry":
+        await _async_reset_connection(runtime)
+        runtime.session = None
+    runtime.controller = None
+    return result
+
+
+def _async_queue_backend_retry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    entry_identifier: str,
+    *,
+    on_success: Callable[[], None] | None = None,
+) -> None:
+    """Schedule backend retries and call a hook after successful reconnection."""
+
+    if runtime.retry_task is not None and not runtime.retry_task.done():
+        return
+
+    async def _async_retry() -> None:
+        """Retry backend initialisation until successful or cancelled."""
+
+        try:
+            while True:
+                await asyncio.sleep(_LOGIN_RETRY_DELAY)
+
+                email = entry.data.get(CONF_EMAIL, "").strip()
+                password_digest = entry.data.get(CONF_PASSWORD, "")
+
+                if not email or not password_digest:
+                    _LOGGER.error(
+                        "Missing credentials for securemtr entry %s during retry",
+                        entry_identifier,
+                    )
+                    return
+
+                outcome = await _async_attempt_backend_startup(
+                    entry,
+                    runtime,
+                    email=email,
+                    password_digest=password_digest,
+                    entry_identifier=entry_identifier,
+                )
+                if outcome == "success":
+                    await _async_ensure_utility_meters(hass, entry)
+                    _LOGGER.info(
+                        "Beanbag backend connected for %s after retry",
+                        entry_identifier,
+                    )
+                    if on_success is not None and runtime.consumption_refresh_pending:
+                        on_success()
+                    return
+                if outcome == "abort":
+                    _LOGGER.error(
+                        "Stopping Beanbag backend retries for %s due to unexpected error",
+                        entry_identifier,
+                    )
+                    return
+                _LOGGER.info(
+                    "Retrying Beanbag backend startup for %s in %.1f seconds",
+                    entry_identifier,
+                    _LOGIN_RETRY_DELAY,
+                )
+        except asyncio.CancelledError:
+            _LOGGER.info(
+                "Beanbag backend retry cancelled for %s",
+                entry_identifier,
+            )
+            raise
+        finally:
+            runtime.retry_task = None
+
+    runtime.retry_task = asyncio.create_task(_async_retry())
 
 
 async def _async_refresh_connection(
@@ -1075,14 +1222,24 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         )
         return
 
+    controller = runtime.controller
+    if controller is None and runtime.session is not None:
+        runtime.consumption_refresh_pending = True
+        _LOGGER.debug(
+            "Skipping consumption metrics refresh for %s; controller unavailable",
+            entry_identifier,
+        )
+        return
+
     if not await _async_refresh_connection(entry, runtime):
+        runtime.consumption_refresh_pending = True
         return
 
     session = runtime.session
     websocket = runtime.websocket
-    controller = runtime.controller
 
     if session is None or websocket is None or controller is None:
+        runtime.consumption_refresh_pending = True
         _LOGGER.error(
             "Secure Meters connection unavailable for energy history request: %s",
             entry_identifier,
@@ -1094,6 +1251,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
             session, websocket, controller.gateway_id
         )
     except BeanbagError as error:
+        runtime.consumption_refresh_pending = True
         _LOGGER.error(
             "Failed to fetch energy history for %s: %s",
             entry_identifier,
@@ -1103,6 +1261,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     if not samples:
         runtime.consumption_metrics_log = []
+        runtime.consumption_refresh_pending = False
         _LOGGER.debug("No consumption samples returned for %s", entry_identifier)
         return
 
@@ -1404,6 +1563,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if runtime_updated:
         async_dispatch_runtime_update(hass, entry.entry_id)
 
+    runtime.consumption_refresh_pending = False
     _LOGGER.debug(
         "Secure Meters consumption metrics updated (%s entries)",
         len(processed_rows),
