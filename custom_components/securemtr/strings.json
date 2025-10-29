@@ -95,7 +95,8 @@
         "name": "Boost {duration} minutes",
         "placeholders": {
           "duration": {
-            "text": "{duration}"
+            "description": "Duration for the boost in minutes.",
+            "example": "45"
           }
         }
       },
