@@ -92,13 +92,7 @@
         "name": "Boost 120 minutes"
       },
       "boost_custom_minutes": {
-        "name": "Boost {duration} minutes",
-        "placeholders": {
-          "duration": {
-            "description": "Duration for the boost in minutes.",
-            "example": "45"
-          }
-        }
+        "name": "Boost {duration} minutes"
       },
       "cancel_boost": {
         "name": "Cancel boost"
