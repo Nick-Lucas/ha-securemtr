@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Мобильное приложение Secure Controls принимает пароли только из 12 символов."
+    },
+    "abort": {
+      "already_configured": "SecureMTR уже настроен."
+    },
+    "step": {
+      "user": {
+        "title": "Учетная запись Secure Controls",
+        "description": "Введите имя пользователя (адрес электронной почты) и пароль, которые вы используете в мобильном приложении Secure Controls.",
+        "data": {
+          "email": "Адрес электронной почты (имя пользователя)",
+          "password": "Пароль"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Параметры статистики SecureMTR",
+        "description": "Настройте параметры статистики выполнения по умолчанию, используемые для SecureMTR.",
+        "data": {
+          "primary_anchor": "Первичный якорь",
+          "boost_anchor": "Усиленный якорь",
+          "element_power_kw": "Мощность элемента (кВт)",
+          "prefer_device_energy": "Предпочитайте суммарные показатели энергии устройств"
+        },
+        "data_description": {
+          "primary_anchor": "Базовое время, используемое для выравнивания окна статистики первичной зоны.",
+          "boost_anchor": "Базовое время, используемое для выравнивания окна статистики зоны форсирования.",
+          "element_power_kw": "Номинальная мощность, используемая при вычислении энергопотребления из времени работы.",
+          "prefer_device_energy": "При наличии возможности используйте суммарные показатели энергии, предоставленные SecureMTR, вместо производных значений."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Усиление кончиков"
+      },
+      "primary_energy_total": {
+        "name": "Первичная энергия кВт-ч"
+      },
+      "boost_energy_total": {
+        "name": "Повышенная энергия кВт-ч"
+      },
+      "primary_runtime_daily": {
+        "name": "Основное время работы (последний день)"
+      },
+      "boost_runtime_daily": {
+        "name": "Время работы буста (последний день)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Основной график (последний день)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Буст по расписанию (последний день)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Контроллер"
+      },
+      "timed_boost": {
+        "name": "Увеличение по времени"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Повышение активности"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Обновление показателей потребления"
+      },
+      "log_weekly_schedules": {
+        "name": "Ведите журнал еженедельных расписаний"
+      },
+      "boost_30_minutes": {
+        "name": "Увеличение 30 минут"
+      },
+      "boost_60_minutes": {
+        "name": "Увеличение 60 минут"
+      },
+      "boost_120_minutes": {
+        "name": "Увеличение 120 минут"
+      },
+      "boost_custom_minutes": {
+        "name": "Повышение {duration} минут"
+      },
+      "cancel_boost": {
+        "name": "Отменить повышение"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Сброс аккумулятора энергии",
+      "description": "Сброс статистики накопленной энергии для зоны входа конфигурации SecureMTR.",
+      "fields": {
+        "entry_id": {
+          "name": "Идентификатор входа",
+          "description": "Идентификатор конфигурационной записи контроллера SecureMTR для сброса."
+        },
+        "zone": {
+          "name": "Зона",
+          "description": "Зона SecureMTR для сброса. По умолчанию это основная зона."
+        }
+      }
+    }
+  }
+}

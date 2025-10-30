@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Secure Controls mobiilirakendus aktsepteerib ainult kuni 12-tähelisi paroole."
+    },
+    "abort": {
+      "already_configured": "SecureMTR on juba konfigureeritud."
+    },
+    "step": {
+      "user": {
+        "title": "Secure Controls konto",
+        "description": "Sisestage kasutajanimi (e-posti aadress) ja parool, mida kasutate Secure Controls mobiilirakenduses.",
+        "data": {
+          "email": "E-posti aadress (kasutajanimi)",
+          "password": "Parool"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SecureMTR statistika valikud",
+        "description": "Seadistage SecureMTRi jaoks kasutatava jooksva statistika vaikeväärtused.",
+        "data": {
+          "primary_anchor": "Esmane ankur",
+          "boost_anchor": "Boost ankurdaja",
+          "element_power_kw": "Elemendi võimsus (kW)",
+          "prefer_device_energy": "Eelistage seadme energia kogusummasid"
+        },
+        "data_description": {
+          "primary_anchor": "Põhiaeg, mida kasutatakse esmase tsooni statistikaakna joondamiseks.",
+          "boost_anchor": "Baasaeg, mida kasutatakse kiirendustsooni statistikaakna joondamiseks.",
+          "element_power_kw": "Võimsus, mida kasutatakse energiatarbimise tuletamisel tööajast.",
+          "prefer_device_energy": "Kasutage tuletatud väärtuste asemel SecureMTRi esitatud energia kogusummasid, kui need on kättesaadavad."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Boost otsad"
+      },
+      "primary_energy_total": {
+        "name": "Primaarenergia kWh"
+      },
+      "boost_energy_total": {
+        "name": "Boost energia kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Esmane tööaeg (viimane päev)"
+      },
+      "boost_runtime_daily": {
+        "name": "Boost'i tööaeg (viimane päev)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Esmane planeeritud (viimane päev)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost kavandatud (viimane päev)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Kontrolleri"
+      },
+      "timed_boost": {
+        "name": "Ajastatud tõuge"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Boost aktiivne"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Värskendage tarbimisnäitajaid"
+      },
+      "log_weekly_schedules": {
+        "name": "Logi iganädalane ajakava"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 minutit"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 minutit"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 minutit"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} minutit"
+      },
+      "cancel_boost": {
+        "name": "Tühista boost"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Nullida energiaakumulaator",
+      "description": "Nullib kumulatiivse energiastatistika SecureMTRi konfigureeritud sissekande tsooni jaoks.",
+      "fields": {
+        "entry_id": {
+          "name": "Sisenemise ID",
+          "description": "Lähtestatava SecureMTR-kontrolleri konfiguratsioonikande ID."
+        },
+        "zone": {
+          "name": "Tsoon",
+          "description": "SecureMTR tsooni lähtestamiseks. Vaikimisi on vaikimisi primaarne tsoon."
+        }
+      }
+    }
+  }
+}

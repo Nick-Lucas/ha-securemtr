@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Secure Controls mobil uygulaması yalnızca 12 karaktere kadar olan parolaları kabul eder."
+    },
+    "abort": {
+      "already_configured": "SecureMTR zaten yapılandırılmıştır."
+    },
+    "step": {
+      "user": {
+        "title": "Güvenli Kontroller hesabı",
+        "description": "Secure Controls mobil uygulamasında kullandığınız kullanıcı adını (e-posta adresi) ve şifreyi girin.",
+        "data": {
+          "email": "E-posta adresi (kullanıcı adı)",
+          "password": "Şifre"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SecureMTR istatistik seçenekleri",
+        "description": "SecureMTR için kullanılan çalışma zamanı istatistik varsayılanlarını yapılandırın.",
+        "data": {
+          "primary_anchor": "Birincil çapa",
+          "boost_anchor": "Çapayı güçlendirin",
+          "element_power_kw": "Eleman gücü (kW)",
+          "prefer_device_energy": "Cihaz enerji toplamlarını tercih edin"
+        },
+        "data_description": {
+          "primary_anchor": "Birincil bölge istatistik penceresini hizalamak için kullanılan temel saat.",
+          "boost_anchor": "Takviye bölgesi istatistik penceresini hizalamak için kullanılan temel zaman.",
+          "element_power_kw": "Enerji tüketimini çalışma süresinden türetirken kullanılan güç derecesi.",
+          "prefer_device_energy": "Mevcut olduğunda türetilmiş değerler yerine SecureMTR tarafından sağlanan enerji toplamlarını kullanın."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Güçlendirme uçları"
+      },
+      "primary_energy_total": {
+        "name": "Birincil enerji kWh"
+      },
+      "boost_energy_total": {
+        "name": "Enerji artışı kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Birincil çalışma süresi (son gün)"
+      },
+      "boost_runtime_daily": {
+        "name": "Boost çalışma süresi (son gün)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Birincil planlanmış (son gün)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Planlanan artırma (son gün)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Kontrolör"
+      },
+      "timed_boost": {
+        "name": "Zamanlanmış takviye"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Etkinliği artırın"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Tüketim ölçümlerini yenileyin"
+      },
+      "log_weekly_schedules": {
+        "name": "Haftalık programları kaydedin"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 dakika"
+      },
+      "boost_60_minutes": {
+        "name": "60 dakika destekleyin"
+      },
+      "boost_120_minutes": {
+        "name": "Güçlendirme 120 dakika"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} dakika"
+      },
+      "cancel_boost": {
+        "name": "Destek iptal"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Enerji akümülatörünü sıfırla",
+      "description": "Bir SecureMTR yapılandırma giriş bölgesi için kümülatif enerji istatistiklerini sıfırlayın.",
+      "fields": {
+        "entry_id": {
+          "name": "Giriş Kimliği",
+          "description": "Sıfırlanacak SecureMTR denetleyicisinin yapılandırma giriş kimliği."
+        },
+        "zone": {
+          "name": "Bölge",
+          "description": "Sıfırlanacak SecureMTR bölgesi. Varsayılan olarak birincil bölgedir."
+        }
+      }
+    }
+  }
+}

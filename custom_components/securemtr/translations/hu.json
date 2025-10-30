@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "A Secure Controls mobilalkalmazás csak legfeljebb 12 karakteres jelszavakat fogad el."
+    },
+    "abort": {
+      "already_configured": "A SecureMTR már be van állítva."
+    },
+    "step": {
+      "user": {
+        "title": "Biztonságos ellenőrzési számla",
+        "description": "Adja meg azt a felhasználónevet (e-mail címet) és jelszót, amelyet a Secure Controls mobilalkalmazásban használ.",
+        "data": {
+          "email": "E-mail cím (felhasználónév)",
+          "password": "Jelszó"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SecureMTR statisztikai beállítások",
+        "description": "A SecureMTR futásidő-statisztikák alapértelmezett beállításai.",
+        "data": {
+          "primary_anchor": "Elsődleges horgony",
+          "boost_anchor": "Boost horgony",
+          "element_power_kw": "Elem teljesítménye (kW)",
+          "prefer_device_energy": "A készülék energiaösszegének előnyben részesítése"
+        },
+        "data_description": {
+          "primary_anchor": "Az elsődleges zóna statisztikai ablakának beállításához használt bázisidő.",
+          "boost_anchor": "Az alapidő, amelyet a lökésfokozó zóna statisztikai ablakának beállításához használnak.",
+          "element_power_kw": "Az energiafogyasztás futási időből történő levezetésekor használt teljesítményérték.",
+          "prefer_device_energy": "A SecureMTR által megadott energiaösszegeket használja a származtatott értékek helyett, ha rendelkezésre állnak."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Boost végek"
+      },
+      "primary_energy_total": {
+        "name": "Elsődleges energia kWh"
+      },
+      "boost_energy_total": {
+        "name": "Boost energia kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Elsődleges futási idő (utolsó nap)"
+      },
+      "boost_runtime_daily": {
+        "name": "Boost futási idő (utolsó nap)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Elsődlegesen tervezett (utolsó nap)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost tervezett (utolsó nap)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Vezérlő"
+      },
+      "timed_boost": {
+        "name": "Időzített lökés"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Boost aktív"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Fogyasztási mérőszámok frissítése"
+      },
+      "log_weekly_schedules": {
+        "name": "Heti menetrendek naplózása"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 perc"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 perc"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 perc"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} perc"
+      },
+      "cancel_boost": {
+        "name": "Cancel boost"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Energiaakkumulátor visszaállítása",
+      "description": "A SecureMTR konfigurációs belépési zóna összesített energiastatisztikájának visszaállítása.",
+      "fields": {
+        "entry_id": {
+          "name": "Belépési azonosító",
+          "description": "A visszaállítandó SecureMTR vezérlő konfigurációs bejegyzésének azonosítója."
+        },
+        "zone": {
+          "name": "Zóna",
+          "description": "SecureMTR zóna visszaállítása. Alapértelmezés szerint az elsődleges zóna."
+        }
+      }
+    }
+  }
+}

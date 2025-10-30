@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Aplikacja mobilna Secure Controls akceptuje tylko hasła do 12 znaków."
+    },
+    "abort": {
+      "already_configured": "SecureMTR jest już skonfigurowany."
+    },
+    "step": {
+      "user": {
+        "title": "Konto Secure Controls",
+        "description": "Wprowadź nazwę użytkownika (adres e-mail) i hasło używane w aplikacji mobilnej Secure Controls.",
+        "data": {
+          "email": "Adres e-mail (nazwa użytkownika)",
+          "password": "Hasło"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje statystyk SecureMTR",
+        "description": "Konfiguracja domyślnych statystyk runtime używanych przez SecureMTR.",
+        "data": {
+          "primary_anchor": "Główna kotwica",
+          "boost_anchor": "Wzmocnienie kotwicy",
+          "element_power_kw": "Moc elementu (kW)",
+          "prefer_device_energy": "Preferowane sumy energii urządzeń"
+        },
+        "data_description": {
+          "primary_anchor": "Czas bazowy używany do wyrównania okna statystyk strefy podstawowej.",
+          "boost_anchor": "Czas bazowy używany do wyrównania okna statystyk strefy doładowania.",
+          "element_power_kw": "Moc znamionowa używana przy obliczaniu zużycia energii na podstawie czasu pracy.",
+          "prefer_device_energy": "Używaj sum energii dostarczonych przez SecureMTR zamiast wartości pochodnych, jeśli są dostępne."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Wzmocnione końcówki"
+      },
+      "primary_energy_total": {
+        "name": "Energia pierwotna kWh"
+      },
+      "boost_energy_total": {
+        "name": "Zwiększona energia kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Główny czas działania (ostatni dzień)"
+      },
+      "boost_runtime_daily": {
+        "name": "Czas działania Boost (ostatni dzień)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Główny plan (ostatni dzień)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Zaplanowany boost (ostatni dzień)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Kontroler"
+      },
+      "timed_boost": {
+        "name": "Czasowe doładowanie"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Aktywne wzmocnienie"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Odświeżanie wskaźników zużycia"
+      },
+      "log_weekly_schedules": {
+        "name": "Rejestrowanie tygodniowych harmonogramów"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 minut"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 minut"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 minut"
+      },
+      "boost_custom_minutes": {
+        "name": "Doładowanie {duration} minut"
+      },
+      "cancel_boost": {
+        "name": "Anuluj doładowanie"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Resetowanie akumulatora energii",
+      "description": "Resetowanie skumulowanych statystyk energii dla strefy wejściowej konfiguracji SecureMTR.",
+      "fields": {
+        "entry_id": {
+          "name": "Identyfikator wejścia",
+          "description": "Identyfikator wpisu konfiguracji kontrolera SecureMTR do zresetowania."
+        },
+        "zone": {
+          "name": "Strefa",
+          "description": "Strefa SecureMTR do zresetowania. Domyślnie jest to strefa podstawowa."
+        }
+      }
+    }
+  }
+}

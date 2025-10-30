@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Η εφαρμογή Secure Controls για κινητά δέχεται μόνο κωδικούς πρόσβασης έως 12 χαρακτήρες."
+    },
+    "abort": {
+      "already_configured": "Το SecureMTR έχει ήδη ρυθμιστεί."
+    },
+    "step": {
+      "user": {
+        "title": "Ασφαλής λογαριασμός Controls",
+        "description": "Εισάγετε το όνομα χρήστη (διεύθυνση ηλεκτρονικού ταχυδρομείου) και τον κωδικό πρόσβασης που χρησιμοποιείτε στην εφαρμογή Secure Controls για κινητά.",
+        "data": {
+          "email": "Διεύθυνση ηλεκτρονικού ταχυδρομείου (όνομα χρήστη)",
+          "password": "Κωδικός πρόσβασης"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Επιλογές στατιστικών στοιχείων SecureMTR",
+        "description": "Ρυθμίστε τις προεπιλογές στατιστικών στοιχείων εκτέλεσης που χρησιμοποιούνται για το SecureMTR.",
+        "data": {
+          "primary_anchor": "Πρωτεύουσα άγκυρα",
+          "boost_anchor": "Boost άγκυρα",
+          "element_power_kw": "Ισχύς στοιχείου (kW)",
+          "prefer_device_energy": "Προτιμήστε τα σύνολα ενέργειας της συσκευής"
+        },
+        "data_description": {
+          "primary_anchor": "Βασική ώρα που χρησιμοποιείται για την ευθυγράμμιση του στατιστικού παραθύρου της πρωτεύουσας ζώνης.",
+          "boost_anchor": "Βασική ώρα που χρησιμοποιείται για την ευθυγράμμιση του στατιστικού παραθύρου της ζώνης ώθησης.",
+          "element_power_kw": "Ονομαστική ισχύς που χρησιμοποιείται όταν προκύπτει η κατανάλωση ενέργειας από το χρόνο λειτουργίας.",
+          "prefer_device_energy": "Χρησιμοποιήστε τα σύνολα ενέργειας που παρέχονται από το SecureMTR αντί για παράγωγες τιμές όταν είναι διαθέσιμες."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Ενισχυτικά άκρα"
+      },
+      "primary_energy_total": {
+        "name": "Πρωτογενής ενέργεια kWh"
+      },
+      "boost_energy_total": {
+        "name": "Ενίσχυση ενέργειας kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Πρωταρχικός χρόνος εκτέλεσης (τελευταία ημέρα)"
+      },
+      "boost_runtime_daily": {
+        "name": "Χρόνος εκτέλεσης Boost (τελευταία ημέρα)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Πρωτοβάθμια προγραμματισμένη (τελευταία ημέρα)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost προγραμματισμένο (τελευταία ημέρα)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Ελεγκτής"
+      },
+      "timed_boost": {
+        "name": "Χρονισμένη ώθηση"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Ενίσχυση ενεργή"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Ανανέωση μετρήσεων κατανάλωσης"
+      },
+      "log_weekly_schedules": {
+        "name": "Καταγραφή εβδομαδιαίων προγραμμάτων"
+      },
+      "boost_30_minutes": {
+        "name": "Ενίσχυση 30 λεπτά"
+      },
+      "boost_60_minutes": {
+        "name": "Ενίσχυση 60 λεπτά"
+      },
+      "boost_120_minutes": {
+        "name": "Ενίσχυση 120 λεπτά"
+      },
+      "boost_custom_minutes": {
+        "name": "Ενίσχυση {duration} λεπτά"
+      },
+      "cancel_boost": {
+        "name": "Ακύρωση ενίσχυσης"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Επαναφορά συσσωρευτή ενέργειας",
+      "description": "Επαναφορά των αθροιστικών στατιστικών ενέργειας για μια ζώνη καταχώρησης παραμέτρων SecureMTR.",
+      "fields": {
+        "entry_id": {
+          "name": "Αναγνωριστικό εισόδου",
+          "description": "Config entry ID του ελεγκτή SecureMTR προς επαναφορά."
+        },
+        "zone": {
+          "name": "Ζώνη",
+          "description": "Ζώνη SecureMTR για επαναφορά. Προεπιλογή είναι η κύρια ζώνη."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "\"Secure Controls\" mobiliojoje programėlėje priimami tik iki 12 simbolių slaptažodžiai."
+    },
+    "abort": {
+      "already_configured": "SecureMTR jau sukonfigūruotas."
+    },
+    "step": {
+      "user": {
+        "title": "\"Secure Controls\" paskyra",
+        "description": "Įveskite vartotojo vardą (el. pašto adresą) ir slaptažodį, kurį naudojate mobiliojoje programėlėje \"Secure Controls\".",
+        "data": {
+          "email": "El. pašto adresas (vartotojo vardas)",
+          "password": "Slaptažodis"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SecureMTR statistikos parinktys",
+        "description": "Sukonfigūruokite SecureMTR naudojamus numatytosios statistikos vykdymo metu nustatymus.",
+        "data": {
+          "primary_anchor": "Pirminis inkaras",
+          "boost_anchor": "Padidinti inkarą",
+          "element_power_kw": "Elemento galia (kW)",
+          "prefer_device_energy": "Pirmenybė teikiama bendroms prietaiso energijos sumoms"
+        },
+        "data_description": {
+          "primary_anchor": "Bazinis laikas, naudojamas pirminės zonos statistikos langeliui suderinti.",
+          "boost_anchor": "Bazinis laikas, naudojamas suvienodinti didinimo zonos statistikos langą.",
+          "element_power_kw": "Galios įvertinimas, naudojamas nustatant energijos suvartojimą pagal veikimo laiką.",
+          "prefer_device_energy": "Jei įmanoma, naudokite SecureMTR pateiktas bendras energijos sumas, o ne išvestines vertes."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Padidinti galus"
+      },
+      "primary_energy_total": {
+        "name": "Pirminė energija kWh"
+      },
+      "boost_energy_total": {
+        "name": "Energijos padidinimas kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Pirminis veikimo laikas (paskutinė diena)"
+      },
+      "boost_runtime_daily": {
+        "name": "\"Boost\" veikimo laikas (paskutinė diena)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Pagrindinė planuojama (paskutinė diena)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Planuojama \"Boost\" (paskutinė diena)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Valdiklis"
+      },
+      "timed_boost": {
+        "name": "Laiko padidinimas"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Didinti aktyvumą"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Atnaujinti vartojimo rodiklius"
+      },
+      "log_weekly_schedules": {
+        "name": "Registruoti savaitinius tvarkaraščius"
+      },
+      "boost_30_minutes": {
+        "name": "Paspartinti 30 minučių"
+      },
+      "boost_60_minutes": {
+        "name": "\"Boost\" 60 minučių"
+      },
+      "boost_120_minutes": {
+        "name": "Padidinti 120 minučių"
+      },
+      "boost_custom_minutes": {
+        "name": "Padidinimas {duration} minučių"
+      },
+      "cancel_boost": {
+        "name": "Atšaukti postūmį"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Energijos kaupiklio iš naujo nustatymas",
+      "description": "Iš naujo nustatyti kaupiamąją energijos statistiką SecureMTR konfigūracijos įvesties zonoje.",
+      "fields": {
+        "entry_id": {
+          "name": "Įrašo ID",
+          "description": "Iš naujo nustatomo SecureMTR valdiklio konfigūracijos įrašo ID."
+        },
+        "zone": {
+          "name": "Zona",
+          "description": "SecureMTR zonos atstatymas. Numatytoji reikšmė yra pagrindinė zona."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Mobilná aplikácia Secure Controls akceptuje len heslá do 12 znakov."
+    },
+    "abort": {
+      "already_configured": "SecureMTR je už nakonfigurovaný."
+    },
+    "step": {
+      "user": {
+        "title": "Účet Secure Controls",
+        "description": "Zadajte používateľské meno (e-mailovú adresu) a heslo, ktoré používate v mobilnej aplikácii Secure Controls.",
+        "data": {
+          "email": "E-mailová adresa (používateľské meno)",
+          "password": "Heslo"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Možnosti štatistiky SecureMTR",
+        "description": "Konfigurácia predvolených hodnôt štatistík behu používaných pre SecureMTR.",
+        "data": {
+          "primary_anchor": "Primárna kotva",
+          "boost_anchor": "Zvýšenie kotvy",
+          "element_power_kw": "Výkon prvku (kW)",
+          "prefer_device_energy": "Prednosť súčtov energie zariadenia"
+        },
+        "data_description": {
+          "primary_anchor": "Základný čas použitý na zarovnanie okna štatistiky primárnej zóny.",
+          "boost_anchor": "Základný čas použitý na zarovnanie okna štatistiky zóny zosilnenia.",
+          "element_power_kw": "Hodnota výkonu použitá pri odvodzovaní spotreby energie z času prevádzky.",
+          "prefer_device_energy": "Ak sú k dispozícii, použite namiesto odvodených hodnôt súčty energie poskytnuté spoločnosťou SecureMTR."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Zvýšenie koncov"
+      },
+      "primary_energy_total": {
+        "name": "Primárna energia kWh"
+      },
+      "boost_energy_total": {
+        "name": "Zvýšenie energie kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Primárny čas prevádzky (posledný deň)"
+      },
+      "boost_runtime_daily": {
+        "name": "Doba prevádzky Boost (posledný deň)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Plánovaný primárny (posledný deň)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Plánovaná podpora (posledný deň)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Ovládač"
+      },
+      "timed_boost": {
+        "name": "Časované zvýšenie"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Zvýšenie aktívneho"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Obnovenie metrík spotreby"
+      },
+      "log_weekly_schedules": {
+        "name": "Záznam týždenných plánov"
+      },
+      "boost_30_minutes": {
+        "name": "Zvýšenie 30 minút"
+      },
+      "boost_60_minutes": {
+        "name": "Zvýšenie 60 minút"
+      },
+      "boost_120_minutes": {
+        "name": "Zvýšenie 120 minút"
+      },
+      "boost_custom_minutes": {
+        "name": "Zvýšenie {duration} minút"
+      },
+      "cancel_boost": {
+        "name": "Zrušiť podporu"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Obnovenie akumulátora energie",
+      "description": "Obnovenie kumulatívnej energetickej štatistiky pre vstupnú zónu konfigurácie SecureMTR.",
+      "fields": {
+        "entry_id": {
+          "name": "ID vstupu",
+          "description": "ID konfiguračnej položky radiča SecureMTR, ktorý sa má resetovať."
+        },
+        "zone": {
+          "name": "Zóna",
+          "description": "SecureMTR zóna na resetovanie. Predvolené nastavenie je primárna zóna."
+        }
+      }
+    }
+  }
+}

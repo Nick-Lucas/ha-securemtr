@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Мобільний додаток Secure Controls приймає паролі довжиною до 12 символів."
+    },
+    "abort": {
+      "already_configured": "SecureMTR вже налаштовано."
+    },
+    "step": {
+      "user": {
+        "title": "Обліковий запис Secure Controls",
+        "description": "Введіть ім'я користувача (електронну адресу) та пароль, які ви використовуєте в мобільному додатку Secure Controls.",
+        "data": {
+          "email": "Адреса електронної пошти (ім'я користувача)",
+          "password": "Пароль"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Параметри статистики SecureMTR",
+        "description": "Налаштуйте значення статистики виконання за замовчуванням, що використовуються для SecureMTR.",
+        "data": {
+          "primary_anchor": "Основний якір",
+          "boost_anchor": "Посилити якір",
+          "element_power_kw": "Потужність елемента (кВт)",
+          "prefer_device_energy": "Надавайте перевагу загальним показникам енергії пристрою"
+        },
+        "data_description": {
+          "primary_anchor": "Базовий час використовується для вирівнювання вікна статистики основної зони.",
+          "boost_anchor": "Базовий час використовується для вирівнювання вікна статистики зони прискорення.",
+          "element_power_kw": "Номінальна потужність використовується при виведенні енергоспоживання з часу виконання.",
+          "prefer_device_energy": "Використовуйте надані SecureMTR підсумки енергії замість похідних значень, якщо вони доступні."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Кінці бустерів"
+      },
+      "primary_energy_total": {
+        "name": "Первинна енергія кВт-год"
+      },
+      "boost_energy_total": {
+        "name": "Підвищення енергії кВт-год"
+      },
+      "primary_runtime_daily": {
+        "name": "Основний час виконання (останній день)"
+      },
+      "boost_runtime_daily": {
+        "name": "Збільшення часу роботи (останній день)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Первинний розклад (останній день)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Запланований буст (останній день)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Контролер"
+      },
+      "timed_boost": {
+        "name": "Прискорення в часі"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Підвищити активність"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Показники споживання оновлення"
+      },
+      "log_weekly_schedules": {
+        "name": "Записуйте щотижневі графіки"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 хвилин"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 хвилин"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 хвилин"
+      },
+      "boost_custom_minutes": {
+        "name": "Підвищення {duration} хвилин"
+      },
+      "cancel_boost": {
+        "name": "Скасувати прискорення"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Обнулення акумулятора енергії",
+      "description": "Скинути кумулятивну статистику енергоспоживання для зони входу до конфігурації SecureMTR.",
+      "fields": {
+        "entry_id": {
+          "name": "Ідентифікатор учасника",
+          "description": "Ідентифікатор конфігураційного запису контролера SecureMTR, який потрібно скинути."
+        },
+        "zone": {
+          "name": "Зона",
+          "description": "Скидання зони SecureMTR. За замовчуванням - основна зона."
+        }
+      }
+    }
+  }
+}

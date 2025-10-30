@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Mobilā lietotne Secure Controls pieņem tikai paroles līdz 12 rakstzīmēm."
+    },
+    "abort": {
+      "already_configured": "SecureMTR jau ir konfigurēts."
+    },
+    "step": {
+      "user": {
+        "title": "Secure Controls konts",
+        "description": "Ievadiet lietotājvārdu (e-pasta adresi) un paroli, ko izmantojat mobilajā lietotnē Secure Controls.",
+        "data": {
+          "email": "E-pasta adrese (lietotājvārds)",
+          "password": "Parole"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SecureMTR statistikas opcijas",
+        "description": "Konfigurēt SecureMTR izmantotās izpildes laika statistikas noklusējuma iestatījumus.",
+        "data": {
+          "primary_anchor": "Galvenais enkurs",
+          "boost_anchor": "Palielināt enkuru",
+          "element_power_kw": "Elementa jauda (kW)",
+          "prefer_device_energy": "Priekšroku dod ierīces enerģijas kopsummām"
+        },
+        "data_description": {
+          "primary_anchor": "Bāzes laiks, ko izmanto primārās zonas statistikas loga izlīdzināšanai.",
+          "boost_anchor": "Bāzes laiks, ko izmanto, lai izlīdzinātu palielinājuma zonas statistikas logu.",
+          "element_power_kw": "Jaudas kategorija, ko izmanto, atvasinot enerģijas patēriņu no darbības laika.",
+          "prefer_device_energy": "Izmantojiet SecureMTR sniegto enerģijas kopsummu, nevis atvasinātās vērtības, ja tādas ir pieejamas."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Palielināt galus"
+      },
+      "primary_energy_total": {
+        "name": "Primārā enerģija kWh"
+      },
+      "boost_energy_total": {
+        "name": "Palielināt enerģijas patēriņu kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Galvenais darbības laiks (pēdējā diena)"
+      },
+      "boost_runtime_daily": {
+        "name": "Palielināt darbības laiku (pēdējā diena)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Sākotnējais plānotais (pēdējā diena)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Plānotais Boost (pēdējā diena)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Kontrolieris"
+      },
+      "timed_boost": {
+        "name": "Laika palielinājums"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Palielināt aktīvo"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Atjaunināt patēriņa rādītājus"
+      },
+      "log_weekly_schedules": {
+        "name": "Reģistrēt nedēļas grafikus"
+      },
+      "boost_30_minutes": {
+        "name": "Palielināt 30 minūtes"
+      },
+      "boost_60_minutes": {
+        "name": "Palielināt 60 minūtes"
+      },
+      "boost_120_minutes": {
+        "name": "Pastiprinājums 120 minūtes"
+      },
+      "boost_custom_minutes": {
+        "name": "Paaugstinājums {duration} minūtes"
+      },
+      "cancel_boost": {
+        "name": "Atcelt palielināt"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Enerģijas akumulatora atiestatīšana",
+      "description": "Atiestatīt kumulatīvo enerģijas statistiku SecureMTR konfigurācijas ieraksta zonai.",
+      "fields": {
+        "entry_id": {
+          "name": "Ieraksta ID",
+          "description": "Atiestatāmā SecureMTR kontroliera konfigurācijas ieraksta ID."
+        },
+        "zone": {
+          "name": "Zona",
+          "description": "SecureMTR zonas atiestatīšana. Noklusējuma iestatījums ir primārā zona."
+        }
+      }
+    }
+  }
+}

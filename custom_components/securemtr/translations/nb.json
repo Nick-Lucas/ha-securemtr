@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Secure Controls-mobilappen godtar bare passord på opptil 12 tegn."
+    },
+    "abort": {
+      "already_configured": "SecureMTR er allerede konfigurert."
+    },
+    "step": {
+      "user": {
+        "title": "Secure Controls-konto",
+        "description": "Skriv inn brukernavnet (e-postadressen) og passordet som du bruker i Secure Controls-mobilappen.",
+        "data": {
+          "email": "E-postadresse (brukernavn)",
+          "password": "Passord"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Alternativer for SecureMTR-statistikk",
+        "description": "Konfigurer standardinnstillingene for kjøretidsstatistikk som brukes for SecureMTR.",
+        "data": {
+          "primary_anchor": "Primært anker",
+          "boost_anchor": "Boost anker",
+          "element_power_kw": "Elementets effekt (kW)",
+          "prefer_device_energy": "Foretrekker enhetens totale energiforbruk"
+        },
+        "data_description": {
+          "primary_anchor": "Basistid som brukes til å justere statistikkvinduet for primærsonen.",
+          "boost_anchor": "Basistid som brukes til å justere statistikkvinduet for boost-sonen.",
+          "element_power_kw": "Effektklassifisering som brukes når energiforbruket avledes fra driftstiden.",
+          "prefer_device_energy": "Bruk SecureMTRs energitotaler i stedet for avledede verdier når de er tilgjengelige."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Boost-ender"
+      },
+      "primary_energy_total": {
+        "name": "Primærenergi kWh"
+      },
+      "boost_energy_total": {
+        "name": "Øke energien kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Primær kjøretid (siste dag)"
+      },
+      "boost_runtime_daily": {
+        "name": "Boost kjøretid (siste dag)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Primært planlagt (siste dag)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost planlagt (siste dag)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Controller"
+      },
+      "timed_boost": {
+        "name": "Tidsinnstilt boost"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Boost aktiv"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Oppdater forbruksmålinger"
+      },
+      "log_weekly_schedules": {
+        "name": "Loggføre ukeplaner"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 minutter"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 minutter"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 minutter"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} minutter"
+      },
+      "cancel_boost": {
+        "name": "Avbryt boost"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Tilbakestill energiakkumulator",
+      "description": "Tilbakestill den kumulative energistatistikken for en SecureMTR-konfigurasjonsinngangssone.",
+      "fields": {
+        "entry_id": {
+          "name": "Inngangs-ID",
+          "description": "Konfigurerings-ID for SecureMTR-kontrolleren som skal tilbakestilles."
+        },
+        "zone": {
+          "name": "Sone",
+          "description": "SecureMTR-sone som skal tilbakestilles. Standardinnstillingen er den primære sonen."
+        }
+      }
+    }
+  }
+}

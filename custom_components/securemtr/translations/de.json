@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Die Secure Controls Mobile App akzeptiert nur Passwörter mit bis zu 12 Zeichen."
+    },
+    "abort": {
+      "already_configured": "SecureMTR ist bereits konfiguriert."
+    },
+    "step": {
+      "user": {
+        "title": "Secure Controls-Konto",
+        "description": "Geben Sie den Benutzernamen (E-Mail-Adresse) und das Passwort ein, die Sie für die Secure Controls Mobile App verwenden.",
+        "data": {
+          "email": "E-Mail Adresse (Benutzername)",
+          "password": "Passwort"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SecureMTR-Statistik-Optionen",
+        "description": "Konfigurieren Sie die für SecureMTR verwendeten Laufzeitstatistik-Standardwerte.",
+        "data": {
+          "primary_anchor": "Primärer Anker",
+          "boost_anchor": "Anker verstärken",
+          "element_power_kw": "Leistung des Elements (kW)",
+          "prefer_device_energy": "Gesamtenergie der Geräte bevorzugen"
+        },
+        "data_description": {
+          "primary_anchor": "Basiszeit für die Ausrichtung des Statistikfensters der Primärzone.",
+          "boost_anchor": "Basiszeit für die Ausrichtung des Statistikfensters der Boostzone.",
+          "element_power_kw": "Leistungsangabe, die bei der Ableitung des Energieverbrauchs aus der Laufzeit verwendet wird.",
+          "prefer_device_energy": "Verwenden Sie die von SecureMTR bereitgestellten Gesamtenergiewerte anstelle der abgeleiteten Werte, sofern verfügbar."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Enden verstärken"
+      },
+      "primary_energy_total": {
+        "name": "Primärenergie kWh"
+      },
+      "boost_energy_total": {
+        "name": "Energie erhöhen kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Primäre Laufzeit (letzter Tag)"
+      },
+      "boost_runtime_daily": {
+        "name": "Boost-Laufzeit (letzter Tag)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Primärer Termin (letzter Tag)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost geplant (letzter Tag)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Controller"
+      },
+      "timed_boost": {
+        "name": "Zeitgesteuerte Erhöhung"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Boost aktiv"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Verbrauchsmetriken auffrischen"
+      },
+      "log_weekly_schedules": {
+        "name": "Wochenpläne protokollieren"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 Minuten"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 Minuten"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 Minuten"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} Minuten"
+      },
+      "cancel_boost": {
+        "name": "Boost abbrechen"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Zurücksetzen des Energiespeichers",
+      "description": "Zurücksetzen der kumulativen Energiestatistiken für eine SecureMTR-Config-Eingangszone.",
+      "fields": {
+        "entry_id": {
+          "name": "Eintrag ID",
+          "description": "Config-Eintrags-ID des zurückzusetzenden SecureMTR-Controllers."
+        },
+        "zone": {
+          "name": "Zone",
+          "description": "SecureMTR-Zone, die zurückgesetzt werden soll. Standardmäßig wird die primäre Zone verwendet."
+        }
+      }
+    }
+  }
+}

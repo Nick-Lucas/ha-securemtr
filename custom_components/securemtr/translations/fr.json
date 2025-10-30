@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "L'application mobile Secure Controls n'accepte que des mots de passe de 12 caractères maximum."
+    },
+    "abort": {
+      "already_configured": "SecureMTR est déjà configuré."
+    },
+    "step": {
+      "user": {
+        "title": "Compte Secure Controls",
+        "description": "Saisissez le nom d'utilisateur (adresse électronique) et le mot de passe que vous utilisez avec l'application mobile Secure Controls.",
+        "data": {
+          "email": "Adresse électronique (nom d'utilisateur)",
+          "password": "Mot de passe"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options statistiques SecureMTR",
+        "description": "Configurer les valeurs par défaut des statistiques d'exécution utilisées pour SecureMTR.",
+        "data": {
+          "primary_anchor": "Ancre primaire",
+          "boost_anchor": "Ancrage Boost",
+          "element_power_kw": "Puissance de l'élément (kW)",
+          "prefer_device_energy": "Préférer les totaux d'énergie du dispositif"
+        },
+        "data_description": {
+          "primary_anchor": "Heure de base utilisée pour aligner la fenêtre des statistiques de la zone primaire.",
+          "boost_anchor": "Heure de base utilisée pour aligner la fenêtre des statistiques de la zone d'accélération.",
+          "element_power_kw": "Puissance nominale utilisée pour calculer la consommation d'énergie à partir de la durée d'utilisation.",
+          "prefer_device_energy": "Utilisez les totaux énergétiques fournis par SecureMTR au lieu des valeurs dérivées lorsqu'elles sont disponibles."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Booster les extrémités"
+      },
+      "primary_energy_total": {
+        "name": "Énergie primaire kWh"
+      },
+      "boost_energy_total": {
+        "name": "Énergie d'appoint kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Durée d'exécution primaire (dernier jour)"
+      },
+      "boost_runtime_daily": {
+        "name": "Durée de fonctionnement de Boost (dernier jour)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Primaire prévu (dernier jour)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost programmé (dernier jour)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Contrôleur"
+      },
+      "timed_boost": {
+        "name": "Boostage chronométré"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Boost actif"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Actualiser les mesures de consommation"
+      },
+      "log_weekly_schedules": {
+        "name": "Enregistrer les horaires hebdomadaires"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 minutes"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 minutes"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 minutes"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} minutes"
+      },
+      "cancel_boost": {
+        "name": "Annuler le coup de pouce"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Remise à zéro de l'accumulateur d'énergie",
+      "description": "Réinitialiser les statistiques énergétiques cumulées pour une zone d'entrée de configuration SecureMTR.",
+      "fields": {
+        "entry_id": {
+          "name": "ID d'entrée",
+          "description": "ID d'entrée de configuration du contrôleur SecureMTR à réinitialiser."
+        },
+        "zone": {
+          "name": "Zone",
+          "description": "Zone SecureMTR à réinitialiser. Par défaut, il s'agit de la zone primaire."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Aplicația mobilă Secure Controls acceptă numai parole de până la 12 caractere."
+    },
+    "abort": {
+      "already_configured": "SecureMTR este deja configurat."
+    },
+    "step": {
+      "user": {
+        "title": "Cont de control securizat",
+        "description": "Introduceți numele de utilizator (adresa de e-mail) și parola pe care le utilizați cu aplicația mobilă Secure Controls.",
+        "data": {
+          "email": "Adresa de e-mail (nume de utilizator)",
+          "password": "Parolă"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opțiuni statistice SecureMTR",
+        "description": "Configurați valorile implicite ale statisticilor în timp de execuție utilizate pentru SecureMTR.",
+        "data": {
+          "primary_anchor": "Ancoră primară",
+          "boost_anchor": "Consolidare ancoră",
+          "element_power_kw": "Puterea elementului (kW)",
+          "prefer_device_energy": "Preferă totalurile de energie ale dispozitivelor"
+        },
+        "data_description": {
+          "primary_anchor": "Ora de bază utilizată pentru alinierea ferestrei statistice a zonei primare.",
+          "boost_anchor": "Ora de bază utilizată pentru alinierea ferestrei statistice a zonei de impuls.",
+          "element_power_kw": "Puterea nominală utilizată atunci când se derivă consumul de energie din timpul de funcționare.",
+          "prefer_device_energy": "Utilizați totalurile de energie furnizate de SecureMTR în locul valorilor derivate atunci când sunt disponibile."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Stimulează capetele"
+      },
+      "primary_energy_total": {
+        "name": "Energie primară kWh"
+      },
+      "boost_energy_total": {
+        "name": "Energie de stimulare kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Timpul de funcționare primar (ultima zi)"
+      },
+      "boost_runtime_daily": {
+        "name": "Durată de funcționare Boost (ultima zi)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Primar programat (ultima zi)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost programat (ultima zi)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Controler"
+      },
+      "timed_boost": {
+        "name": "Stimulare temporizată"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Boost activ"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Actualizați parametrii de consum"
+      },
+      "log_weekly_schedules": {
+        "name": "Înregistrați programele săptămânale"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 de minute"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 de minute"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 minute"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} minute"
+      },
+      "cancel_boost": {
+        "name": "Anulează impulsul"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Resetarea acumulatorului de energie",
+      "description": "Resetați statisticile energetice cumulative pentru o zonă de intrare SecureMTR config.",
+      "fields": {
+        "entry_id": {
+          "name": "ID intrare",
+          "description": "Config entry ID al controlerului SecureMTR care urmează să fie resetat."
+        },
+        "zone": {
+          "name": "Zona",
+          "description": "Zona SecureMTR pentru resetare. În mod implicit, zona principală."
+        }
+      }
+    }
+  }
+}

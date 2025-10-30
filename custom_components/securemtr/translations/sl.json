@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Mobilna aplikacija Secure Controls sprejema samo gesla do 12 znakov."
+    },
+    "abort": {
+      "already_configured": "SecureMTR je že konfiguriran."
+    },
+    "step": {
+      "user": {
+        "title": "Račun Secure Controls",
+        "description": "Vnesite uporabniško ime (e-poštni naslov) in geslo, ki ju uporabljate v mobilni aplikaciji Secure Controls.",
+        "data": {
+          "email": "E-poštni naslov (uporabniško ime)",
+          "password": "Geslo"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Možnosti statistike SecureMTR",
+        "description": "Konfiguracija privzetih nastavitev statistike med izvajanjem, ki se uporabljajo za SecureMTR.",
+        "data": {
+          "primary_anchor": "Primarno sidro",
+          "boost_anchor": "Povečanje sidra",
+          "element_power_kw": "Moč elementa (kW)",
+          "prefer_device_energy": "Prednostne skupne vrednosti energije naprave"
+        },
+        "data_description": {
+          "primary_anchor": "Osnovni čas, ki se uporablja za poravnavo okna statistike primarnega območja.",
+          "boost_anchor": "Osnovni čas, ki se uporablja za poravnavo statističnega okna območja povečanja.",
+          "element_power_kw": "Nazivna moč, ki se uporablja pri izpeljavi porabe energije iz časa delovanja.",
+          "prefer_device_energy": "Če so na voljo, namesto izpeljanih vrednosti uporabljajte skupne vrednosti energije, ki jih zagotavlja SecureMTR."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Povečanje koncev"
+      },
+      "primary_energy_total": {
+        "name": "Primarna energija kWh"
+      },
+      "boost_energy_total": {
+        "name": "Povečanje energije kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Osnovni čas delovanja (zadnji dan)"
+      },
+      "boost_runtime_daily": {
+        "name": "Čas delovanja Boost (zadnji dan)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Osnovno načrtovano (zadnji dan)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost po urniku (zadnji dan)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Krmilnik"
+      },
+      "timed_boost": {
+        "name": "Časovno opredeljeno povečanje"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Povečati aktivno"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Osvežite metrike porabe"
+      },
+      "log_weekly_schedules": {
+        "name": "Prijava tedenskih urnikov"
+      },
+      "boost_30_minutes": {
+        "name": "Povečanje 30 minut"
+      },
+      "boost_60_minutes": {
+        "name": "Povečanje 60 minut"
+      },
+      "boost_120_minutes": {
+        "name": "Povečanje 120 minut"
+      },
+      "boost_custom_minutes": {
+        "name": "Povečanje {duration} minut"
+      },
+      "cancel_boost": {
+        "name": "Prekliči spodbudo"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Ponastavitev akumulatorja energije",
+      "description": "Ponastavitev kumulativne statistike energije za območje vnosa konfiguracije SecureMTR.",
+      "fields": {
+        "entry_id": {
+          "name": "ID vnosa",
+          "description": "ID konfiguracijskega vnosa krmilnika SecureMTR za ponastavitev."
+        },
+        "zone": {
+          "name": "Območje",
+          "description": "SecureMTR območje za ponastavitev. Privzeto je primarno območje."
+        }
+      }
+    }
+  }
+}

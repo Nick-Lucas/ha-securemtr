@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "De mobiele app Secure Controls accepteert alleen wachtwoorden van maximaal 12 tekens."
+    },
+    "abort": {
+      "already_configured": "SecureMTR is al geconfigureerd."
+    },
+    "step": {
+      "user": {
+        "title": "Account voor beveiligd beheer",
+        "description": "Voer de gebruikersnaam (e-mailadres) en het wachtwoord in die u gebruikt voor de Secure Controls mobiele app.",
+        "data": {
+          "email": "E-mailadres (gebruikersnaam)",
+          "password": "Wachtwoord"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SecureMTR statistieken opties",
+        "description": "Configureer de standaard runtime statistieken die gebruikt worden voor SecureMTR.",
+        "data": {
+          "primary_anchor": "Primair anker",
+          "boost_anchor": "Verhoog anker",
+          "element_power_kw": "Vermogen element (kW)",
+          "prefer_device_energy": "Voorkeur apparaat energietotalen"
+        },
+        "data_description": {
+          "primary_anchor": "Basistijd die wordt gebruikt om het statistiekvenster van de primaire zone uit te lijnen.",
+          "boost_anchor": "Basistijd die wordt gebruikt om het statistiekvenster van de boostzone uit te lijnen.",
+          "element_power_kw": "Vermogen dat wordt gebruikt om het energieverbruik af te leiden uit de runtime.",
+          "prefer_device_energy": "Gebruik de door SecureMTR geleverde energietotalen in plaats van afgeleide waarden wanneer deze beschikbaar zijn."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Uiteinden stimuleren"
+      },
+      "primary_energy_total": {
+        "name": "Primaire energie kWh"
+      },
+      "boost_energy_total": {
+        "name": "Energieverhoging kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Primaire looptijd (laatste dag)"
+      },
+      "boost_runtime_daily": {
+        "name": "Boost runtime (laatste dag)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Primair gepland (laatste dag)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost gepland (laatste dag)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Controller"
+      },
+      "timed_boost": {
+        "name": "Getimede boost"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Actieve boost"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Verbruiksgegevens vernieuwen"
+      },
+      "log_weekly_schedules": {
+        "name": "Wekelijkse planningen bijhouden"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 minuten"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 minuten"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 minuten"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} minuten"
+      },
+      "cancel_boost": {
+        "name": "Boost annuleren"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Energieaccumulator resetten",
+      "description": "Reset de cumulatieve energiestatistieken voor een SecureMTR config entry zone.",
+      "fields": {
+        "entry_id": {
+          "name": "Toegang ID",
+          "description": "Config entry ID van de SecureMTR controller die gereset moet worden."
+        },
+        "zone": {
+          "name": "Zone",
+          "description": "SecureMTR zone om te resetten. Wordt standaard ingesteld op de primaire zone."
+        }
+      }
+    }
+  }
+}

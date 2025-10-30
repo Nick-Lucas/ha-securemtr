@@ -1,0 +1,118 @@
+{
+  "title": "SecureMTR",
+  "config": {
+    "error": {
+      "password_too_long": "Secure Controls -mobiilisovellus hyväksyy vain enintään 12-merkkiset salasanat."
+    },
+    "abort": {
+      "already_configured": "SecureMTR on jo määritetty."
+    },
+    "step": {
+      "user": {
+        "title": "Secure Controls -tili",
+        "description": "Syötä käyttäjätunnus (sähköpostiosoite) ja salasana, joita käytät Secure Controls -mobiilisovelluksessa.",
+        "data": {
+          "email": "Sähköpostiosoite (käyttäjätunnus)",
+          "password": "Salasana"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SecureMTR-tilastovaihtoehdot",
+        "description": "Määritä SecureMTR:ssä käytettävät ajonaikaisten tilastojen oletusarvot.",
+        "data": {
+          "primary_anchor": "Ensisijainen ankkuri",
+          "boost_anchor": "Boost ankkuri",
+          "element_power_kw": "Elementin teho (kW)",
+          "prefer_device_energy": "Edullisemmat laitteiden energiasummat"
+        },
+        "data_description": {
+          "primary_anchor": "Perusaika, jota käytetään ensisijaisen vyöhykkeen tilastoikkunan kohdistamiseen.",
+          "boost_anchor": "Perusaika, jota käytetään tehostusvyöhyketilastoikkunan kohdistamiseen.",
+          "element_power_kw": "Teholuokitus, jota käytetään, kun energiankulutus johdetaan käyttöajasta.",
+          "prefer_device_energy": "Käytä SecureMTR:n toimittamia energiasummia johdettujen arvojen sijasta, jos ne ovat saatavilla."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "boost_ends": {
+        "name": "Boost päättyy"
+      },
+      "primary_energy_total": {
+        "name": "Primäärienergia kWh"
+      },
+      "boost_energy_total": {
+        "name": "Boost-energia kWh"
+      },
+      "primary_runtime_daily": {
+        "name": "Ensisijainen käyttöaika (viimeinen päivä)"
+      },
+      "boost_runtime_daily": {
+        "name": "Boost-ajoaika (viimeinen päivä)"
+      },
+      "primary_scheduled_daily": {
+        "name": "Ensisijainen aikataulun mukainen (viimeinen päivä)"
+      },
+      "boost_scheduled_daily": {
+        "name": "Boost suunniteltu (viimeinen päivä)"
+      }
+    },
+    "switch": {
+      "controller_power": {
+        "name": "Ohjain"
+      },
+      "timed_boost": {
+        "name": "Ajastettu lisäys"
+      }
+    },
+    "binary_sensor": {
+      "boost_active": {
+        "name": "Boost aktiivinen"
+      }
+    },
+    "button": {
+      "refresh_consumption_metrics": {
+        "name": "Päivitä kulutusmittarit"
+      },
+      "log_weekly_schedules": {
+        "name": "Loki viikoittaiset aikataulut"
+      },
+      "boost_30_minutes": {
+        "name": "Boost 30 minuuttia"
+      },
+      "boost_60_minutes": {
+        "name": "Boost 60 minuuttia"
+      },
+      "boost_120_minutes": {
+        "name": "Boost 120 minuuttia"
+      },
+      "boost_custom_minutes": {
+        "name": "Boost {duration} minuuttia"
+      },
+      "cancel_boost": {
+        "name": "Peruuta nosto"
+      }
+    }
+  },
+  "services": {
+    "reset_energy_accumulator": {
+      "name": "Nollaa energiaakku",
+      "description": "Nollaa SecureMTR-konfigurointivyöhykkeen kumulatiiviset energiatilastot.",
+      "fields": {
+        "entry_id": {
+          "name": "Sisäänkirjautumistunnus",
+          "description": "Nollattavan SecureMTR-ohjaimen konfigurointimerkinnän ID."
+        },
+        "zone": {
+          "name": "Vyöhyke",
+          "description": "SecureMTR-vyöhyke nollataan. Oletusarvo on ensisijainen vyöhyke."
+        }
+      }
+    }
+  }
+}

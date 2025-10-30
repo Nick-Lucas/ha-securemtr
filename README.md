@@ -10,7 +10,7 @@
 [![Package manager: uv](https://img.shields.io/badge/Package%20manager-uv-5F45BA?logo=astral&logoColor=white)](https://docs.astral.sh/uv/)
 [![Code style: Ruff](https://img.shields.io/badge/Code%20style-Ruff-4B32C3.svg)](https://docs.astral.sh/ruff/)
 
-![🌍 26 Languages](https://img.shields.io/badge/%F0%9F%8C%8D-26_languages-00bcd4?style=flat-square)
+![🌍 24 Languages](https://img.shields.io/badge/%F0%9F%8C%8D-24_languages-00bcd4?style=flat-square)
 
 #  Home Assistant integration for E7+ Secure Meters Smart Water Heater Controller
 
