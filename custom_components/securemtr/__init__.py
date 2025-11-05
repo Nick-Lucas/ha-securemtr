@@ -647,11 +647,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_track_time_change(
             hass,
             _scheduled_consumption_refresh,
-            hour=scheduled_hour,
+            hour=1,
             minute=0,
             second=0,
         )
-        for scheduled_hour in (1, 13)
     ]
 
     def _unsubscribe_schedules() -> None:
@@ -1749,7 +1748,7 @@ def _build_zone_statistics_samples(
         cumulative += slot_energy
         records.append(
             StatisticData(
-                start=slot_start,
+                start=dt_util.as_utc(slot_start),
                 sum=cumulative,
                 state=cumulative,
             )
