@@ -328,6 +328,7 @@ class FakeBeanbagBackend:
         """Record the credentials and return canned connection artefacts."""
 
         self.login_calls.append((email, password_digest))
+        self.websocket = FakeWebSocket()
         return self._session, self.websocket
 
     async def read_device_metadata(
@@ -1581,6 +1582,93 @@ async def test_consumption_metrics_refreshes_history(
 
 
 @pytest.mark.asyncio
+async def test_consumption_metrics_retries_closed_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+) -> None:
+    """Ensure consumption metrics reopen the WebSocket after a send failure."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-retry",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+
+    fake_session = object()
+
+    class FlakyHistoryBackend(FakeBeanbagBackend):
+        def __init__(self, session: object) -> None:
+            super().__init__(session)
+            self.websocket = FakeWebSocket()
+            self._history_attempts = 0
+
+        async def login_and_connect(
+            self, email: str, password_digest: str
+        ) -> tuple[BeanbagSession, FakeWebSocket]:
+            self.login_calls.append((email, password_digest))
+            self.websocket = FakeWebSocket()
+            return self._session, self.websocket
+
+        async def read_energy_history(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            window_index: int = 1,
+        ) -> list[BeanbagEnergySample]:
+            self._history_attempts += 1
+            if self._history_attempts == 1:
+                self.energy_history_calls.append((gateway_id, window_index))
+                raise BeanbagError("transport unavailable")
+            return await super().read_energy_history(
+                session, websocket, gateway_id, window_index=window_index
+            )
+
+    backend = FlakyHistoryBackend(fake_session)
+
+    dispatch_calls: list[tuple[object, str]] = []
+
+    def _capture_dispatch(hass_obj: object, entry_id: str) -> None:
+        dispatch_calls.append((hass_obj, entry_id))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_dispatch_runtime_update",
+        _capture_dispatch,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: backend,
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    first_socket = runtime.websocket
+    initial_logins = len(backend.login_calls)
+    initial_history_calls = len(backend.energy_history_calls)
+    initial_dispatches = len(dispatch_calls)
+
+    await consumption_metrics(hass, entry)
+
+    assert backend._history_attempts >= 2
+    assert backend.energy_history_calls[-1] == ("gateway-1", 1)
+    assert runtime.websocket is backend.websocket
+    assert runtime.websocket.closed is False
+    assert runtime.consumption_metrics_log
+    assert len(dispatch_calls) == initial_dispatches + 1
+    assert dispatch_calls[-1] == (hass, entry.entry_id)
+
+
+@pytest.mark.asyncio
 async def test_consumption_metrics_skips_processed_days(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
@@ -2386,7 +2474,11 @@ async def test_consumption_metrics_energy_history_error(
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
     await consumption_metrics(hass, entry)
-    assert backend.energy_history_calls == [("gateway-1", 1)]
+    assert backend.energy_history_calls == [
+        ("gateway-1", 1),
+        ("gateway-1", 1),
+    ]
+    assert backend.login_calls == [("user@example.com", "digest")]
     assert runtime.consumption_metrics_log == []
 
 
