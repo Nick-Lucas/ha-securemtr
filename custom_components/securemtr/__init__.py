@@ -42,6 +42,7 @@ import voluptuous as vol
 
 from .beanbag import (
     BeanbagBackend,
+    BeanbagEnergySample,
     BeanbagError,
     BeanbagGateway,
     BeanbagSession,
@@ -1043,6 +1044,39 @@ async def async_run_with_reconnect(
     raise last_error
 
 
+async def _async_fetch_energy_samples(
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    controller: SecuremtrController,
+    entry_identifier: str,
+) -> list[BeanbagEnergySample] | None:
+    """Fetch energy history for the active controller with reconnection."""
+
+    gateway_id = controller.gateway_id
+
+    async def _read_energy_history(
+        backend: BeanbagBackend,
+        active_session: BeanbagSession,
+        active_websocket: ClientWebSocketResponse,
+    ) -> list[BeanbagEnergySample]:
+        """Load energy history for the requested gateway."""
+
+        return await backend.read_energy_history(
+            active_session, active_websocket, gateway_id
+        )
+
+    try:
+        return await async_run_with_reconnect(entry, runtime, _read_energy_history)
+    except BeanbagError as error:
+        runtime.consumption_refresh_pending = True
+        _LOGGER.error(
+            "Failed to fetch energy history for %s: %s",
+            entry_identifier,
+            error,
+        )
+        return None
+
+
 @dataclass(slots=True)
 class SecuremtrController:
     """Represent the discovered Secure Meters controller."""
@@ -1246,17 +1280,10 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         )
         return
 
-    try:
-        samples = await runtime.backend.read_energy_history(
-            session, websocket, controller.gateway_id
-        )
-    except BeanbagError as error:
-        runtime.consumption_refresh_pending = True
-        _LOGGER.error(
-            "Failed to fetch energy history for %s: %s",
-            entry_identifier,
-            error,
-        )
+    samples = await _async_fetch_energy_samples(
+        entry, runtime, controller, entry_identifier
+    )
+    if samples is None:
         return
 
     if not samples:

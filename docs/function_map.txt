@@ -15,6 +15,7 @@ custom_components.securemtr.__init__._async_queue_backend_retry: Schedule backgr
 custom_components.securemtr.__init__._async_refresh_connection: Ensure the Beanbag WebSocket connection is available, reconnecting with stored credentials when required.
 custom_components.securemtr.__init__._async_fetch_controller: Retrieve controller metadata via the Beanbag WebSocket.
 custom_components.securemtr.__init__._build_controller: Translate metadata and gateway context into a controller object.
+custom_components.securemtr.__init__._async_fetch_energy_samples: Fetch energy history for the active controller with reconnection.
 custom_components.securemtr.__init__.consumption_metrics: Import daily energy samples anchored to schedule start times when available, updating the accumulator and in-memory sensors.
 custom_components.securemtr.__init__._energy_store_key: Return the persistent storage key for accumulated energy state.
 custom_components.securemtr.__init__._load_statistics_options: Derive statistics options from the configuration entry using the Home Assistant timezone when available.
