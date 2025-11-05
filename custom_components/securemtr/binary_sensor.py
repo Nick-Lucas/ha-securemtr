@@ -99,8 +99,8 @@ class _SecuremtrBaseBinarySensor(BinarySensorEntity):
         """Return the slugified identifier for the controller."""
 
         controller = self._controller
-        serial_identifier = controller.serial_number or controller.identifier
-        return slugify_identifier(serial_identifier)
+        identifier = controller.serial_number or controller.identifier
+        return slugify_identifier(identifier)
 
 
 class SecuremtrBoostActiveBinarySensor(_SecuremtrBaseBinarySensor):
