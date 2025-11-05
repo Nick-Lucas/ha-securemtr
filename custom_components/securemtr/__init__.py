@@ -185,12 +185,17 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
         return
 
     existing_entries: dict[str, ConfigEntry] = {}
+    existing_entry_ids: dict[str, ConfigEntry] = {}
     helpers_by_source: dict[tuple[str, str | None], list[ConfigEntry]] = {}
 
     for helper_entry in helper_entries:
         unique_id = getattr(helper_entry, "unique_id", None)
         if isinstance(unique_id, str):
             existing_entries[unique_id] = helper_entry
+
+        entry_id = getattr(helper_entry, "entry_id", None)
+        if isinstance(entry_id, str):
+            existing_entry_ids[entry_id] = helper_entry
 
         options = getattr(helper_entry, "options", None)
         if isinstance(options, Mapping):
@@ -202,7 +207,7 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                     helper_entry
                 )
 
-    helper_identifier = _utility_meter_identifier(entry)
+    helper_identifier = _utility_meter_identifier(hass, entry)
 
     domain_state = hass.data.get(DOMAIN, {})
     runtime = domain_state.get(entry.entry_id)
@@ -228,12 +233,9 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
             )
             entry_id = f"securemtr_um_{helper_identifier}_{zone_key}_{cycle}"
 
-            source_helpers: list[ConfigEntry] = []
-            for candidate in source_candidates:
-                source_helpers.extend(helpers_by_source.get((candidate, cycle), []))
-                legacy_cycle_helpers = helpers_by_source.get((candidate, None))
-                if legacy_cycle_helpers:
-                    source_helpers.extend(list(legacy_cycle_helpers))
+            source_helpers = _collect_candidate_helpers(
+                helpers_by_source, source_candidates, cycle
+            )
 
             seen_entries: set[str] = set()
             for legacy_entry in source_helpers:
@@ -241,22 +243,13 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                     continue
                 seen_entries.add(legacy_entry.entry_id)
                 legacy_unique = getattr(legacy_entry, "unique_id", None)
-                meter_type = legacy_entry.options.get(CONF_METER_TYPE)
                 if (
-                    legacy_unique == unique_id
-                    and legacy_entry.entry_id == entry_id
-                    and legacy_entry.options.get(CONF_SOURCE_SENSOR) == source_entity
-                    and (meter_type == cycle or meter_type is None)
+                    legacy_entry.entry_id == entry_id
+                    and _helper_options_match(legacy_entry, source_entity, cycle)
                 ):
-                    for candidate in source_candidates:
-                        for helper_key in ((candidate, cycle), (candidate, None)):
-                            helpers = helpers_by_source.get(helper_key)
-                            if helpers is None:
-                                continue
-                            with suppress(ValueError):
-                                helpers.remove(legacy_entry)
-                            if not helpers:
-                                helpers_by_source.pop(helper_key, None)
+                    _prune_helper_candidates(
+                        helpers_by_source, source_candidates, cycle, legacy_entry
+                    )
                     continue
 
                 try:
@@ -274,16 +267,11 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
 
                 if isinstance(legacy_unique, str):
                     existing_entries.pop(legacy_unique, None)
+                existing_entry_ids.pop(legacy_entry.entry_id, None)
 
-                for candidate in source_candidates:
-                    for helper_key in ((candidate, cycle), (candidate, None)):
-                        helpers = helpers_by_source.get(helper_key)
-                        if helpers is None:
-                            continue
-                        with suppress(ValueError):
-                            helpers.remove(legacy_entry)
-                        if not helpers:
-                            helpers_by_source.pop(helper_key, None)
+                _prune_helper_candidates(
+                    helpers_by_source, source_candidates, cycle, legacy_entry
+                )
 
                 _LOGGER.info(
                     "Removed legacy utility meter helper %s for %s zone %s (source=%s)",
@@ -294,12 +282,10 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                 )
 
             existing_entry = existing_entries.get(unique_id)
+            if existing_entry is None:
+                existing_entry = existing_entry_ids.get(entry_id)
             if existing_entry is not None:
-                existing_meter_type = existing_entry.options.get(CONF_METER_TYPE)
-                if (
-                    existing_entry.options.get(CONF_SOURCE_SENSOR) == source_entity
-                    and (existing_meter_type == cycle or existing_meter_type is None)
-                ):
+                if _helper_options_match(existing_entry, source_entity, cycle):
                     _LOGGER.debug(
                         "Utility meter helper already present for %s zone %s cycle %s",
                         entry_identifier,
@@ -308,6 +294,7 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                     )
                     continue
                 existing_entries.pop(unique_id, None)
+                existing_entry_ids.pop(existing_entry.entry_id, None)
 
             meter_name = f"SecureMTR {zone_label} Energy {cycle.capitalize()}"
             options: dict[str, Any] = {
@@ -348,6 +335,7 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                 continue
 
             existing_entries[unique_id] = helper_entry
+            existing_entry_ids[entry_id] = helper_entry
             _LOGGER.info(
                 "Created %s utility meter helper for %s zone %s (source=%s)",
                 cycle,
@@ -355,6 +343,56 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                 zone_key,
                 source_entity,
             )
+
+
+def _collect_candidate_helpers(
+    helpers_by_source: dict[tuple[str, str | None], list[ConfigEntry]],
+    source_candidates: Iterable[str],
+    cycle: str,
+) -> list[ConfigEntry]:
+    """Return helper entries matching any of the provided source candidates."""
+
+    collected: list[ConfigEntry] = []
+    for candidate in source_candidates:
+        helpers = helpers_by_source.get((candidate, cycle))
+        if helpers:
+            collected.extend(list(helpers))
+        legacy_helpers = helpers_by_source.get((candidate, None))
+        if legacy_helpers:
+            collected.extend(list(legacy_helpers))
+    return collected
+
+
+def _helper_options_match(
+    helper_entry: ConfigEntry, source_entity: str, cycle: str
+) -> bool:
+    """Return whether a helper entry already targets the requested source and cycle."""
+
+    options = helper_entry.options
+    meter_type = options.get(CONF_METER_TYPE)
+    return (
+        options.get(CONF_SOURCE_SENSOR) == source_entity
+        and (meter_type == cycle or meter_type is None)
+    )
+
+
+def _prune_helper_candidates(
+    helpers_by_source: dict[tuple[str, str | None], list[ConfigEntry]],
+    source_candidates: Iterable[str],
+    cycle: str,
+    helper_entry: ConfigEntry,
+) -> None:
+    """Remove a helper entry from cached helper-by-source lookups."""
+
+    for candidate in source_candidates:
+        for helper_key in ((candidate, cycle), (candidate, None)):
+            helpers = helpers_by_source.get(helper_key)
+            if helpers is None:
+                continue
+            with suppress(ValueError):
+                helpers.remove(helper_entry)
+            if not helpers:
+                helpers_by_source.pop(helper_key, None)
 
 
 @dataclass(slots=True)
@@ -434,17 +472,29 @@ def _entry_display_name(entry: ConfigEntry) -> str:
     return DOMAIN
 
 
-def _utility_meter_identifier(entry: ConfigEntry) -> str:
+def _utility_meter_identifier(hass: HomeAssistant, entry: ConfigEntry) -> str:
     """Return a slug for utility meter helper identifiers."""
 
+    candidate: str | None = None
+    domain_state = hass.data.get(DOMAIN, {}) if hass is not None else {}
+    runtime: SecuremtrRuntimeData | None = None
+    if isinstance(domain_state, dict):
+        runtime = domain_state.get(entry.entry_id)
+    if runtime is not None:
+        controller = getattr(runtime, "controller", None)
+        if controller is not None:
+            serial_number = getattr(controller, "serial_number", None)
+            if isinstance(serial_number, str) and serial_number.strip():
+                candidate = serial_number.strip()
+            elif isinstance(controller.identifier, str) and controller.identifier.strip():
+                candidate = controller.identifier.strip()
+
     data = getattr(entry, "data", None)
-    serial_candidate: str | None = None
-    if isinstance(data, dict):
+    if candidate is None and isinstance(data, dict):
         raw_serial = data.get("serial_number")
         if isinstance(raw_serial, str) and raw_serial.strip():
-            serial_candidate = raw_serial.strip()
+            candidate = raw_serial.strip()
 
-    candidate = serial_candidate
     if candidate is None:
         unique_id = getattr(entry, "unique_id", None)
         if isinstance(unique_id, str) and unique_id.strip():
@@ -517,9 +567,13 @@ def _energy_sensor_entity_ids(
     if runtime is not None:
         runtime_ids = getattr(runtime, "energy_entity_ids", None)
         if isinstance(runtime_ids, dict):
-            for zone, entity_id in runtime_ids.items():
-                if zone in suffixes and isinstance(entity_id, str):
-                    entity_ids[zone] = entity_id
+            entity_ids.update(
+                {
+                    zone: entity_id
+                    for zone, entity_id in runtime_ids.items()
+                    if zone in suffixes and isinstance(entity_id, str)
+                }
+            )
 
     for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         if getattr(reg_entry, "platform", None) != DOMAIN:
@@ -1241,7 +1295,9 @@ def _build_controller(
     )
 
 
-async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
     """Refresh and persist seven-day consumption metrics for the controller."""
 
     entry_identifier = _entry_display_name(entry)

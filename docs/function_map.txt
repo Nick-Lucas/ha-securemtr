@@ -3,11 +3,14 @@ custom_components.securemtr.__init__._async_register_services: Register SecureMT
 custom_components.securemtr.__init__.async_get_clientsession: Return a dedicated aiohttp session for SecureMTR backend calls.
 custom_components.securemtr.__init__._async_close_client_session: Close an aiohttp-style client session when provided.
 custom_components.securemtr.__init__._async_ensure_utility_meters: Create daily and weekly utility_meter helpers for SecureMTR energy sensors, pruning legacy entries and reusing stable identifiers.
-custom_components.securemtr.__init__.SecuremtrRuntimeData: Track runtime Beanbag backend state and cached sensor context for a config entry.
+custom_components.securemtr.__init__._collect_candidate_helpers: Return helper entries matching any of the provided source candidates.
+custom_components.securemtr.__init__._helper_options_match: Return whether a helper entry already targets the requested source and cycle.
+custom_components.securemtr.__init__._prune_helper_candidates: Remove a helper entry from cached helper-by-source lookups.
+custom_components.securemtr.__init__.SecuremtrRuntimeData: Track runtime Beanbag backend state, cached sensor context, and controller serial metadata for a config entry.
 custom_components.securemtr.__init__.SecuremtrController: Represent the discovered Secure Meters controller.
 custom_components.securemtr.__init__.async_setup_entry: Set up securemtr from a config entry and schedule backend startup.
 custom_components.securemtr.__init__._entry_display_name: Return a non-sensitive identifier for a config entry.
-custom_components.securemtr.__init__._utility_meter_identifier: Return a slug for utility meter helper identifiers.
+custom_components.securemtr.__init__._utility_meter_identifier: Return a slug for utility meter helper identifiers, preferring runtime controller serial numbers.
 custom_components.securemtr.__init__.async_unload_entry: Unload a securemtr config entry, cancelling tasks and closing the WebSocket.
 custom_components.securemtr.__init__._async_start_backend: Authenticate with Beanbag and establish the WebSocket connection.
 custom_components.securemtr.__init__._async_attempt_backend_startup: Attempt a single Beanbag login and controller discovery cycle.

@@ -886,10 +886,10 @@ async def test_async_setup_entry_starts_backend(
     meters = hass.config_entries.async_entries(UTILITY_METER_DOMAIN)
     assert len(meters) == 4
     assert {meter.unique_id for meter in meters} == {
-        "securemtr_user_example_com_primary_daily_utility_meter",
-        "securemtr_user_example_com_primary_weekly_utility_meter",
-        "securemtr_user_example_com_boost_daily_utility_meter",
-        "securemtr_user_example_com_boost_weekly_utility_meter",
+        f"securemtr_{PRIMARY_SERIAL_SLUG}_primary_daily_utility_meter",
+        f"securemtr_{PRIMARY_SERIAL_SLUG}_primary_weekly_utility_meter",
+        f"securemtr_{PRIMARY_SERIAL_SLUG}_boost_daily_utility_meter",
+        f"securemtr_{PRIMARY_SERIAL_SLUG}_boost_weekly_utility_meter",
     }
 
     expected_sources = {PRIMARY_ENERGY_ENTITY_ID, BOOST_ENERGY_ENTITY_ID}
@@ -2593,13 +2593,17 @@ async def test_async_ensure_utility_meters_requires_helper_methods() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_utility_meters_detects_existing_helpers() -> None:
+async def test_async_ensure_utility_meters_detects_existing_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Avoid creating utility meters that already exist."""
 
     hass = FakeHass()
 
-    source_slug = slugify_identifier("user@example.com")
-    source_entity = f"sensor.securemtr_{source_slug}_primary_energy_kwh"
+    serial_number = "Serial-01"
+    serial_slug = slugify_identifier(serial_number)
+    source_entity = f"sensor.securemtr_{serial_slug}_primary_energy_kwh"
+    boost_entity = f"sensor.securemtr_{serial_slug}_boost_energy_kwh"
 
     existing_helper = ConfigEntry(
         data={},
@@ -2608,10 +2612,10 @@ async def test_async_ensure_utility_meters_detects_existing_helpers() -> None:
         version=2,
         minor_version=2,
         source=hass_config_entries.SOURCE_SYSTEM,
-        unique_id="securemtr_user_example_com_primary_daily_utility_meter",
-        options={CONF_SOURCE_SENSOR: source_entity},
+        unique_id=f"securemtr_{serial_slug}_primary_daily_utility_meter",
+        options={CONF_SOURCE_SENSOR: source_entity, CONF_METER_TYPE: "daily"},
         discovery_keys=MappingProxyType({}),
-        entry_id="securemtr_um_user_example_com_primary_daily",
+        entry_id=f"securemtr_um_{serial_slug}_primary_daily",
         subentries_data=(),
     )
 
@@ -2641,6 +2645,19 @@ async def test_async_ensure_utility_meters_detects_existing_helpers() -> None:
         unique_id="user@example.com",
         data={"email": "user@example.com", "password": "digest"},
     )
+    runtime = SecuremtrRuntimeData(backend=SimpleNamespace())
+    runtime.controller = SecuremtrController(
+        identifier="controller-serial-01",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number=serial_number,
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        lambda *_args: {"primary": source_entity, "boost": boost_entity},
+    )
 
     await _async_ensure_utility_meters(hass, entry)
 
@@ -2649,13 +2666,17 @@ async def test_async_ensure_utility_meters_detects_existing_helpers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_utility_meters_skips_new_style_helpers() -> None:
+async def test_async_ensure_utility_meters_skips_new_style_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure existing helpers with stable IDs are reused without duplicates."""
 
     hass = FakeHass()
 
-    source_slug = slugify_identifier("user@example.com")
-    source_entity = f"sensor.securemtr_{source_slug}_primary_energy_kwh"
+    serial_number = "Serial-02"
+    serial_slug = slugify_identifier(serial_number)
+    source_entity = f"sensor.securemtr_{serial_slug}_primary_energy_kwh"
+    boost_entity = f"sensor.securemtr_{serial_slug}_boost_energy_kwh"
 
     existing_helper = ConfigEntry(
         data={},
@@ -2664,10 +2685,10 @@ async def test_async_ensure_utility_meters_skips_new_style_helpers() -> None:
         version=2,
         minor_version=2,
         source=hass_config_entries.SOURCE_SYSTEM,
-        unique_id="securemtr_user_example_com_primary_daily_utility_meter",
-        options={CONF_SOURCE_SENSOR: source_entity},
+        unique_id=f"securemtr_{serial_slug}_primary_daily_utility_meter",
+        options={CONF_SOURCE_SENSOR: source_entity, CONF_METER_TYPE: "daily"},
         discovery_keys=MappingProxyType({}),
-        entry_id="securemtr_um_user_example_com_primary_daily",
+        entry_id=f"securemtr_um_{serial_slug}_primary_daily",
         subentries_data=(),
     )
 
@@ -2697,6 +2718,19 @@ async def test_async_ensure_utility_meters_skips_new_style_helpers() -> None:
         unique_id="user@example.com",
         data={},
     )
+    runtime = SecuremtrRuntimeData(backend=SimpleNamespace())
+    runtime.controller = SecuremtrController(
+        identifier="controller-serial-02",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number=serial_number,
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        lambda *_args: {"primary": source_entity, "boost": boost_entity},
+    )
 
     await _async_ensure_utility_meters(hass, entry)
 
@@ -2706,17 +2740,101 @@ async def test_async_ensure_utility_meters_skips_new_style_helpers() -> None:
             1
             for helper in hass.config_entries.entries
             if helper.unique_id
-            == "securemtr_user_example_com_primary_daily_utility_meter"
+            == f"securemtr_{serial_slug}_primary_daily_utility_meter"
         )
         == 1
     )
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_utility_meters_removes_legacy_helpers() -> None:
+async def test_async_ensure_utility_meters_reuses_matching_entry_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse helpers identified by entry ID even when unique IDs differ."""
+
+    hass = FakeHass()
+
+    serial_number = "Serial-Entry"
+    serial_slug = slugify_identifier(serial_number)
+    source_entity = f"sensor.securemtr_{serial_slug}_primary_energy_kwh"
+    boost_entity = f"sensor.securemtr_{serial_slug}_boost_energy_kwh"
+
+    existing_helper = ConfigEntry(
+        data={},
+        domain=UTILITY_METER_DOMAIN,
+        title="SecureMTR Primary Energy Daily",
+        version=2,
+        minor_version=2,
+        source=hass_config_entries.SOURCE_SYSTEM,
+        unique_id="legacy_unique_id",
+        options={CONF_SOURCE_SENSOR: source_entity, CONF_METER_TYPE: "daily"},
+        discovery_keys=MappingProxyType({}),
+        entry_id=f"securemtr_um_{serial_slug}_primary_daily",
+        subentries_data=(),
+    )
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.entries: list[ConfigEntry] = [existing_helper]
+            self.added: list[ConfigEntry] = []
+            self.removed: list[str] = []
+
+        def async_entries(self, domain: str) -> list[ConfigEntry]:
+            assert domain == UTILITY_METER_DOMAIN
+            return list(self.entries)
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.added.append(entry_obj)
+            self.entries.append(entry_obj)
+
+        async def async_remove(self, entry_id: str) -> None:
+            self.removed.append(entry_id)
+            self.entries = [
+                entry for entry in self.entries if entry.entry_id != entry_id
+            ]
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="user@example.com",
+        data={},
+    )
+    runtime = SecuremtrRuntimeData(backend=SimpleNamespace())
+    runtime.controller = SecuremtrController(
+        identifier="controller-serial-03",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number=serial_number,
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        lambda *_args: {"primary": source_entity, "boost": boost_entity},
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert len(hass.config_entries.added) == 3
+    assert hass.config_entries.removed == []
+    assert any(
+        helper.entry_id == existing_helper.entry_id
+        for helper in hass.config_entries.entries
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_utility_meters_removes_legacy_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Replace legacy helpers built from entry IDs with stable identifiers."""
 
     hass = FakeHass()
+
+    serial_number = "Serial-03"
+    serial_slug = slugify_identifier(serial_number)
+    source_entity = f"sensor.securemtr_{serial_slug}_primary_energy_kwh"
+    boost_entity = f"sensor.securemtr_{serial_slug}_boost_energy_kwh"
 
     class HelperEntries:
         def __init__(self) -> None:
@@ -2752,11 +2870,25 @@ async def test_async_ensure_utility_meters_removes_legacy_helpers() -> None:
         data={},
     )
 
+    runtime = SecuremtrRuntimeData(backend=SimpleNamespace())
+    runtime.controller = SecuremtrController(
+        identifier="controller-serial-04",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number=serial_number,
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        lambda *_args: {"primary": source_entity, "boost": boost_entity},
+    )
+
     await _async_ensure_utility_meters(hass, entry)
 
     assert hass.config_entries.removed == ["securemtr_um_entry_primary_daily"]
 
-    new_unique_id = "securemtr_user_example_com_primary_daily_utility_meter"
+    new_unique_id = f"securemtr_{serial_slug}_primary_daily_utility_meter"
     assert (
         sum(
             1
@@ -2803,6 +2935,15 @@ async def test_async_ensure_utility_meters_ignores_missing_zone_entities(
         unique_id="user@example.com",
         data={"email": "user@example.com", "password": "digest"},
     )
+
+    runtime = SecuremtrRuntimeData(backend=SimpleNamespace())
+    runtime.controller = SecuremtrController(
+        identifier="controller-serial-04",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number="Serial-04",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
     def _fake_energy_ids(*args: Any, **kwargs: Any) -> dict[str, str | None]:
         return {
@@ -3272,32 +3413,52 @@ def test_entry_display_name_falls_back_to_domain() -> None:
     assert _entry_display_name(entry) == DOMAIN
 
 
-def test_utility_meter_identifier_prefers_serial() -> None:
-    """Ensure the helper uses the stored serial number when available."""
+def test_utility_meter_identifier_prefers_controller_serial() -> None:
+    """Ensure the helper uses the controller serial number when available."""
 
+    hass = SimpleNamespace(data={DOMAIN: {}})
+    entry = SimpleNamespace(data={}, unique_id="ignored", entry_id="entry")
+    runtime = SecuremtrRuntimeData(backend=SimpleNamespace())
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number=" Serial-01 ",
+    )
+    hass.data[DOMAIN][entry.entry_id] = runtime
+
+    assert _utility_meter_identifier(hass, entry) == "serial_01"
+
+
+def test_utility_meter_identifier_uses_entry_serial() -> None:
+    """Ensure the helper falls back to entry metadata when controller serial is absent."""
+
+    hass = SimpleNamespace(data={DOMAIN: {}})
     entry = SimpleNamespace(
-        data={"serial_number": " Serial-01 "}, unique_id="ignored", entry_id="entry"
+        data={"serial_number": " Serial-02 "}, unique_id="ignored", entry_id="entry"
     )
 
-    assert _utility_meter_identifier(entry) == "serial_01"
+    assert _utility_meter_identifier(hass, entry) == "serial_02"
 
 
 def test_utility_meter_identifier_uses_unique_id() -> None:
     """Ensure the helper falls back to the config entry unique ID."""
 
+    hass = SimpleNamespace(data={DOMAIN: {}})
     entry = SimpleNamespace(data={}, unique_id="User@Example.Com", entry_id="entry")
 
-    assert _utility_meter_identifier(entry) == "user_example_com"
+    assert _utility_meter_identifier(hass, entry) == "user_example_com"
 
 
 def test_utility_meter_identifier_has_safe_fallbacks() -> None:
     """Ensure entry IDs and domain constants provide deterministic slugs."""
 
+    hass = SimpleNamespace(data={DOMAIN: {}})
     entry = SimpleNamespace(data={}, unique_id=None, entry_id="Entry-5")
-    assert _utility_meter_identifier(entry) == "entry_5"
+    assert _utility_meter_identifier(hass, entry) == "entry_5"
 
     entry = SimpleNamespace(data={}, unique_id=None, entry_id=None)
-    assert _utility_meter_identifier(entry) == DOMAIN
+    assert _utility_meter_identifier(hass, entry) == DOMAIN
 
 
 def test_controller_slug_prefers_controller_serial() -> None:
