@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from itertools import accumulate
+from contextlib import suppress
 from typing import Any, Awaitable, Callable, Iterable, cast
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, call
@@ -38,6 +39,8 @@ from custom_components.securemtr import (
     _resolve_anchor,
     _controller_slug,
     _utility_meter_identifier,
+    _async_attempt_backend_startup,
+    _async_queue_backend_retry,
     CONF_METER_DELTA_VALUES,
     CONF_METER_NET_CONSUMPTION,
     CONF_METER_OFFSET,
@@ -1315,6 +1318,53 @@ async def test_async_unload_entry_cleans_up(
 
 
 @pytest.mark.asyncio
+async def test_async_unload_entry_handles_retry_and_unsub_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ensure unload logs and clears retry tasks and unsubscribe failures."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="retry-cleanup",
+        unique_id="user-retry@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+
+    fake_session = object()
+    backend = FakeBeanbagBackend(fake_session)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: fake_session,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: backend,
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    runtime.consumption_schedule_unsub = lambda: (_ for _ in ()).throw(
+        RuntimeError("boom")
+    )
+    runtime.retry_task = asyncio.create_task(asyncio.sleep(0.1))
+
+    caplog.set_level(logging.DEBUG)
+    assert await async_unload_entry(hass, entry)
+    await asyncio.sleep(0)
+
+    assert runtime.retry_task is None
+    assert "Cancelling pending Beanbag backend retry task" in caplog.text
+    assert "Error while unsubscribing scheduled consumption refresh" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_async_setup_entry_missing_credentials(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
@@ -1949,6 +1999,97 @@ async def test_consumption_metrics_emits_hourly_statistics(
     assert deltas == pytest.approx([2.85, 2.85, 0.475])
     states = [sample["state"] for sample in samples]
     assert states == pytest.approx(sums)
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_logs_statistics_error(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log errors raised while writing external statistics."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-stat-error",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+    entry.hass = hass
+    entry.options = {
+        CONF_TIME_ZONE: "Europe/London",
+        CONF_PRIMARY_ANCHOR: "05:00:00",
+        CONF_BOOST_ANCHOR: "05:00:00",
+        CONF_PREFER_DEVICE_ENERGY: True,
+    }
+
+    backend = FakeBeanbagBackend(object())
+
+    async def _single_sample(
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+        gateway_id: str,
+        *,
+        window_index: int = 1,
+    ) -> list[BeanbagEnergySample]:
+        sample_day = datetime(2023, 12, 3, tzinfo=timezone.utc)
+        return [
+            BeanbagEnergySample(
+                timestamp=int(sample_day.timestamp()),
+                primary_energy_kwh=1.0,
+                boost_energy_kwh=0.0,
+                primary_scheduled_minutes=60,
+                primary_active_minutes=60,
+                boost_scheduled_minutes=0,
+                boost_active_minutes=0,
+            )
+        ]
+
+    monkeypatch.setattr(
+        backend,
+        "read_energy_history",
+        _single_sample,
+    )
+
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+",
+        gateway_id="gateway-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    hass.entity_registry = FakeEntityRegistry(
+        [
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_custom_primary_energy",
+                unique_id=f"{IDENTIFIER_SLUG}_primary_energy_kwh",
+                config_entry_id=entry.entry_id,
+                platform=DOMAIN,
+            )
+        ]
+    )
+
+    def _raise_error(
+        _hass: HomeAssistant,
+        _metadata: StatisticMetaData,
+        _samples: Iterable[StatisticData],
+    ) -> None:
+        raise HomeAssistantError("failure")
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        _raise_error,
+    )
+
+    caplog.set_level(logging.ERROR)
+    await consumption_metrics(hass, entry)
+
+    assert "Failed to add statistics" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -3167,6 +3308,187 @@ async def test_async_ensure_utility_meters_updates_untracked_helper(
 
 
 @pytest.mark.asyncio
+async def test_async_start_backend_invokes_refresh_callback_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invoke refresh callbacks when backend startup completes immediately."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.consumption_refresh_pending = True
+
+    callback_calls: list[str] = []
+    runtime.consumption_refresh_callback = lambda: callback_calls.append("called")
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        AsyncMock(return_value="success"),
+    )
+    ensure_helpers = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        ensure_helpers,
+    )
+
+    await _async_start_backend(hass, entry, runtime)
+
+    assert callback_calls == ["called"]
+    assert ensure_helpers.await_count == 1
+    assert runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_async_start_backend_retry_then_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Perform immediate retry attempts and invoke callbacks on success."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.consumption_refresh_pending = True
+
+    callback_calls: list[str] = []
+
+    def _callback() -> None:
+        callback_calls.append("called")
+
+    runtime.consumption_refresh_callback = _callback
+
+    results = iter(["retry", "success"])
+
+    async def _attempt(*_args: Any, **_kwargs: Any) -> str:
+        return next(results)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        _attempt,
+    )
+    monkeypatch.setattr("custom_components.securemtr._LOGIN_RETRY_DELAY", 0)
+    ensure_helpers = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        ensure_helpers,
+    )
+
+    await _async_start_backend(hass, entry, runtime)
+
+    assert callback_calls == ["called"]
+    assert ensure_helpers.await_count == 1
+    assert runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_async_start_backend_abort_logs_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log errors when backend startup aborts unexpectedly."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.consumption_refresh_pending = True
+    runtime.consumption_refresh_callback = lambda: (_ for _ in ()).throw(
+        AssertionError("should not run")
+    )
+
+    outcomes = iter(["retry", "abort"])
+
+    async def _attempt(*_args: Any, **_kwargs: Any) -> str:
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        _attempt,
+    )
+    monkeypatch.setattr("custom_components.securemtr._LOGIN_RETRY_DELAY", 0)
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        AsyncMock(),
+    )
+
+    caplog.set_level(logging.ERROR)
+    await _async_start_backend(hass, entry, runtime)
+
+    assert "Aborting Beanbag backend startup" in caplog.text
+    assert runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_async_start_backend_cancelled_sets_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate cancellation errors while marking the runtime ready."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+
+    async def _cancelled(*_args: Any, **_kwargs: Any) -> str:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        _cancelled,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await _async_start_backend(hass, entry, runtime)
+
+    assert runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_async_start_backend_refresh_callback_error_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log unexpected errors raised by refresh callbacks."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.consumption_refresh_pending = True
+
+    def _failing_callback() -> None:
+        raise RuntimeError("callback failure")
+
+    runtime.consumption_refresh_callback = _failing_callback
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        AsyncMock(return_value="success"),
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        AsyncMock(),
+    )
+
+    caplog.set_level(logging.ERROR)
+    await _async_start_backend(hass, entry, runtime)
+
+    assert "refresh callback" in caplog.text
+    assert runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
 async def test_async_start_backend_retries_after_login_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3201,6 +3523,72 @@ async def test_async_start_backend_retries_after_login_errors(
     assert runtime.controller_ready.is_set()
     assert runtime.backend.attempt == 3
     assert len(runtime.backend.login_calls) >= 3
+
+
+@pytest.mark.asyncio
+async def test_async_attempt_backend_startup_handles_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return abort when login raises an unexpected exception."""
+
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    monkeypatch.setattr(
+        runtime.backend,
+        "login_and_connect",
+        AsyncMock(side_effect=RuntimeError("boom")),
+    )
+
+    result = await _async_attempt_backend_startup(
+        entry,
+        runtime,
+        email="user@example.com",
+        password_digest="digest",
+        entry_identifier="entry",
+    )
+
+    assert result == "abort"
+    assert runtime.session is None
+
+
+@pytest.mark.asyncio
+async def test_async_attempt_backend_startup_handles_controller_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reset the connection when controller discovery fails."""
+
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    reset_connection = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_reset_connection",
+        reset_connection,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_fetch_controller",
+        AsyncMock(side_effect=BeanbagError("temporary")),
+    )
+
+    result = await _async_attempt_backend_startup(
+        entry,
+        runtime,
+        email="user@example.com",
+        password_digest="digest",
+        entry_identifier="entry",
+    )
+
+    assert result == "retry"
+    reset_connection.assert_awaited_once_with(runtime)
+    assert runtime.session is None
+    assert runtime.controller is None
 
 
 @pytest.mark.asyncio
@@ -3267,6 +3655,177 @@ async def test_async_run_with_reconnect_retries_then_raises(
     assert failing_operation.await_count == 2
     assert reset.await_count == 1
     assert refresh.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_async_queue_backend_retry_skips_existing_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Skip scheduling when a retry task is already active."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.retry_task = asyncio.create_task(asyncio.sleep(0.5))
+
+    caplog.set_level(logging.DEBUG)
+    _async_queue_backend_retry(
+        hass,
+        entry,
+        runtime,
+        "entry",
+        on_success=runtime.consumption_refresh_callback,
+    )
+
+    assert runtime.retry_task is not None
+    assert "already active" in caplog.text
+    runtime.retry_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await runtime.retry_task
+
+
+@pytest.mark.asyncio
+async def test_async_queue_backend_retry_missing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Abort retries when credentials are no longer available."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(entry_id="entry", data={})
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+
+    async def fast_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("custom_components.securemtr._LOGIN_RETRY_DELAY", 0)
+    monkeypatch.setattr(
+        "custom_components.securemtr.asyncio.sleep",
+        fast_sleep,
+    )
+
+    caplog.set_level(logging.ERROR)
+    _async_queue_backend_retry(
+        hass,
+        entry,
+        runtime,
+        "entry",
+        on_success=runtime.consumption_refresh_callback,
+    )
+
+    task = runtime.retry_task
+    assert task is not None
+    await asyncio.wait_for(task, 0.1)
+
+    assert runtime.retry_task is None
+    assert any("Missing credentials" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_async_queue_backend_retry_success_invokes_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Invoke the refresh callback after a successful retry."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.consumption_refresh_pending = True
+
+    callback_calls: list[str] = []
+
+    def _callback() -> None:
+        callback_calls.append("called")
+
+    runtime.consumption_refresh_callback = _callback
+
+    async def fast_sleep(_delay: float) -> None:
+        return None
+
+    attempt = AsyncMock(side_effect=["retry", "success"])
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        attempt,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("custom_components.securemtr._LOGIN_RETRY_DELAY", 0)
+    monkeypatch.setattr(
+        "custom_components.securemtr.asyncio.sleep",
+        fast_sleep,
+    )
+
+    caplog.set_level(logging.INFO)
+    _async_queue_backend_retry(
+        hass,
+        entry,
+        runtime,
+        "entry",
+        on_success=runtime.consumption_refresh_callback,
+    )
+
+    task = runtime.retry_task
+    assert task is not None
+    await asyncio.wait_for(task, 0.1)
+
+    assert callback_calls == ["called"]
+    assert attempt.await_count >= 2
+    assert runtime.retry_task is None
+    assert any("Retrying Beanbag backend startup" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_async_queue_backend_retry_abort_logs_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log and stop when retries abort due to unexpected errors."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+
+    async def fast_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        AsyncMock(return_value="abort"),
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("custom_components.securemtr._LOGIN_RETRY_DELAY", 0)
+    monkeypatch.setattr(
+        "custom_components.securemtr.asyncio.sleep",
+        fast_sleep,
+    )
+
+    caplog.set_level(logging.ERROR)
+    _async_queue_backend_retry(hass, entry, runtime, "entry")
+
+    task = runtime.retry_task
+    assert task is not None
+    await asyncio.wait_for(task, 0.1)
+
+    assert any(
+        "Stopping Beanbag backend retries" in record.message
+        for record in caplog.records
+    )
+    assert runtime.retry_task is None
 
 
 def test_runtime_update_signal_helper() -> None:
@@ -3428,6 +3987,23 @@ def test_utility_meter_identifier_prefers_controller_serial() -> None:
     hass.data[DOMAIN][entry.entry_id] = runtime
 
     assert _utility_meter_identifier(hass, entry) == "serial_01"
+
+
+def test_utility_meter_identifier_falls_back_to_controller_identifier() -> None:
+    """Ensure controller identifiers are used when the serial is missing."""
+
+    hass = SimpleNamespace(data={DOMAIN: {}})
+    entry = SimpleNamespace(data={}, unique_id="ignored", entry_id="entry")
+    runtime = SecuremtrRuntimeData(backend=SimpleNamespace())
+    runtime.controller = SecuremtrController(
+        identifier="Controller-2",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number=" ",
+    )
+    hass.data[DOMAIN][entry.entry_id] = runtime
+
+    assert _utility_meter_identifier(hass, entry) == "controller_2"
 
 
 def test_utility_meter_identifier_uses_entry_serial() -> None:
