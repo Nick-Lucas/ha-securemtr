@@ -519,6 +519,17 @@ def _slugify_identifier(identifier: str) -> str:
     )
 
 
+def _invoke_refresh_callback(callback: Callable[[], None], entry_identifier: str) -> None:
+    """Execute a refresh callback, logging any unexpected failures."""
+
+    try:
+        callback()
+    except Exception:
+        _LOGGER.exception(
+            "Error while executing securemtr refresh callback for %s", entry_identifier
+        )
+
+
 def _controller_slug(
     entry: ConfigEntry, controller: SecuremtrController | None
 ) -> str:
@@ -766,8 +777,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return unload_ok
 
     if runtime.consumption_schedule_unsub is not None:
-        runtime.consumption_schedule_unsub()
-        runtime.consumption_schedule_unsub = None
+        try:
+            runtime.consumption_schedule_unsub()
+        except Exception:
+            _LOGGER.exception(
+                "Error while unsubscribing scheduled consumption refresh for %s",
+                entry_identifier,
+            )
+        finally:
+            runtime.consumption_schedule_unsub = None
     runtime.consumption_refresh_callback = None
 
     if runtime.startup_task is not None and not runtime.startup_task.done():
@@ -777,6 +795,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     retry_task = runtime.retry_task
     if retry_task is not None and not retry_task.done():
+        _LOGGER.debug(
+            "Cancelling pending Beanbag backend retry task for %s", entry_identifier
+        )
         retry_task.cancel()
         with suppress(asyncio.CancelledError):
             await retry_task
@@ -823,7 +844,7 @@ async def _async_start_backend(
             await _async_ensure_utility_meters(hass, entry)
             _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
             if refresh_callback is not None and runtime.consumption_refresh_pending:
-                refresh_callback()
+                _invoke_refresh_callback(refresh_callback, entry_identifier)
             return
 
         if outcome == "retry" and _LOGIN_RETRY_DELAY <= 0:
@@ -845,7 +866,7 @@ async def _async_start_backend(
                     refresh_callback is not None
                     and runtime.consumption_refresh_pending
                 ):
-                    refresh_callback()
+                    _invoke_refresh_callback(refresh_callback, entry_identifier)
                 return
 
             if outcome == "abort":
@@ -949,6 +970,10 @@ def _async_queue_backend_retry(
     """Schedule backend retries and call a hook after successful reconnection."""
 
     if runtime.retry_task is not None and not runtime.retry_task.done():
+        _LOGGER.debug(
+            "Skipping backend retry scheduling for %s because a task is already active",
+            entry_identifier,
+        )
         return
 
     async def _async_retry() -> None:
@@ -982,7 +1007,7 @@ def _async_queue_backend_retry(
                         entry_identifier,
                     )
                     if on_success is not None and runtime.consumption_refresh_pending:
-                        on_success()
+                        _invoke_refresh_callback(on_success, entry_identifier)
                     return
                 if outcome == "abort":
                     _LOGGER.error(

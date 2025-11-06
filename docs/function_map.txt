@@ -11,6 +11,7 @@ custom_components.securemtr.__init__.SecuremtrController: Represent the discover
 custom_components.securemtr.__init__.async_setup_entry: Set up securemtr from a config entry and schedule backend startup.
 custom_components.securemtr.__init__._entry_display_name: Return a non-sensitive identifier for a config entry.
 custom_components.securemtr.__init__._utility_meter_identifier: Return a slug for utility meter helper identifiers, preferring runtime controller serial numbers.
+custom_components.securemtr.__init__._invoke_refresh_callback: Execute a refresh callback while logging any unexpected failures.
 custom_components.securemtr.__init__.async_unload_entry: Unload a securemtr config entry, cancelling tasks and closing the WebSocket.
 custom_components.securemtr.__init__._async_start_backend: Authenticate with Beanbag and establish the WebSocket connection.
 custom_components.securemtr.__init__._async_attempt_backend_startup: Attempt a single Beanbag login and controller discovery cycle.
