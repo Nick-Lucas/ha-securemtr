@@ -1640,7 +1640,14 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
             "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
             "unit_class": "energy",
         }
-        async_add_external_statistics(hass, metadata, samples)
+        try:
+            async_add_external_statistics(hass, metadata, samples)
+        except HomeAssistantError:
+            _LOGGER.exception(
+                "Failed to add statistics for %s (statistic_id=%s)",
+                zone_key,
+                statistic_id,
+            )
 
     if runtime_updated:
         async_dispatch_runtime_update(hass, entry.entry_id)
