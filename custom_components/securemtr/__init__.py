@@ -1552,6 +1552,9 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
                     zone_total,
                 )
 
+            runtime_minutes = float(row.get(context.runtime_field, 0.0))
+            runtime_hours = max(runtime_minutes, 0.0) / 60.0
+
             intervals: list[tuple[datetime, datetime]] = []
             if context.program is not None and context.canonical is not None:
                 intervals = day_intervals(
@@ -1561,12 +1564,13 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
                     canonical=context.canonical,
                 )
 
-            anchor, anchor_source = _resolve_anchor(
-                report_day, context, options, intervals
+            anchor, anchor_source, anchor_interval = _resolve_anchor(
+                report_day,
+                context,
+                options,
+                intervals,
+                runtime_hours,
             )
-
-            runtime_minutes = float(row.get(context.runtime_field, 0.0))
-            runtime_hours = max(runtime_minutes, 0.0) / 60.0
 
             scheduled_minutes = float(row.get(context.scheduled_field, 0.0))
             scheduled_hours = max(scheduled_minutes, 0.0) / 60.0
@@ -1597,6 +1601,7 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
                     runtime_hours,
                     segment_energy,
                     before_total,
+                    interval=anchor_interval,
                 )
                 if records:
                     zone_records.extend(records)
@@ -1821,6 +1826,8 @@ def _build_zone_statistics_samples(
     runtime_hours: float,
     segment_energy: float,
     before_total: float,
+    *,
+    interval: tuple[datetime, datetime] | None = None,
 ) -> list[StatisticData]:
     """Return statistic samples for a runtime segment anchored to a day."""
 
@@ -1830,13 +1837,23 @@ def _build_zone_statistics_samples(
     segments = split_runtime_segments(anchor, runtime_hours, segment_energy)
     cumulative = before_total
     records: list[StatisticData] = []
+    interval_start: datetime | None = None
+    interval_end: datetime | None = None
+    if interval is not None:
+        interval_start, interval_end = interval
+
     for slot_start, _slot_hours, slot_energy in segments:
         if slot_energy <= 0:
             continue
+        record_start = slot_start
+        if interval_start is not None and interval_end is not None:
+            record_start = max(record_start, interval_start)
+            if record_start >= interval_end:
+                continue
         cumulative += slot_energy
         records.append(
             StatisticData(
-                start=dt_util.as_utc(slot_start),
+                start=dt_util.as_utc(record_start),
                 sum=cumulative,
                 state=cumulative,
             )
@@ -1850,24 +1867,61 @@ def _resolve_anchor(
     context: ZoneContext,
     options: StatisticsOptions,
     intervals: Iterable[tuple[datetime, datetime]],
-) -> tuple[datetime, str]:
+    runtime_hours: float,
+) -> tuple[datetime, str, tuple[datetime, datetime] | None]:
     """Select an anchor for the provided day and schedule context."""
 
-    schedule_anchor: datetime | None = None
-    for start, end in intervals:
-        if end <= start:
-            continue
-        if schedule_anchor is None or start < schedule_anchor:
-            schedule_anchor = start
+    day_start = datetime(
+        report_day.year,
+        report_day.month,
+        report_day.day,
+        tzinfo=options.timezone,
+    )
+    day_end = day_start + timedelta(days=1)
 
+    fallback_anchor = safe_anchor_datetime(
+        report_day, context.fallback_anchor, options.timezone
+    )
+
+    selected_interval: tuple[datetime, datetime] | None = None
     anchor_source = "configured"
-    if schedule_anchor is not None:
-        anchor = schedule_anchor
+    anchor = fallback_anchor
+
+    runtime_seconds = max(runtime_hours, 0.0) * 3600.0
+    tolerance_seconds = 60.0
+    best_slack: float | None = None
+    best_offset: float | None = None
+
+    if runtime_seconds > 0.0:
+        for start, end in intervals:
+            if end <= start:
+                continue
+            clamped_start = max(start, day_start)
+            clamped_end = min(end, day_end)
+            if clamped_end <= clamped_start:
+                continue
+            span_seconds = (clamped_end - clamped_start).total_seconds()
+            if runtime_seconds > span_seconds + tolerance_seconds:
+                continue
+            slack = abs(span_seconds - runtime_seconds)
+            offset = abs((clamped_start - fallback_anchor).total_seconds())
+            if best_slack is None or slack < best_slack - 1e-6:
+                best_slack = slack
+                best_offset = offset
+                selected_interval = (clamped_start, clamped_end)
+            elif best_slack is not None and abs(slack - best_slack) <= 1e-6:
+                if best_offset is None or offset < best_offset:
+                    best_offset = offset
+                    selected_interval = (clamped_start, clamped_end)
+
+    if selected_interval is not None:
         anchor_source = "schedule"
-    else:
-        anchor = safe_anchor_datetime(
-            report_day, context.fallback_anchor, options.timezone
-        )
+        anchor = selected_interval[0]
+
+    if anchor < day_start:
+        anchor = day_start
+    elif anchor >= day_end:
+        anchor = day_end - timedelta(microseconds=1)
 
     _LOGGER.debug(
         "%s anchor for %s on %s using %s: %s",
@@ -1877,7 +1931,7 @@ def _resolve_anchor(
         anchor_source,
         anchor.isoformat(),
     )
-    return anchor, anchor_source
+    return anchor, anchor_source, selected_interval
 
 
 def _normalize_identifier(value: Any) -> str | None:
