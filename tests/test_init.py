@@ -94,6 +94,7 @@ from custom_components.securemtr.sensor import (
     async_setup_entry as sensor_async_setup_entry,
 )
 from custom_components.securemtr.utils import assign_report_day
+from custom_components.securemtr.schedule import canonicalize_weekly, day_intervals
 from custom_components.securemtr.entity import slugify_identifier
 from homeassistant.util import dt as dt_util
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -4349,15 +4350,16 @@ def test_resolve_anchor_prefers_schedule_on_time() -> None:
         ),
         (
             datetime(2024, 4, 5, 3, 0, tzinfo=ZoneInfo("UTC")),
-            datetime(2024, 4, 5, 4, 0, tzinfo=ZoneInfo("UTC")),
+            datetime(2024, 4, 5, 3, 30, tzinfo=ZoneInfo("UTC")),
         ),
     ]
 
-    anchor, source = _resolve_anchor(
-        date(2024, 4, 5), context, options, dummy_intervals
+    anchor, source, interval = _resolve_anchor(
+        date(2024, 4, 5), context, options, dummy_intervals, 1.0
     )
     assert anchor.hour == 1 and anchor.minute == 0
     assert source == "schedule"
+    assert interval is not None
 
 
 def test_resolve_anchor_handles_missing_schedule() -> None:
@@ -4384,9 +4386,217 @@ def test_resolve_anchor_handles_missing_schedule() -> None:
         canonical=None,
     )
 
-    anchor, source = _resolve_anchor(date(2024, 4, 5), context, options, [])
+    anchor, source, interval = _resolve_anchor(
+        date(2024, 4, 5), context, options, [], 1.0
+    )
     assert anchor.hour == 8 and anchor.minute == 45
     assert source == "configured"
+    assert interval is None
+
+
+def test_resolve_anchor_skips_unused_earlier_slot() -> None:
+    """Anchor statistics to the interval that best matches the runtime span."""
+
+    tz = ZoneInfo("UTC")
+    options = StatisticsOptions(
+        timezone=tz,
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(18, 0),
+        fallback_power_kw=2.5,
+        prefer_device_energy=True,
+    )
+    daily = DailyProgram((60, 300, None), (120, 420, None))
+    weekly: WeeklyProgram = (
+        daily,
+        daily,
+        daily,
+        daily,
+        daily,
+        daily,
+        daily,
+    )
+    canonical = canonicalize_weekly(weekly)
+    context = ZoneContext(
+        label="Primary",
+        energy_field="primary_energy_kwh",
+        runtime_field="primary_active_minutes",
+        scheduled_field="primary_scheduled_minutes",
+        energy_suffix="primary_energy_kwh",
+        runtime_suffix="primary_runtime_h",
+        schedule_suffix="primary_sched_h",
+        fallback_anchor=time(6, 0),
+        program=weekly,
+        canonical=canonical,
+    )
+    report_day = date(2024, 4, 5)
+    intervals = day_intervals(weekly, day=report_day, tz=tz, canonical=canonical)
+
+    anchor, source, interval = _resolve_anchor(
+        report_day, context, options, intervals, runtime_hours=2.0
+    )
+
+    assert source == "schedule"
+    assert interval is not None
+    anchor_local = anchor.astimezone(tz)
+    assert anchor_local.hour == 5 and anchor_local.minute == 0
+
+    samples = _build_zone_statistics_samples(
+        anchor,
+        2.0,
+        3.0,
+        1.0,
+        interval=interval,
+    )
+
+    assert len(samples) == 2
+    local_times = [sample["start"].astimezone(tz) for sample in samples]
+    assert all(local.date() == report_day for local in local_times)
+    assert (local_times[0].hour, local_times[0].minute) == (5, 0)
+    assert (local_times[1].hour, local_times[1].minute) == (6, 0)
+
+
+def test_resolve_anchor_skips_invalid_intervals() -> None:
+    """Ignore schedule entries that lie fully outside the report day."""
+
+    tz = ZoneInfo("UTC")
+    options = StatisticsOptions(
+        timezone=tz,
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(18, 0),
+        fallback_power_kw=2.5,
+        prefer_device_energy=True,
+    )
+    context = ZoneContext(
+        label="Primary",
+        energy_field="primary",
+        runtime_field="primary_runtime",
+        scheduled_field="primary_sched",
+        energy_suffix="primary",
+        runtime_suffix="runtime",
+        schedule_suffix="sched",
+        fallback_anchor=time(6, 0),
+        program=None,
+        canonical=None,
+    )
+    report_day = date(2024, 4, 5)
+
+    intervals = [
+        (datetime(2024, 4, 6, 1, 0, tzinfo=tz), datetime(2024, 4, 6, 2, 0, tzinfo=tz)),
+        (datetime(2024, 4, 5, 1, 0, tzinfo=tz), datetime(2024, 4, 5, 2, 0, tzinfo=tz)),
+    ]
+
+    anchor, source, interval = _resolve_anchor(
+        report_day, context, options, intervals, runtime_hours=1.0
+    )
+
+    assert source == "schedule"
+    assert interval is not None
+    assert anchor.hour == 1 and anchor.minute == 0
+
+
+def test_resolve_anchor_tiebreaks_by_fallback_anchor() -> None:
+    """Prefer the interval closest to the fallback anchor when spans match."""
+
+    tz = ZoneInfo("UTC")
+    options = StatisticsOptions(
+        timezone=tz,
+        timezone_name="UTC",
+        primary_anchor=time(9, 0),
+        boost_anchor=time(18, 0),
+        fallback_power_kw=2.5,
+        prefer_device_energy=True,
+    )
+    context = ZoneContext(
+        label="Primary",
+        energy_field="primary",
+        runtime_field="primary_runtime",
+        scheduled_field="primary_sched",
+        energy_suffix="primary",
+        runtime_suffix="runtime",
+        schedule_suffix="sched",
+        fallback_anchor=time(9, 0),
+        program=None,
+        canonical=None,
+    )
+    report_day = date(2024, 4, 5)
+    intervals = [
+        (datetime(2024, 4, 5, 1, 0, tzinfo=tz), datetime(2024, 4, 5, 2, 0, tzinfo=tz)),
+        (datetime(2024, 4, 5, 10, 0, tzinfo=tz), datetime(2024, 4, 5, 11, 0, tzinfo=tz)),
+    ]
+
+    anchor, source, interval = _resolve_anchor(
+        report_day, context, options, intervals, runtime_hours=1.0
+    )
+
+    assert source == "schedule"
+    assert interval is not None
+    assert anchor.hour == 10 and anchor.minute == 0
+
+
+def test_resolve_anchor_clamps_configured_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure anchors outside the day are coerced back within bounds."""
+
+    tz = ZoneInfo("UTC")
+    options = StatisticsOptions(
+        timezone=tz,
+        timezone_name="UTC",
+        primary_anchor=time(0, 0),
+        boost_anchor=time(18, 0),
+        fallback_power_kw=2.5,
+        prefer_device_energy=True,
+    )
+    context = ZoneContext(
+        label="Primary",
+        energy_field="primary",
+        runtime_field="primary_runtime",
+        scheduled_field="primary_sched",
+        energy_suffix="primary",
+        runtime_suffix="runtime",
+        schedule_suffix="sched",
+        fallback_anchor=time(0, 0),
+        program=None,
+        canonical=None,
+    )
+    report_day = date(2024, 4, 5)
+
+    def early_anchor(
+        _day: date, _fallback: time | None, _tz: ZoneInfo
+    ) -> datetime:
+        return datetime(2024, 4, 4, 23, 30, tzinfo=tz)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.safe_anchor_datetime", early_anchor
+    )
+
+    anchor, source, interval = _resolve_anchor(
+        report_day, context, options, [], runtime_hours=0.0
+    )
+
+    assert source == "configured"
+    assert interval is None
+    assert anchor == datetime(2024, 4, 5, 0, 0, tzinfo=tz)
+
+    def late_anchor(
+        _day: date, _fallback: time | None, _tz: ZoneInfo
+    ) -> datetime:
+        return datetime(2024, 4, 6, 0, 30, tzinfo=tz)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.safe_anchor_datetime", late_anchor
+    )
+
+    anchor_late, source_late, interval_late = _resolve_anchor(
+        report_day, context, options, [], runtime_hours=0.0
+    )
+
+    day_end = datetime(2024, 4, 6, 0, 0, tzinfo=tz)
+    assert source_late == "configured"
+    assert interval_late is None
+    assert anchor_late == day_end - timedelta(microseconds=1)
 
 
 def test_build_zone_samples_rejects_non_positive_inputs() -> None:
@@ -4425,3 +4635,37 @@ def test_build_zone_samples_skips_zero_energy_slots(
     assert sample["start"] == anchor + timedelta(hours=1)
     assert sample["sum"] == pytest.approx(3.5)
     assert sample["state"] == pytest.approx(3.5)
+
+
+def test_build_zone_samples_clamps_to_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clamp runtime statistics to the selected schedule interval."""
+
+    anchor = datetime(2024, 4, 5, 5, 0, tzinfo=ZoneInfo("UTC"))
+    interval = (anchor, anchor + timedelta(minutes=30))
+
+    def fake_segments(
+        _anchor: datetime, _runtime: float, _energy: float
+    ) -> list[tuple[datetime, float, float]]:
+        return [
+            (anchor - timedelta(minutes=15), 0.25, 0.5),
+            (anchor + timedelta(hours=1), 0.25, 0.5),
+        ]
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.split_runtime_segments",
+        fake_segments,
+    )
+
+    samples = _build_zone_statistics_samples(
+        anchor,
+        1.0,
+        1.0,
+        0.0,
+        interval=interval,
+    )
+
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample["start"] == anchor
+    assert sample["sum"] == pytest.approx(0.5)
+    assert sample["state"] == pytest.approx(0.5)
