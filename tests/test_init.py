@@ -188,8 +188,6 @@ def stub_external_statistics(monkeypatch: pytest.MonkeyPatch) -> None:
         _statistics: Iterable[StatisticData],
     ) -> None:
         domain = split_statistic_id(metadata["statistic_id"])[0]
-        if "." in domain:
-            domain = domain.split(".", 1)[0]
         assert metadata["source"] == domain
 
     monkeypatch.setattr(
@@ -1954,8 +1952,6 @@ async def test_consumption_metrics_emits_hourly_statistics(
         statistics: Iterable[StatisticData],
     ) -> None:
         domain = split_statistic_id(metadata["statistic_id"])[0]
-        if "." in domain:
-            domain = domain.split(".", 1)[0]
         assert metadata["source"] == domain
         captured.append((metadata, list(statistics)))
 
@@ -1979,7 +1975,7 @@ async def test_consumption_metrics_emits_hourly_statistics(
 
     assert len(captured) == 1
     metadata, samples = captured[0]
-    assert metadata["statistic_id"] == "sensor.securemtr_custom_primary_energy"
+    assert metadata["statistic_id"] == "sensor:securemtr_custom_primary_energy"
     assert metadata["source"] == "sensor"
     assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
     assert metadata["has_sum"] is True
@@ -2180,8 +2176,91 @@ async def test_consumption_metrics_skips_statistics_without_entity(
 
     assert len(captured) == 1
     metadata, samples = captured[0]
-    assert metadata["statistic_id"] == "sensor.securemtr_primary_custom"
+    assert metadata["statistic_id"] == "sensor:securemtr_primary_custom"
     assert all(sample["sum"] >= 0 for sample in samples)
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_skips_statistics_with_invalid_entity(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Skip statistic publishing when the resolved entity ID is invalid."""
+
+    hass = FakeHass()
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-invalid-entity",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+    entry.hass = hass
+    entry.options = {CONF_TIME_ZONE: "Europe/London"}
+
+    backend = FakeBeanbagBackend(object())
+
+    async def _single_sample(
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+        gateway_id: str,
+        *,
+        window_index: int = 1,
+    ) -> list[BeanbagEnergySample]:
+        sample_day = datetime(2024, 2, 2, tzinfo=timezone.utc)
+        return [
+            BeanbagEnergySample(
+                timestamp=int(sample_day.timestamp()),
+                primary_energy_kwh=1.0,
+                boost_energy_kwh=0.0,
+                primary_scheduled_minutes=60,
+                primary_active_minutes=60,
+                boost_scheduled_minutes=0,
+                boost_active_minutes=0,
+            )
+        ]
+
+    monkeypatch.setattr(
+        backend,
+        "read_energy_history",
+        _single_sample,
+    )
+
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+",
+        gateway_id="gateway-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    statistics_calls: list[tuple[StatisticMetaData, list[StatisticData]]] = []
+
+    def capture_statistics(
+        _hass: HomeAssistant,
+        metadata: StatisticMetaData,
+        statistics: Iterable[StatisticData],
+    ) -> None:
+        statistics_calls.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        capture_statistics,
+    )
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        lambda *args, **kwargs: {"primary": "securemtr_invalid"},
+    )
+
+    caplog.set_level(logging.ERROR)
+    await consumption_metrics(hass, entry)
+
+    assert not statistics_calls
+    assert "Skipping statistics for primary because entity_id securemtr_invalid is invalid" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,6 @@ from homeassistant.components.recorder.statistics import (
     StatisticMeanType,
     StatisticMetaData,
     async_add_external_statistics,
-    split_statistic_id,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -1655,12 +1654,18 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
     energy_entity_ids = _energy_sensor_entity_ids(hass, entry, controller)
 
     for zone_key, samples in statistics_samples.items():
-        statistic_id = energy_entity_ids.get(zone_key)
-        if statistic_id is None:
+        entity_id = energy_entity_ids.get(zone_key)
+        if entity_id is None:
             continue
-        statistic_domain = split_statistic_id(statistic_id)[0]
-        if "." in statistic_domain:
-            statistic_domain = statistic_domain.split(".", 1)[0]
+        if "." not in entity_id:
+            _LOGGER.error(
+                "Skipping statistics for %s because entity_id %s is invalid",
+                zone_key,
+                entity_id,
+            )
+            continue
+        statistic_domain, object_id = entity_id.split(".", 1)
+        statistic_id = f"{statistic_domain}:{object_id}"
         metadata: StatisticMetaData = {
             "has_sum": True,
             "mean_type": StatisticMeanType.NONE,
