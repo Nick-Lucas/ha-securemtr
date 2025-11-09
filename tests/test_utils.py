@@ -68,21 +68,29 @@ def test_to_local_converts_epoch_and_datetime(value: int | datetime) -> None:
     assert result.day == 1
 
 
-def test_assign_report_day_returns_previous_local_day() -> None:
-    """assign_report_day should map timestamps to the previous local day."""
+def test_assign_report_day_returns_local_day() -> None:
+    """assign_report_day should map timestamps to the local calendar day."""
 
     tz = ZoneInfo("Europe/London")
     sample = datetime(2024, 4, 2, 0, 15, tzinfo=timezone.utc)
+    assert assign_report_day(sample, tz) == date(2024, 4, 2)
+
+
+def test_assign_report_day_handles_late_evening_samples() -> None:
+    """assign_report_day should keep samples near midnight on the same day."""
+
+    tz = ZoneInfo("Europe/London")
+    sample = datetime(2024, 4, 1, 22, 59, tzinfo=timezone.utc)
     assert assign_report_day(sample, tz) == date(2024, 4, 1)
 
 
 @pytest.mark.parametrize(
     ("timestamp", "expected"),
     (
-        (datetime(2024, 3, 31, 0, 30, tzinfo=timezone.utc), date(2024, 3, 30)),
-        (datetime(2024, 3, 31, 23, 30, tzinfo=timezone.utc), date(2024, 3, 31)),
-        (datetime(2024, 10, 27, 0, 30, tzinfo=timezone.utc), date(2024, 10, 26)),
-        (datetime(2024, 10, 27, 23, 30, tzinfo=timezone.utc), date(2024, 10, 26)),
+        (datetime(2024, 3, 31, 0, 30, tzinfo=timezone.utc), date(2024, 3, 31)),
+        (datetime(2024, 3, 31, 23, 30, tzinfo=timezone.utc), date(2024, 4, 1)),
+        (datetime(2024, 10, 27, 0, 30, tzinfo=timezone.utc), date(2024, 10, 27)),
+        (datetime(2024, 10, 27, 23, 30, tzinfo=timezone.utc), date(2024, 10, 27)),
     ),
 )
 def test_assign_report_day_handles_dst_transition(
@@ -293,10 +301,10 @@ def test_assign_report_day_handles_offset_timezone() -> None:
 
     tz = ZoneInfo("Etc/GMT-10")
     early = datetime(2024, 4, 2, 3, 0, tzinfo=timezone.utc)
-    assert assign_report_day(early, tz) == date(2024, 4, 1)
+    assert assign_report_day(early, tz) == date(2024, 4, 2)
 
     later = datetime(2024, 4, 2, 15, 0, tzinfo=timezone.utc)
-    assert assign_report_day(later, tz) == date(2024, 4, 2)
+    assert assign_report_day(later, tz) == date(2024, 4, 3)
 
 
 def test_cumulative_update_accumulates_values() -> None:

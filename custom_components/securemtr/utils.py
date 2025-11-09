@@ -38,13 +38,13 @@ def to_local(value: datetime | float, tz: tzinfo) -> datetime:
 
 
 def assign_report_day(value: datetime, tz: ZoneInfo) -> date:
-    """Return the SecureMTR reporting day for the provided timestamp."""
+    """Return the SecureMTR reporting day matching the local calendar date."""
 
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("assign_report_day requires an aware datetime")
 
     local_dt = value.astimezone(tz)
-    return (local_dt - timedelta(days=1)).date()
+    return local_dt.date()
 
 
 def safe_anchor_datetime(day: date, anchor: time | None, tz: tzinfo) -> datetime:
