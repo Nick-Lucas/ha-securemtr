@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from math import log
@@ -13,6 +14,9 @@ from homeassistant.util import dt as dt_util
 
 LN10 = log(10)
 MINUTES_PER_DAY = 24 * 60
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class EnergyCalibration(NamedTuple):
@@ -38,13 +42,22 @@ def to_local(value: datetime | float, tz: tzinfo) -> datetime:
 
 
 def assign_report_day(value: datetime, tz: ZoneInfo) -> date:
-    """Return the SecureMTR reporting day matching the local calendar date."""
+    """Return the retroactive SecureMTR report day derived from the prior local day."""
 
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("assign_report_day requires an aware datetime")
 
     local_dt = value.astimezone(tz)
-    return local_dt.date()
+    report_day = (local_dt - timedelta(days=1)).date()
+
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        _LOGGER.debug(
+            "assign_report_day local=%s report_day=%s",
+            local_dt.isoformat(),
+            report_day.isoformat(),
+        )
+
+    return report_day
 
 
 def safe_anchor_datetime(day: date, anchor: time | None, tz: tzinfo) -> datetime:
