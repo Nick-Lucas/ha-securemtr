@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from importlib import import_module
 import logging
-import re
 from types import MappingProxyType
 from typing import Any, Literal, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -524,17 +524,8 @@ def _utility_meter_identifier(hass: HomeAssistant, entry: ConfigEntry) -> str:
     if candidate is None:
         candidate = DOMAIN
 
-    slug = re.sub(r"[^0-9A-Za-z]+", "_", candidate).strip("_").lower()
+    slug = slugify_identifier(candidate)
     return slug or DOMAIN
-
-
-def _slugify_identifier(identifier: str) -> str:
-    """Return a slug representation matching entity identifier rules."""
-
-    return (
-        "".join(ch.lower() if ch.isalnum() else "_" for ch in identifier).strip("_")
-        or DOMAIN
-    )
 
 
 def _invoke_refresh_callback(callback: Callable[[], None], entry_identifier: str) -> None:
@@ -577,7 +568,7 @@ def _controller_slug(
     if not candidate:
         candidate = DOMAIN
 
-    return _slugify_identifier(candidate)
+    return slugify_identifier(candidate)
 
 
 def _energy_sensor_entity_ids(
@@ -1422,7 +1413,7 @@ async def _validate_consumption_connection(
 ) -> (
     tuple[
         SecuremtrRuntimeData,
-        "SecuremtrController",
+        SecuremtrController,
         BeanbagSession,
         ClientWebSocketResponse,
     ]
@@ -1471,7 +1462,7 @@ async def _validate_consumption_connection(
 async def _prepare_consumption_samples(
     entry: ConfigEntry,
     runtime: SecuremtrRuntimeData,
-    controller: "SecuremtrController",
+    controller: SecuremtrController,
     entry_identifier: str,
 ) -> PreparedSamples | None:
     """Fetch, trim, and normalise recent consumption samples."""
@@ -1531,7 +1522,7 @@ async def _process_zone_samples(
     runtime: SecuremtrRuntimeData,
     session: BeanbagSession,
     websocket: ClientWebSocketResponse,
-    controller: "SecuremtrController",
+    controller: SecuremtrController,
     processed_rows: list[dict[str, Any]],
     options: StatisticsOptions,
     entry_identifier: str,
@@ -1792,7 +1783,7 @@ async def _process_zone_samples(
 def _submit_statistics(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    controller: "SecuremtrController",
+    controller: SecuremtrController,
     statistics_samples: Mapping[str, list[StatisticData]],
 ) -> None:
     """Record prepared statistic samples for each zone."""
@@ -2150,3 +2141,8 @@ def _normalize_identifier(value: Any) -> str | None:
             return candidate
 
     return None
+
+
+slugify_identifier: Callable[[str], str] = import_module(
+    "custom_components.securemtr.entity"
+).slugify_identifier
