@@ -1121,6 +1121,41 @@ async def async_run_with_reconnect(
     raise last_error
 
 
+async def async_execute_controller_command(
+    runtime: SecuremtrRuntimeData,
+    entry: ConfigEntry,
+    operation: Callable[
+        [BeanbagBackend, BeanbagSession, ClientWebSocketResponse, SecuremtrController],
+        Awaitable[_ResultT],
+    ],
+    *,
+    log_context: str,
+    error_message: str | None = None,
+    exception_types: tuple[type[Exception], ...] = (BeanbagError,),
+) -> _ResultT:
+    """Run a controller-scoped Beanbag command with common safeguards."""
+
+    controller = runtime.controller
+    if controller is None:
+        raise HomeAssistantError("Secure Meters controller is not connected")
+
+    async with runtime.command_lock:
+        try:
+            return await async_run_with_reconnect(
+                entry,
+                runtime,
+                lambda backend, session, websocket: operation(
+                    backend,
+                    session,
+                    websocket,
+                    controller,
+                ),
+            )
+        except exception_types as error:
+            _LOGGER.error("%s: %s", log_context, error)
+            raise HomeAssistantError(error_message or log_context) from error
+
+
 async def _async_fetch_energy_samples(
     entry: ConfigEntry,
     runtime: SecuremtrRuntimeData,
