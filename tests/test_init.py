@@ -74,6 +74,7 @@ from custom_components.securemtr import (
 )
 import custom_components.securemtr as securemtr_module
 from custom_components.securemtr.energy import EnergyAccumulator
+from custom_components.securemtr.zones import ZONE_METADATA
 from custom_components.securemtr.beanbag import (
     BeanbagError,
     BeanbagGateway,
@@ -1634,10 +1635,32 @@ async def test_process_zone_samples_returns_result(
         prefer_device_energy=True,
     )
 
+    created_contexts: list[Any] = []
+
+    @dataclass(slots=True)
+    class RecordingZoneContext:
+        label: str
+        energy_field: str
+        runtime_field: str
+        scheduled_field: str
+        energy_suffix: str
+        runtime_suffix: str
+        schedule_suffix: str
+        fallback_anchor: time
+        program: WeeklyProgram | None
+        canonical: list[tuple[int, int]] | None
+
+        def __post_init__(self) -> None:
+            created_contexts.append(self)
+
     program_mock = AsyncMock(side_effect=[None, None])
     monkeypatch.setattr(
         "custom_components.securemtr._read_zone_program",
         program_mock,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.ZoneContext",
+        RecordingZoneContext,
     )
 
     result = await _process_zone_samples(
@@ -1658,6 +1681,18 @@ async def test_process_zone_samples_returns_result(
     assert "primary" in result.statistics_samples
     assert runtime.energy_accumulator is not None
     assert runtime.energy_store is not None
+    assert len(created_contexts) == len(ZONE_METADATA)
+    for (zone_key, metadata), context in zip(ZONE_METADATA.items(), created_contexts):
+        assert context.label == metadata.label
+        assert context.energy_field == metadata.energy_field
+        assert context.runtime_field == metadata.runtime_field
+        assert context.scheduled_field == metadata.scheduled_field
+        assert context.energy_suffix == metadata.energy_suffix
+        assert context.runtime_suffix == metadata.runtime_suffix
+        assert context.schedule_suffix == metadata.schedule_suffix
+        assert context.fallback_anchor == getattr(options, f"{zone_key}_anchor")
+        assert context.program is None
+        assert context.canonical is None
     assert program_mock.await_count == 2
 
 

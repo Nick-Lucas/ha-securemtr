@@ -58,6 +58,7 @@ from .utils import (
     safe_anchor_datetime,
     split_runtime_segments,
 )
+from .zones import ZONE_METADATA
 
 DOMAIN = "securemtr"
 
@@ -1553,46 +1554,36 @@ async def _process_zone_samples(
         canonicalize_weekly(boost_program) if boost_program is not None else None
     )
 
+    programs = {"primary": primary_program, "boost": boost_program}
+    canonicals = {"primary": primary_canonical, "boost": boost_canonical}
+    anchors = {
+        zone_key: getattr(options, f"{zone_key}_anchor") for zone_key in programs
+    }
+
     contexts: dict[str, ZoneContext] = {
-        "primary": ZoneContext(
-            label="Primary",
-            energy_field="primary_energy_kwh",
-            runtime_field="primary_active_minutes",
-            scheduled_field="primary_scheduled_minutes",
-            energy_suffix="primary_energy_kwh",
-            runtime_suffix="primary_runtime_h",
-            schedule_suffix="primary_sched_h",
-            fallback_anchor=options.primary_anchor,
-            program=primary_program,
-            canonical=primary_canonical,
-        ),
-        "boost": ZoneContext(
-            label="Boost",
-            energy_field="boost_energy_kwh",
-            runtime_field="boost_active_minutes",
-            scheduled_field="boost_scheduled_minutes",
-            energy_suffix="boost_energy_kwh",
-            runtime_suffix="boost_runtime_h",
-            schedule_suffix="boost_sched_h",
-            fallback_anchor=options.boost_anchor,
-            program=boost_program,
-            canonical=boost_canonical,
-        ),
+        zone_key: ZoneContext(
+            label=metadata.label,
+            energy_field=metadata.energy_field,
+            runtime_field=metadata.runtime_field,
+            scheduled_field=metadata.scheduled_field,
+            energy_suffix=metadata.energy_suffix,
+            runtime_suffix=metadata.runtime_suffix,
+            schedule_suffix=metadata.schedule_suffix,
+            fallback_anchor=anchors[zone_key],
+            program=programs[zone_key],
+            canonical=canonicals[zone_key],
+        )
+        for zone_key, metadata in ZONE_METADATA.items()
     }
 
     calibrations: dict[str, EnergyCalibration] = {
-        "primary": calibrate_energy_scale(
+        zone_key: calibrate_energy_scale(
             processed_rows,
-            "primary_energy_kwh",
-            "primary_active_minutes",
+            metadata.energy_field,
+            metadata.runtime_field,
             options.fallback_power_kw,
-        ),
-        "boost": calibrate_energy_scale(
-            processed_rows,
-            "boost_energy_kwh",
-            "boost_active_minutes",
-            options.fallback_power_kw,
-        ),
+        )
+        for zone_key, metadata in ZONE_METADATA.items()
     }
 
     for zone_key, calibration in calibrations.items():

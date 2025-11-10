@@ -118,6 +118,8 @@ custom_components.securemtr.entity.slugify_identifier: Convert a controller iden
 custom_components.securemtr.entity.build_device_info: Construct device registry metadata for the provided controller.
 custom_components.securemtr.entity.async_get_ready_controller: Return runtime context and controller metadata once ready.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.__init__: Initialise the entity with runtime context and dispatcher hooks.
+custom_components.securemtr.zones.ZoneMetadata: Describe static metadata for a controller zone.
+custom_components.securemtr.zones.ZONE_METADATA: Provide immutable metadata definitions for SecureMTR controller zones.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.available: Return whether the controller metadata is currently available.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._runtime_connected: Return whether the backend runtime currently exposes controller state.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.async_added_to_hass: Register dispatcher callbacks when the entity is added to Home Assistant.

@@ -19,6 +19,7 @@ from custom_components.securemtr.sensor import (
     STATE_CLASS_TOTAL_INCREASING,
     async_setup_entry,
 )
+from custom_components.securemtr.zones import ZONE_METADATA
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.exceptions import HomeAssistantError
 
@@ -186,12 +187,15 @@ async def test_energy_sensors_report_totals() -> None:
 
     await async_setup_entry(hass, entry, entities.extend)
 
-    assert len(entities) == 7
+    assert len(entities) == 1 + len(ZONE_METADATA) * 3
     sensors_by_id = {entity.unique_id: entity for entity in entities}
+
+    primary_metadata = ZONE_METADATA["primary"]
+    boost_metadata = ZONE_METADATA["boost"]
 
     primary_energy = sensors_by_id["serial_1_primary_energy_kwh"]
     assert isinstance(primary_energy, SecuremtrEnergyTotalSensor)
-    assert primary_energy.translation_key == "primary_energy_total"
+    assert primary_energy.translation_key == primary_metadata.translation_keys["energy"]
     assert primary_energy.has_entity_name is True
     assert primary_energy.entity_id == PRIMARY_ENERGY_ENTITY_ID
     assert primary_energy.native_value == pytest.approx(12.5)
@@ -232,7 +236,7 @@ async def test_energy_sensors_report_totals() -> None:
 
     boost_energy = sensors_by_id["serial_1_boost_energy_kwh"]
     assert isinstance(boost_energy, SecuremtrEnergyTotalSensor)
-    assert boost_energy.translation_key == "boost_energy_total"
+    assert boost_energy.translation_key == boost_metadata.translation_keys["energy"]
     assert boost_energy.has_entity_name is True
     assert boost_energy.entity_id == BOOST_ENERGY_ENTITY_ID
     assert boost_energy.native_value == pytest.approx(4.75)
@@ -250,6 +254,7 @@ async def test_energy_sensors_report_totals() -> None:
     primary_runtime = sensors_by_id["serial_1_primary_runtime_daily"]
     assert isinstance(primary_runtime, SecuremtrDailyDurationSensor)
     assert primary_runtime.native_value == pytest.approx(3.25)
+    assert primary_runtime.translation_key == primary_metadata.translation_keys["runtime"]
     assert primary_runtime.native_unit_of_measurement == UnitOfTime.HOURS
     assert primary_runtime.device_class == DEVICE_CLASS_DURATION
     assert primary_runtime.state_class == STATE_CLASS_MEASUREMENT
@@ -260,9 +265,14 @@ async def test_energy_sensors_report_totals() -> None:
 
     boost_runtime = sensors_by_id["serial_1_boost_runtime_daily"]
     assert boost_runtime.native_value == pytest.approx(0.5)
+    assert boost_runtime.translation_key == boost_metadata.translation_keys["runtime"]
 
     primary_scheduled = sensors_by_id["serial_1_primary_scheduled_daily"]
     assert primary_scheduled.native_value == pytest.approx(4.0)
+    assert (
+        primary_scheduled.translation_key
+        == primary_metadata.translation_keys["scheduled"]
+    )
     primary_scheduled_attrs = primary_scheduled.extra_state_attributes
     assert primary_scheduled_attrs is not None
     assert primary_scheduled_attrs["report_day"] == "2024-03-01"
