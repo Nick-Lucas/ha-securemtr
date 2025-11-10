@@ -128,7 +128,6 @@ custom_components.securemtr.zones.ZONE_METADATA: Provide immutable metadata defi
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.available: Return whether the controller metadata is currently available.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._runtime_connected: Return whether the backend runtime currently exposes controller state.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.async_added_to_hass: Register dispatcher callbacks when the entity is added to Home Assistant.
-custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._resolve_dispatcher_connect: Return the dispatcher connect helper, honouring per-module overrides.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.device_info: Return device registry information for the associated controller.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._identifier_slug: Return the slugified identifier for the controller.
 custom_components.securemtr.button.async_setup_entry: Set up Secure Meters button entities for a config entry.

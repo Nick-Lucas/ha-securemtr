@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-import sys
-from typing import Any
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -121,24 +117,10 @@ class SecuremtrRuntimeEntityMixin:
         if hass is None:
             return
 
-        connector = self._resolve_dispatcher_connect()
-        remove = connector(
+        remove = async_dispatcher_connect(
             hass, runtime_update_signal(self._entry_id), self.async_write_ha_state
         )
         self.async_on_remove(remove)
-
-    def _resolve_dispatcher_connect(
-        self,
-    ) -> Callable[[Any, str, Callable[..., Any]], Callable[[], None]]:
-        """Return the dispatcher connect helper, honouring per-module overrides."""
-
-        module = sys.modules.get(self.__module__)
-        if module is not None:
-            connector = getattr(module, "async_dispatcher_connect", None)
-            if callable(connector):
-                return connector
-
-        return async_dispatcher_connect  # pragma: no cover - fallback path
 
     @property
     def device_info(self) -> DeviceInfo:

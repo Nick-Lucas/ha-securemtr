@@ -645,7 +645,7 @@ async def test_button_async_added_to_hass(monkeypatch: pytest.MonkeyPatch) -> No
             _fake_added,
         )
         mp.setattr(
-            "custom_components.securemtr.button.async_dispatcher_connect",
+            "custom_components.securemtr.entity.async_dispatcher_connect",
             _connect,
         )
         await button.async_added_to_hass()

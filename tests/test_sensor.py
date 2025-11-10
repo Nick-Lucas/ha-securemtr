@@ -112,7 +112,7 @@ async def test_sensor_reports_end_time() -> None:
             _fake_added,
         )
         mp.setattr(
-            "custom_components.securemtr.sensor.async_dispatcher_connect",
+            "custom_components.securemtr.entity.async_dispatcher_connect",
             _connect,
         )
         await sensor.async_added_to_hass()

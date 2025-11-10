@@ -98,7 +98,7 @@ async def test_binary_sensor_setup_and_state() -> None:
             _fake_added,
         )
         mp.setattr(
-            "custom_components.securemtr.binary_sensor.async_dispatcher_connect",
+            "custom_components.securemtr.entity.async_dispatcher_connect",
             _connect,
         )
         await sensor.async_added_to_hass()

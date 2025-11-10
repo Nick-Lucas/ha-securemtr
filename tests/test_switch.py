@@ -540,7 +540,7 @@ async def test_switch_async_added_to_hass(monkeypatch: pytest.MonkeyPatch) -> No
         return lambda: None
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_dispatcher_connect",
+        "custom_components.securemtr.entity.async_dispatcher_connect",
         _connect,
     )
 
