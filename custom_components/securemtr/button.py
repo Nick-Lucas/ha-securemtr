@@ -22,14 +22,8 @@ from . import (
     consumption_metrics,
 )
 from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
-from .entity import (
-    SecuremtrRuntimeEntityMixin,
-    async_dispatcher_connect as _async_dispatcher_connect,
-    async_get_ready_controller,
-)
+from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
 from .runtime_helpers import async_mutate_runtime
-
-async_dispatcher_connect = _async_dispatcher_connect
 
 _LOGGER = logging.getLogger(__name__)
 

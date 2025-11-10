@@ -13,14 +13,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SecuremtrController, SecuremtrRuntimeData
 from .beanbag import BeanbagBackend, BeanbagSession
-from .entity import (
-    SecuremtrRuntimeEntityMixin,
-    async_dispatcher_connect as _async_dispatcher_connect,
-    async_get_ready_controller,
-)
+from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
 from .runtime_helpers import async_mutate_runtime
-
-async_dispatcher_connect = _async_dispatcher_connect
 
 _LOGGER = logging.getLogger(__name__)
 

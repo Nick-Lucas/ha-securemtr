@@ -12,14 +12,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData
-from .entity import (
-    SecuremtrRuntimeEntityMixin,
-    async_dispatcher_connect as _async_dispatcher_connect,
-    async_get_ready_controller,
-)
+from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
 from .zones import ZONE_METADATA
-
-async_dispatcher_connect = _async_dispatcher_connect
 
 _LOGGER = logging.getLogger(__name__)
 
