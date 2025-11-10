@@ -146,7 +146,7 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
         return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_run_with_reconnect",
+        "custom_components.securemtr.async_run_with_reconnect",
         _fake_run_with_reconnect,
     )
 
@@ -282,7 +282,7 @@ async def test_switch_turn_on_requires_connection(
         raise BeanbagError("no connection")
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_run_with_reconnect",
+        "custom_components.securemtr.async_run_with_reconnect",
         _fake_run_with_reconnect,
     )
 
@@ -318,7 +318,7 @@ async def test_switch_turn_on_requires_controller(
         return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_run_with_reconnect",
+        "custom_components.securemtr.async_run_with_reconnect",
         _fake_run_with_reconnect,
     )
 
@@ -356,7 +356,7 @@ async def test_timed_boost_requires_connection(
         raise BeanbagError("no connection")
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_run_with_reconnect",
+        "custom_components.securemtr.async_run_with_reconnect",
         _fake_run_with_reconnect,
     )
 
@@ -393,7 +393,7 @@ async def test_timed_boost_requires_controller(
         return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_run_with_reconnect",
+        "custom_components.securemtr.async_run_with_reconnect",
         _fake_run_with_reconnect,
     )
 
@@ -434,7 +434,7 @@ async def test_timed_boost_backend_error(monkeypatch: pytest.MonkeyPatch) -> Non
         return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_run_with_reconnect",
+        "custom_components.securemtr.async_run_with_reconnect",
         _fake_run_with_reconnect,
     )
 
@@ -480,7 +480,7 @@ async def test_switch_turn_on_handles_backend_error(
         return await operation(runtime_obj.backend, runtime_obj.session, runtime_obj.websocket)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_run_with_reconnect",
+        "custom_components.securemtr.async_run_with_reconnect",
         _fake_run_with_reconnect,
     )
 

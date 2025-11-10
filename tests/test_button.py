@@ -121,7 +121,7 @@ def patch_reconnect(
         return await operation(runtime.backend, runtime.session, runtime.websocket)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.button.async_run_with_reconnect",
+        "custom_components.securemtr.async_run_with_reconnect",
         _fake_run_with_reconnect,
     )
     return _fake_run_with_reconnect

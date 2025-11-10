@@ -7,16 +7,14 @@ import logging
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import (
     SecuremtrController,
     SecuremtrRuntimeData,
     async_dispatch_runtime_update,
-    async_run_with_reconnect,
+    async_execute_controller_command,
 )
-from .beanbag import BeanbagError
 from .entity import (
     SecuremtrRuntimeEntityMixin,
     async_dispatcher_connect as _async_dispatcher_connect,
@@ -80,38 +78,27 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Drive the backend to the requested primary power state."""
 
         runtime = self._runtime
-        controller = runtime.controller
 
-        if controller is None:
-            raise HomeAssistantError("Secure Meters controller is not connected")
-
-        entry = self._entry
-        async with runtime.command_lock:
-            try:
-                await async_run_with_reconnect(
-                    entry,
-                    runtime,
-                    (
-                        lambda backend, session, websocket: backend.turn_controller_on(
-                            session,
-                            websocket,
-                            controller.gateway_id,
-                        )
-                        if turn_on
-                        else backend.turn_controller_off(
-                            session,
-                            websocket,
-                            controller.gateway_id,
-                        )
-                    ),
+        await async_execute_controller_command(
+            runtime,
+            self._entry,
+            (
+                lambda backend, session, websocket, controller: backend.turn_controller_on(
+                    session,
+                    websocket,
+                    controller.gateway_id,
                 )
-            except BeanbagError as error:
-                _LOGGER.error("Failed to toggle Secure Meters controller: %s", error)
-                raise HomeAssistantError(
-                    "Failed to toggle Secure Meters controller"
-                ) from error
+                if turn_on
+                else backend.turn_controller_off(
+                    session,
+                    websocket,
+                    controller.gateway_id,
+                )
+            ),
+            log_context="Failed to toggle Secure Meters controller",
+        )
 
-            runtime.primary_power_on = turn_on
+        runtime.primary_power_on = turn_on
 
         hass = self.hass
         if hass is None:
@@ -156,33 +143,20 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Drive the backend to the requested timed boost state."""
 
         runtime = self._runtime
-        controller = runtime.controller
 
-        if controller is None:
-            raise HomeAssistantError("Secure Meters controller is not connected")
+        await async_execute_controller_command(
+            runtime,
+            self._entry,
+            lambda backend, session, websocket, controller: backend.set_timed_boost_enabled(
+                session,
+                websocket,
+                controller.gateway_id,
+                enabled=enabled,
+            ),
+            log_context="Failed to toggle Secure Meters timed boost feature",
+        )
 
-        entry = self._entry
-        async with runtime.command_lock:
-            try:
-                await async_run_with_reconnect(
-                    entry,
-                    runtime,
-                    lambda backend, session, websocket: backend.set_timed_boost_enabled(
-                        session,
-                        websocket,
-                        controller.gateway_id,
-                        enabled=enabled,
-                    ),
-                )
-            except BeanbagError as error:
-                _LOGGER.error(
-                    "Failed to toggle Secure Meters timed boost feature: %s", error
-                )
-                raise HomeAssistantError(
-                    "Failed to toggle Secure Meters timed boost feature"
-                ) from error
-
-            runtime.timed_boost_enabled = enabled
+        runtime.timed_boost_enabled = enabled
 
         hass = self.hass
         if hass is None:
