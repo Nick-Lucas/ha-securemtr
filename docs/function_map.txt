@@ -75,7 +75,6 @@ custom_components.securemtr.beanbag.BeanbagBackend._send_request: Send a request
 custom_components.securemtr.beanbag.DailyProgram.__post_init__: Validate and normalise minute triplets.
 custom_components.securemtr.beanbag.DailyProgram._coerce_triplet: Normalise a 3-slot minute collection.
 custom_components.securemtr.switch.async_setup_entry: Set up Secure Meters switch entities for a config entry.
-custom_components.securemtr.switch._SecuremtrBaseSwitch: Provide shared behaviour for Secure Meters switch entities.
 custom_components.securemtr.switch.SecuremtrPowerSwitch.is_on: Return whether the controller reports the primary power as on.
 custom_components.securemtr.switch.SecuremtrPowerSwitch.async_turn_on: Send an on command to the Secure Meters controller.
 custom_components.securemtr.switch.SecuremtrPowerSwitch.async_turn_off: Send an off command to the Secure Meters controller.
@@ -84,7 +83,6 @@ custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.is_on: Return wheth
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_on: Enable the timed boost feature in the backend.
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_off: Disable the timed boost feature in the backend.
 custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._async_set_timed_boost: Drive the backend to the requested timed boost state.
-custom_components.securemtr.button._SecuremtrBaseButton: Provide shared behaviour for Secure Meters button entities.
 custom_components.securemtr.button.SecuremtrTimedBoostButton.async_press: Send the timed boost start command for the configured duration.
 custom_components.securemtr.button.SecuremtrCancelBoostButton.available: Only expose the button while a timed boost is active.
 custom_components.securemtr.button.SecuremtrCancelBoostButton.async_press: Send the timed boost stop command.
@@ -100,7 +98,6 @@ custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton.async_press:
 custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton._format_program_summary: Convert a weekly program into a human-readable dictionary.
 custom_components.securemtr.button.SecuremtrLogWeeklyScheduleButton._format_transitions: Translate minute offsets into HH:MM strings.
 custom_components.securemtr.binary_sensor.async_setup_entry: Set up the Secure Meters boost binary sensor.
-custom_components.securemtr.binary_sensor._SecuremtrBaseBinarySensor: Provide shared behaviour for Secure Meters binary sensors.
 custom_components.securemtr.binary_sensor.SecuremtrBoostActiveBinarySensor.is_on: Return whether the timed boost is active.
 custom_components.securemtr.sensor.async_setup_entry: Set up the Secure Meters sensors for boost and statistics.
 custom_components.securemtr.sensor.SecuremtrSensorEntity: Provide shared behaviour for Secure Meters sensors.
@@ -111,6 +108,13 @@ custom_components.securemtr.sensor.SecuremtrDailyDurationSensor.native_value: Re
 custom_components.securemtr.sensor.SecuremtrDailyDurationSensor.extra_state_attributes: Provide the report day and cumulative energy context for duration sensors.
 custom_components.securemtr.entity.slugify_identifier: Convert a controller identifier into a slug for unique IDs.
 custom_components.securemtr.entity.build_device_info: Construct device registry metadata for the provided controller.
+custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.__init__: Initialise the entity with runtime context and dispatcher hooks.
+custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.available: Return whether the controller metadata is currently available.
+custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._runtime_connected: Return whether the backend runtime currently exposes controller state.
+custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.async_added_to_hass: Register dispatcher callbacks when the entity is added to Home Assistant.
+custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._resolve_dispatcher_connect: Return the dispatcher connect helper, honouring per-module overrides.
+custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.device_info: Return device registry information for the associated controller.
+custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._identifier_slug: Return the slugified identifier for the controller.
 custom_components.securemtr.button.async_setup_entry: Set up Secure Meters button entities for a config entry.
 custom_components.securemtr.beanbag.BeanbagEnergySample: Hold a single energy history sample reported by Beanbag.
 custom_components.securemtr.utils.EnergyCalibration: Describe energy calibration parameters.
