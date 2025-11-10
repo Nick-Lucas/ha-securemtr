@@ -165,7 +165,7 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
         return await original_helper(*args, **kwargs)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_mutate_runtime",
+        "custom_components.securemtr.entity.async_mutate_runtime",
         _wrapped_helper,
     )
 
@@ -184,6 +184,8 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert runtime.primary_power_on is True
     assert power_switch.is_on is True
     assert state_writes == ["write"]
+    assert helper_calls[0][1]["log_context"] == "Failed to toggle Secure Meters controller"
+    assert helper_calls[0][1]["write_ha_state"] is _record_state_write
 
     power_switch.hass = None
     state_writes.clear()
@@ -211,6 +213,8 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert runtime.timed_boost_enabled is True
     assert timed_switch.is_on is True
     assert timed_state_writes == ["write"]
+    assert helper_calls[2][1]["log_context"] == "Failed to toggle Secure Meters timed boost feature"
+    assert helper_calls[2][1]["write_ha_state"] is _record_timed_state_write
 
     timed_switch.hass = None
     timed_state_writes.clear()
@@ -227,6 +231,76 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert timed_state_writes == []
     assert dispatcher_calls == [(power_hass, "entry"), (timed_hass, "entry")]
     assert len(helper_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_power_switch_helper_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Surface helper failures as Home Assistant errors for power toggles."""
+
+    runtime, _backend = _create_runtime()
+    switch = SecuremtrPowerSwitch(runtime, runtime.controller, DummyEntry("entry"))
+    switch.hass = SimpleNamespace()
+
+    recorded_kwargs: dict[str, Any] = {}
+
+    async def _failing_helper(*args: Any, **kwargs: Any) -> Any:
+        recorded_kwargs.update(kwargs)
+        raise HomeAssistantError("boom")
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.entity.async_mutate_runtime",
+        _failing_helper,
+    )
+
+    with pytest.raises(HomeAssistantError, match="boom"):
+        await switch.async_turn_on()
+
+    assert recorded_kwargs["log_context"] == "Failed to toggle Secure Meters controller"
+    assert recorded_kwargs["write_ha_state"].__self__ is switch
+
+
+@pytest.mark.asyncio
+async def test_power_switch_requires_entry() -> None:
+    """Ensure helper validation raises when the config entry is missing."""
+
+    runtime, _backend = _create_runtime()
+    switch = SecuremtrPowerSwitch(runtime, runtime.controller, DummyEntry("entry"))
+    switch._entry = None  # type: ignore[assignment]
+
+    with pytest.raises(HomeAssistantError, match="Config entry is not available"):
+        await switch.async_turn_on()
+
+
+@pytest.mark.asyncio
+async def test_async_mutate_wraps_single_exception_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convert individual exception types into a tuple for the helper."""
+
+    runtime, _backend = _create_runtime()
+    switch = SecuremtrPowerSwitch(runtime, runtime.controller, DummyEntry("entry"))
+
+    recorded_kwargs: dict[str, Any] = {}
+
+    async def _noop_helper(*args: Any, **kwargs: Any) -> None:
+        recorded_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.entity.async_mutate_runtime",
+        _noop_helper,
+    )
+
+    async def _operation(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    await switch._async_mutate(
+        operation=_operation,
+        mutation=lambda data: None,
+        log_context="ctx",
+        exception_types=HomeAssistantError,
+    )
+
+    assert recorded_kwargs["exception_types"] == (HomeAssistantError,)
 
 
 def test_switch_device_info_without_serial() -> None:

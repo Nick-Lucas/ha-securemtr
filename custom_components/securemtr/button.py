@@ -23,7 +23,7 @@ from . import (
 )
 from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
 from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
-from .runtime_helpers import async_mutate_runtime, async_read_zone_program
+from .runtime_helpers import async_read_zone_program
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -239,18 +239,9 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
     async def async_press(self) -> None:
         """Send the timed boost start command for the configured duration."""
 
-        runtime = self._runtime
-        entry = self._entry
-        if entry is None:  # pragma: no cover - defensive guard
-            raise HomeAssistantError("Config entry is not available")
-
         duration = self._duration
 
-        await async_mutate_runtime(
-            runtime,
-            entry,
-            entry_id=self._entry_id,
-            hass=self.hass,
+        await self._async_mutate(
             operation=lambda backend, session, websocket, controller: backend.start_timed_boost(
                 session,
                 websocket,
@@ -307,15 +298,7 @@ class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         if runtime.timed_boost_active is not True:
             raise HomeAssistantError("Timed boost is not currently active")
 
-        entry = self._entry
-        if entry is None:  # pragma: no cover - defensive guard
-            raise HomeAssistantError("Config entry is not available")
-
-        await async_mutate_runtime(
-            runtime,
-            entry,
-            entry_id=self._entry_id,
-            hass=self.hass,
+        await self._async_mutate(
             operation=lambda backend, session, websocket, controller: backend.stop_timed_boost(
                 session,
                 websocket,

@@ -210,7 +210,7 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
         return await original_helper(*args, **kwargs)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.button.async_mutate_runtime",
+        "custom_components.securemtr.entity.async_mutate_runtime",
         _wrapped_helper,
     )
 
@@ -225,6 +225,8 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
     assert runtime.timed_boost_end_minute == (10 * 60 + 45)
     assert runtime.timed_boost_end_time == coerce_end_time(10 * 60 + 45)
     assert dispatcher_calls == [(hass_obj, "entry")]
+    assert helper_calls[0][1]["log_context"] == "Failed to start Secure Meters timed boost"
+    assert helper_calls[0][1]["write_ha_state"] is None
 
     boost_button.hass = None
     await boost_button.async_press()
@@ -236,6 +238,40 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
     )
     assert dispatcher_calls == [(hass_obj, "entry")]
     assert len(helper_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_boost_button_helper_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Surface helper failures as Home Assistant errors for boost buttons."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = DummyEntry(entry_id="entry")
+    entities: list[ButtonEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    boost_button = next(
+        entity for entity in entities if entity.unique_id.endswith("boost_30")
+    )
+
+    recorded_kwargs: dict[str, Any] = {}
+
+    async def _failing_helper(*args: Any, **kwargs: Any) -> Any:
+        recorded_kwargs.update(kwargs)
+        raise HomeAssistantError("boom")
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.entity.async_mutate_runtime",
+        _failing_helper,
+    )
+
+    with pytest.raises(HomeAssistantError, match="boom"):
+        await boost_button.async_press()
+
+    assert recorded_kwargs["log_context"] == "Failed to start Secure Meters timed boost"
+    assert recorded_kwargs["write_ha_state"] is None
+    assert backend.start_calls == []
 
 
 @pytest.mark.asyncio
@@ -471,7 +507,7 @@ async def test_cancel_button_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
         return await original_helper(*args, **kwargs)
 
     monkeypatch.setattr(
-        "custom_components.securemtr.button.async_mutate_runtime",
+        "custom_components.securemtr.entity.async_mutate_runtime",
         _wrapped_helper,
     )
 

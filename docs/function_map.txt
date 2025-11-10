@@ -133,6 +133,7 @@ custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._runtime_connecte
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.async_added_to_hass: Register dispatcher callbacks when the entity is added to Home Assistant.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.device_info: Return device registry information for the associated controller.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._identifier_slug: Return the slugified identifier for the controller.
+custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._async_mutate: Execute a runtime mutation using the entity's stored context.
 custom_components.securemtr.button.async_setup_entry: Set up Secure Meters button entities for a config entry.
 custom_components.securemtr.runtime_helpers.async_mutate_runtime: Execute an operation, mutate the runtime, and notify listeners.
 custom_components.securemtr.beanbag.BeanbagEnergySample: Hold a single energy history sample reported by Beanbag.
