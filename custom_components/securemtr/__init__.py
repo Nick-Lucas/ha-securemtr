@@ -1612,6 +1612,22 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
             latest_day = report_day
 
         if zone_records:
+            first_record = zone_records[0]
+            last_record = zone_records[-1]
+            _LOGGER.debug(
+                "%s prepared %d statistic samples for %s: first_start=%s last_start=%s first_sum=%.3f last_sum=%.3f",
+                context.label,
+                len(zone_records),
+                zone_key,
+                first_record["start"].isoformat()
+                if isinstance(first_record.get("start"), datetime)
+                else first_record.get("start"),
+                last_record["start"].isoformat()
+                if isinstance(last_record.get("start"), datetime)
+                else last_record.get("start"),
+                float(first_record.get("sum", 0.0)),
+                float(last_record.get("sum", 0.0)),
+            )
             statistics_samples[zone_key] = zone_records
 
         if latest_day is not None:
@@ -1676,6 +1692,22 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
             "unit_class": "energy",
         }
         try:
+            first_sample = samples[0]
+            last_sample = samples[-1]
+            _LOGGER.debug(
+                "Recording %d statistic samples for %s (statistic_id=%s): first_start=%s last_start=%s first_sum=%.3f last_sum=%.3f",
+                len(samples),
+                zone_key,
+                statistic_id,
+                first_sample["start"].isoformat()
+                if isinstance(first_sample.get("start"), datetime)
+                else first_sample.get("start"),
+                last_sample["start"].isoformat()
+                if isinstance(last_sample.get("start"), datetime)
+                else last_sample.get("start"),
+                float(first_sample.get("sum", 0.0)),
+                float(last_sample.get("sum", 0.0)),
+            )
             async_add_external_statistics(hass, metadata, samples)
         except HomeAssistantError:
             _LOGGER.exception(
