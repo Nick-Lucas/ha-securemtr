@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from unittest.mock import AsyncMock
 
 import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import SecuremtrController, SecuremtrRuntimeData
@@ -99,3 +100,48 @@ async def test_async_mutate_runtime_handles_async_mutation(
     assert dispatcher_calls == [(hass, "entry")]
     assert execute_calls and execute_calls[0][2]["error_message"] == "error"
     assert execute_calls[0][2]["exception_types"] == (ValueError,)
+
+
+@pytest.mark.asyncio
+async def test_async_execute_controller_command_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure the command proxy delegates to the integration helper."""
+
+    sentinel = object()
+    fake = AsyncMock(return_value=sentinel)
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_execute_controller_command",
+        fake,
+    )
+
+    runtime = SimpleNamespace()
+    entry = SimpleNamespace()
+    operation = AsyncMock()
+
+    result = await runtime_helpers.async_execute_controller_command(
+        runtime,
+        entry,
+        operation,
+        extra="value",
+    )
+
+    assert result is sentinel
+    fake.assert_awaited_once_with(runtime, entry, operation, extra="value")
+
+
+def test_async_dispatch_runtime_update_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure the dispatch proxy forwards to the integration helper."""
+
+    calls: list[tuple[object, str]] = []
+
+    def _fake_dispatch(hass: object, entry_id: str) -> None:
+        calls.append((hass, entry_id))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_dispatch_runtime_update",
+        _fake_dispatch,
+    )
+
+    hass = object()
+    runtime_helpers.async_dispatch_runtime_update(hass, "entry")
+
+    assert calls == [(hass, "entry")]

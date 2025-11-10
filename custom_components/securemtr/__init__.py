@@ -59,6 +59,7 @@ from .utils import (
     split_runtime_segments,
 )
 from .zones import ZONE_METADATA
+from . import runtime_helpers
 
 DOMAIN = "securemtr"
 
@@ -1547,21 +1548,21 @@ async def _process_zone_samples(
 ) -> ZoneProcessingResult:
     """Apply per-zone calibrations, persistence, and statistic preparation."""
 
-    primary_program = await _read_zone_program(
-        runtime,
+    primary_program = await runtime_helpers.async_read_zone_program(
+        runtime.backend,
         session,
         websocket,
-        controller.gateway_id,
-        "primary",
-        entry_identifier,
+        gateway_id=controller.gateway_id,
+        zone="primary",
+        entry_identifier=entry_identifier,
     )
-    boost_program = await _read_zone_program(
-        runtime,
+    boost_program = await runtime_helpers.async_read_zone_program(
+        runtime.backend,
         session,
         websocket,
-        controller.gateway_id,
-        "boost",
-        entry_identifier,
+        gateway_id=controller.gateway_id,
+        zone="boost",
+        entry_identifier=entry_identifier,
     )
 
     primary_canonical = (
@@ -1981,36 +1982,6 @@ def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
         fallback_power_kw=fallback_power_kw,
         prefer_device_energy=prefer_device_energy,
     )
-
-
-async def _read_zone_program(
-    runtime: SecuremtrRuntimeData,
-    session: BeanbagSession,
-    websocket: ClientWebSocketResponse,
-    gateway_id: str,
-    zone: str,
-    entry_identifier: str,
-) -> WeeklyProgram | None:
-    """Fetch the weekly program for a zone, returning None on failure."""
-
-    try:
-        return await runtime.backend.read_weekly_program(
-            session, websocket, gateway_id, zone=zone
-        )
-    except BeanbagError as error:
-        _LOGGER.error(
-            "Failed to fetch %s weekly program for %s: %s",
-            zone,
-            entry_identifier,
-            error,
-        )
-    except Exception:
-        _LOGGER.exception(
-            "Unexpected error while fetching %s weekly program for %s",
-            zone,
-            entry_identifier,
-        )
-    return None
 
 
 def _build_zone_statistics_samples(

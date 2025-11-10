@@ -23,7 +23,7 @@ from . import (
 )
 from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
 from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
-from .runtime_helpers import async_mutate_runtime
+from .runtime_helpers import async_mutate_runtime, async_read_zone_program
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -120,18 +120,28 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
             session: BeanbagSession,
             websocket: ClientWebSocketResponse,
             controller: SecuremtrController,
-        ) -> tuple[WeeklyProgram, WeeklyProgram]:
-            primary = await backend.read_weekly_program(
-                session,
-                websocket,
-                controller.gateway_id,
-                zone="primary",
+        ) -> tuple[WeeklyProgram | None, WeeklyProgram | None]:
+            controller_label = (
+                controller.name
+                or controller.serial_number
+                or controller.identifier
+                or controller.gateway_id
             )
-            boost = await backend.read_weekly_program(
+            primary = await async_read_zone_program(
+                backend,
                 session,
                 websocket,
-                controller.gateway_id,
+                gateway_id=controller.gateway_id,
+                zone="primary",
+                entry_identifier=controller_label,
+            )
+            boost = await async_read_zone_program(
+                backend,
+                session,
+                websocket,
+                gateway_id=controller.gateway_id,
                 zone="boost",
+                entry_identifier=controller_label,
             )
             return primary, boost
 
@@ -141,6 +151,10 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
             _read_programs,
             log_context="Failed to read Secure Meters weekly schedule",
         )
+
+        if primary_program is None or boost_program is None:
+            _LOGGER.error("Failed to read Secure Meters weekly schedule")
+            raise HomeAssistantError("Failed to read Secure Meters weekly schedule")
 
         controller = runtime.controller
         if controller is None:  # pragma: no cover - defensive guard

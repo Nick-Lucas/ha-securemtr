@@ -36,7 +36,6 @@ from custom_components.securemtr import (
     _energy_store_key,
     _energy_sensor_entity_ids,
     _load_statistics_options,
-    _read_zone_program,
     _resolve_anchor,
     _controller_slug,
     _utility_meter_identifier,
@@ -105,6 +104,7 @@ from custom_components.securemtr.sensor import (
 from custom_components.securemtr.utils import assign_report_day
 from custom_components.securemtr.schedule import canonicalize_weekly, day_intervals
 from custom_components.securemtr.entity import slugify_identifier
+from custom_components.securemtr.runtime_helpers import async_read_zone_program
 from homeassistant.util import dt as dt_util
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from homeassistant.const import UnitOfEnergy
@@ -1656,7 +1656,7 @@ async def test_process_zone_samples_returns_result(
 
     program_mock = AsyncMock(side_effect=[None, None])
     monkeypatch.setattr(
-        "custom_components.securemtr._read_zone_program",
+        "custom_components.securemtr.runtime_helpers.async_read_zone_program",
         program_mock,
     )
     monkeypatch.setattr(
@@ -4705,12 +4705,16 @@ async def test_read_zone_program_handles_backend_error() -> None:
     backend = SimpleNamespace(
         read_weekly_program=AsyncMock(side_effect=BeanbagError("fail"))
     )
-    runtime = SecuremtrRuntimeData(backend=backend)  # type: ignore[arg-type]
     session = SimpleNamespace()
     websocket = SimpleNamespace()
 
-    result = await _read_zone_program(
-        runtime, session, websocket, "gateway", "primary", "Entry"
+    result = await async_read_zone_program(
+        backend,
+        session,
+        websocket,
+        gateway_id="gateway",
+        zone="primary",
+        entry_identifier="Entry",
     )
     assert result is None
 
@@ -4722,12 +4726,16 @@ async def test_read_zone_program_handles_unexpected_exception() -> None:
     backend = SimpleNamespace(
         read_weekly_program=AsyncMock(side_effect=RuntimeError("boom"))
     )
-    runtime = SecuremtrRuntimeData(backend=backend)  # type: ignore[arg-type]
     session = SimpleNamespace()
     websocket = SimpleNamespace()
 
-    result = await _read_zone_program(
-        runtime, session, websocket, "gateway", "boost", "Entry"
+    result = await async_read_zone_program(
+        backend,
+        session,
+        websocket,
+        gateway_id="gateway",
+        zone="boost",
+        entry_identifier="Entry",
     )
     assert result is None
 
