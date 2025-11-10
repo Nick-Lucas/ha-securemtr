@@ -4441,6 +4441,114 @@ def test_resolve_anchor_prefers_schedule_on_time() -> None:
     assert interval is not None
 
 
+def test_resolve_anchor_handles_runtime_exceeding_span() -> None:
+    """Anchor to the schedule start when runtime exceeds the span."""
+
+    tz = ZoneInfo("UTC")
+    options = StatisticsOptions(
+        timezone=tz,
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(18, 0),
+        fallback_power_kw=2.5,
+        prefer_device_energy=True,
+    )
+    context = ZoneContext(
+        label="Primary",
+        energy_field="primary",
+        runtime_field="primary_runtime",
+        scheduled_field="primary_sched",
+        energy_suffix="primary",
+        runtime_suffix="runtime",
+        schedule_suffix="sched",
+        fallback_anchor=time(8, 0),
+        program=None,
+        canonical=None,
+    )
+    report_day = date(2024, 4, 5)
+    intervals = [
+        (
+            datetime(2024, 4, 5, 7, 0, tzinfo=tz),
+            datetime(2024, 4, 5, 8, 0, tzinfo=tz),
+        )
+    ]
+
+    anchor, source, interval = _resolve_anchor(
+        report_day,
+        context,
+        options,
+        intervals,
+        runtime_hours=2.5,
+    )
+
+    assert source == "schedule"
+    assert interval is None
+    assert anchor == datetime(2024, 4, 5, 7, 0, tzinfo=tz)
+
+    samples = _build_zone_statistics_samples(
+        anchor,
+        runtime_hours=2.5,
+        segment_energy=5.0,
+        before_total=1.0,
+        interval=interval,
+    )
+
+    assert samples
+    assert samples[0]["start"] == dt_util.as_utc(anchor)
+
+
+def test_resolve_anchor_prefers_clampable_interval_on_tie() -> None:
+    """Prefer a clampable interval when slack and offset are identical."""
+
+    tz = ZoneInfo("UTC")
+    options = StatisticsOptions(
+        timezone=tz,
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(18, 0),
+        fallback_power_kw=2.5,
+        prefer_device_energy=True,
+    )
+    context = ZoneContext(
+        label="Primary",
+        energy_field="primary",
+        runtime_field="primary_runtime",
+        scheduled_field="primary_sched",
+        energy_suffix="primary",
+        runtime_suffix="runtime",
+        schedule_suffix="sched",
+        fallback_anchor=time(8, 0),
+        program=None,
+        canonical=None,
+    )
+    report_day = date(2024, 4, 5)
+    intervals = [
+        (
+            datetime(2024, 4, 5, 7, 0, tzinfo=tz),
+            datetime(2024, 4, 5, 8, 0, tzinfo=tz),
+        ),
+        (
+            datetime(2024, 4, 5, 9, 0, tzinfo=tz),
+            datetime(2024, 4, 5, 13, 0, tzinfo=tz),
+        ),
+    ]
+
+    anchor, source, interval = _resolve_anchor(
+        report_day,
+        context,
+        options,
+        intervals,
+        runtime_hours=2.5,
+    )
+
+    assert source == "schedule"
+    assert interval == (
+        datetime(2024, 4, 5, 9, 0, tzinfo=tz),
+        datetime(2024, 4, 5, 13, 0, tzinfo=tz),
+    )
+    assert anchor == datetime(2024, 4, 5, 9, 0, tzinfo=tz)
+
+
 def test_resolve_anchor_handles_missing_schedule() -> None:
     """Fallback to the configured anchor when no schedule data exists."""
 
