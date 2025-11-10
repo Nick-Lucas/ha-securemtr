@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock
 import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import SecuremtrController, SecuremtrRuntimeData
 
+from tests.helpers import create_config_entry
+
 
 @pytest.mark.asyncio
 async def test_async_mutate_runtime_handles_async_mutation(
@@ -34,7 +36,7 @@ async def test_async_mutate_runtime_handles_async_mutation(
     runtime.websocket = websocket
     runtime.controller = controller
 
-    entry = SimpleNamespace(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
 
     dispatcher_calls: list[tuple[Any, str]] = []
     monkeypatch.setattr(
@@ -103,7 +105,9 @@ async def test_async_mutate_runtime_handles_async_mutation(
 
 
 @pytest.mark.asyncio
-async def test_async_execute_controller_command_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_async_execute_controller_command_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure the command proxy delegates to the integration helper."""
 
     sentinel = object()

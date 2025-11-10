@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from types import SimpleNamespace
@@ -27,14 +26,10 @@ from custom_components.securemtr.button import (
     async_setup_entry,
 )
 from homeassistant.components.button import ButtonEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
 
-
-@dataclass(slots=True)
-class DummyEntry:
-    """Provide the minimal config entry attributes for setup."""
-
-    entry_id: str
+from tests.helpers import create_config_entry
 
 
 class DummyBackend:
@@ -109,11 +104,14 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
 @pytest.fixture(autouse=True)
 def patch_reconnect(
     monkeypatch: pytest.MonkeyPatch,
-) -> Callable[[DummyEntry, SecuremtrRuntimeData, Callable[[Any, Any, Any], Awaitable[Any]]], Awaitable[Any]]:
+) -> Callable[
+    [ConfigEntry, SecuremtrRuntimeData, Callable[[Any, Any, Any], Awaitable[Any]]],
+    Awaitable[Any],
+]:
     """Stub the reconnect helper to operate on the dummy runtime."""
 
     async def _fake_run_with_reconnect(
-        entry: DummyEntry,
+        entry: ConfigEntry,
         runtime: SecuremtrRuntimeData,
         operation: Callable[[Any, Any, Any], Awaitable[Any]],
     ) -> Any:
@@ -134,7 +132,7 @@ async def test_button_setup_creates_entities() -> None:
 
     runtime, _backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     def _add_entities(new: list[ButtonEntity]) -> None:
@@ -158,7 +156,9 @@ async def test_button_setup_creates_entities() -> None:
     assert cancel_button.available is False
 
     metrics_button = next(
-        entity for entity in entities if entity.unique_id.endswith("refresh_consumption")
+        entity
+        for entity in entities
+        if entity.unique_id.endswith("refresh_consumption")
     )
     assert isinstance(metrics_button, SecuremtrConsumptionMetricsButton)
 
@@ -170,10 +170,7 @@ async def test_button_setup_creates_entities() -> None:
     boost_button = next(
         entity for entity in entities if entity.unique_id.endswith("boost_60")
     )
-    assert (
-        boost_button.device_info["name"]
-        == "E7+ Smart Water Heater Controller"
-    )
+    assert boost_button.device_info["name"] == "E7+ Smart Water Heater Controller"
     assert boost_button.translation_key == "boost_60_minutes"
     assert boost_button.has_entity_name is True
 
@@ -184,7 +181,7 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
 
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -225,7 +222,9 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
     assert runtime.timed_boost_end_minute == (10 * 60 + 45)
     assert runtime.timed_boost_end_time == coerce_end_time(10 * 60 + 45)
     assert dispatcher_calls == [(hass_obj, "entry")]
-    assert helper_calls[0][1]["log_context"] == "Failed to start Secure Meters timed boost"
+    assert (
+        helper_calls[0][1]["log_context"] == "Failed to start Secure Meters timed boost"
+    )
     assert helper_calls[0][1]["write_ha_state"] is None
 
     boost_button.hass = None
@@ -246,7 +245,7 @@ async def test_boost_button_helper_failure(monkeypatch: pytest.MonkeyPatch) -> N
 
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -281,7 +280,7 @@ async def test_boost_button_requires_connection() -> None:
     runtime, backend = _create_runtime()
     runtime.session = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -302,7 +301,7 @@ async def test_boost_button_requires_controller() -> None:
 
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -324,7 +323,7 @@ async def test_custom_duration_boost_button_uses_placeholders() -> None:
     """Ensure custom boost durations expose the translation placeholder."""
 
     runtime, _backend = _create_runtime()
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     button = SecuremtrTimedBoostButton(runtime, runtime.controller, entry, 45)
 
     assert button.translation_key == "boost_custom_minutes"
@@ -338,7 +337,7 @@ async def test_schedule_button_logs_program(caplog: pytest.LogCaptureFixture) ->
 
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     weekday = DailyProgram((60, None, None), (120, None, None))
@@ -372,7 +371,7 @@ async def test_schedule_button_backend_error(caplog: pytest.LogCaptureFixture) -
 
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     backend.weekly_programs = {}
@@ -389,7 +388,10 @@ async def test_schedule_button_backend_error(caplog: pytest.LogCaptureFixture) -
             await schedule_button.async_press()
 
     assert backend.read_calls == ["primary", "boost"]
-    assert any("Failed to read Secure Meters weekly schedule" in record for record in caplog.messages)
+    assert any(
+        "Failed to read Secure Meters weekly schedule" in record
+        for record in caplog.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -399,7 +401,7 @@ async def test_schedule_button_requires_connection() -> None:
     runtime, backend = _create_runtime()
     runtime.session = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     backend.weekly_programs = {
@@ -425,7 +427,7 @@ async def test_schedule_button_requires_controller() -> None:
 
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     backend.weekly_programs = {
@@ -453,7 +455,7 @@ async def test_boost_button_backend_error(monkeypatch: pytest.MonkeyPatch) -> No
 
     runtime, backend = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -482,7 +484,7 @@ async def test_cancel_button_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime.timed_boost_end_minute = 615
     runtime.timed_boost_end_time = coerce_end_time(615)
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -515,9 +517,7 @@ async def test_cancel_button_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
     hass_obj = cancel_button.hass
     await cancel_button.async_press()
 
-    assert backend.stop_calls == [
-        (runtime.session, runtime.websocket, "gateway-1")
-    ]
+    assert backend.stop_calls == [(runtime.session, runtime.websocket, "gateway-1")]
     assert runtime.timed_boost_active is False
     assert runtime.timed_boost_end_minute is None
     assert runtime.timed_boost_end_time is None
@@ -548,7 +548,7 @@ async def test_cancel_button_requires_connection() -> None:
     runtime.session = None
     runtime.timed_boost_active = True
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -570,7 +570,7 @@ async def test_cancel_button_requires_controller() -> None:
     runtime, backend = _create_runtime()
     runtime.timed_boost_active = True
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -594,7 +594,7 @@ async def test_cancel_button_backend_error(monkeypatch: pytest.MonkeyPatch) -> N
     runtime, backend = _create_runtime()
     runtime.timed_boost_active = True
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[ButtonEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -626,7 +626,7 @@ async def test_button_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime, _backend = _create_runtime()
     runtime.controller_ready = asyncio.Event()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
 
     monkeypatch.setattr(
         "custom_components.securemtr.entity._CONTROLLER_READY_TIMEOUT", 0.01
@@ -643,7 +643,7 @@ async def test_button_setup_requires_controller() -> None:
     runtime, _backend = _create_runtime()
     runtime.controller = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
 
     with pytest.raises(HomeAssistantError):
         await async_setup_entry(hass, entry, lambda entities: None)
@@ -654,7 +654,9 @@ async def test_button_async_added_to_hass(monkeypatch: pytest.MonkeyPatch) -> No
     """Ensure dispatcher callbacks are registered when the entity is added."""
 
     runtime, _backend = _create_runtime()
-    button = SecuremtrTimedBoostButton(runtime, runtime.controller, DummyEntry("entry"), 30)
+    button = SecuremtrTimedBoostButton(
+        runtime, runtime.controller, create_config_entry(entry_id="entry"), 30
+    )
     button.hass = SimpleNamespace()
 
     added_calls: list[SecuremtrTimedBoostButton] = []
@@ -695,18 +697,20 @@ async def test_button_async_added_to_hass(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_consumption_button_triggers_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_consumption_button_triggers_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure pressing the consumption button refreshes metrics."""
 
     runtime, _backend = _create_runtime()
     hass = SimpleNamespace()
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     button = SecuremtrConsumptionMetricsButton(runtime, runtime.controller, entry)
     button.hass = hass
 
-    calls: list[tuple[object, DummyEntry]] = []
+    calls: list[tuple[object, ConfigEntry]] = []
 
-    async def _fake_refresh(hass_obj: object, entry_obj: DummyEntry) -> None:
+    async def _fake_refresh(hass_obj: object, entry_obj: ConfigEntry) -> None:
         calls.append((hass_obj, entry_obj))
 
     monkeypatch.setattr(
@@ -720,4 +724,3 @@ async def test_consumption_button_triggers_refresh(monkeypatch: pytest.MonkeyPat
     button.hass = None
     with pytest.raises(HomeAssistantError):
         await button.async_press()
-

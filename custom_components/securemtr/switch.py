@@ -45,7 +45,7 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
     ) -> None:
         """Initialise the switch entity with runtime context."""
 
-        super().__init__(runtime, controller, entry=entry)
+        super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_primary_power"
         self._attr_translation_key = "controller_power"
 
@@ -75,7 +75,9 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
             controller: SecuremtrController,
         ) -> None:
             if turn_on:
-                await backend.turn_controller_on(session, websocket, controller.gateway_id)
+                await backend.turn_controller_on(
+                    session, websocket, controller.gateway_id
+                )
                 return
 
             await backend.turn_controller_off(session, websocket, controller.gateway_id)
@@ -108,7 +110,7 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
     ) -> None:
         """Initialise the timed boost switch for the controller."""
 
-        super().__init__(runtime, controller, entry=entry)
+        super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_timed_boost"
         self._attr_translation_key = "timed_boost"
 
@@ -132,7 +134,10 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Drive the backend to the requested timed boost state."""
 
         await self._async_mutate(
-            operation=lambda backend, session, websocket, controller: backend.set_timed_boost_enabled(
+            operation=lambda backend,
+            session,
+            websocket,
+            controller: backend.set_timed_boost_enabled(
                 session,
                 websocket,
                 controller.gateway_id,

@@ -104,6 +104,7 @@ custom_components.securemtr._async_reset_connection: Close the active Beanbag We
 tests.test_external_statistics_guard._iter_securemtr_files: Yield Python source files within the securemtr integration package.
 tests.test_external_statistics_guard._scan_forbidden_references: Return forbidden reference summaries discovered within the file.
 tests.test_external_statistics_guard.test_integration_avoids_external_statistics_calls: Ensure the integration never references recorder external statistics helpers.
+tests.helpers.create_config_entry: Return a ConfigEntry instance configured for tests.
 custom_components.securemtr.async_run_with_reconnect: Execute a backend operation, retrying once after reconnecting.
 custom_components.securemtr.async_execute_controller_command: Run a controller-scoped Beanbag command with common safeguards.
 custom_components.securemtr.button.SecuremtrConsumptionMetricsButton: Trigger a manual refresh of Secure Meters consumption metrics.

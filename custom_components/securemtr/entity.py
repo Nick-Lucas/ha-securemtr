@@ -80,24 +80,17 @@ class SecuremtrRuntimeEntityMixin:
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
-        *,
-        entry: ConfigEntry | None = None,
-        entry_id: str | None = None,
+        entry: ConfigEntry,
     ) -> None:
         """Initialise the entity with runtime context and dispatcher hooks."""
 
         super().__init__()
         self._runtime = runtime
         self._controller = controller
-        self._entry: ConfigEntry | None = entry
-        if entry is not None:
-            self._entry_id = entry.entry_id
-        elif entry_id is not None:
-            self._entry_id = entry_id
-        else:
-            raise ValueError(  # pragma: no cover - defensive validation
-                "Either entry or entry_id must be provided for SecureMTR entities"
-            )
+        if not isinstance(entry, ConfigEntry):
+            raise TypeError("SecureMTR entities require a Home Assistant ConfigEntry")
+        self._entry = entry
+        self._entry_id = entry.entry_id
 
     @property
     def available(self) -> bool:
@@ -150,10 +143,6 @@ class SecuremtrRuntimeEntityMixin:
     ) -> Any:
         """Execute a runtime mutation using the entity's stored context."""
 
-        entry = self._entry
-        if entry is None:
-            raise HomeAssistantError("Config entry is not available")
-
         if exception_types is None:
             exception_tuple: tuple[type[Exception], ...] | None = None
         elif isinstance(exception_types, tuple):
@@ -165,7 +154,7 @@ class SecuremtrRuntimeEntityMixin:
 
         return await async_mutate_runtime(
             self._runtime,
-            entry,
+            self._entry,
             entry_id=self._entry_id,
             hass=self.hass,
             operation=operation,

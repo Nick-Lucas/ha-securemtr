@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import cast
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -40,14 +39,11 @@ class SecuremtrBoostActiveBinarySensor(SecuremtrRuntimeEntityMixin, BinarySensor
         self,
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
-        entry: ConfigEntry | str,
+        entry: ConfigEntry,
     ) -> None:
         """Initialise the boost active sensor."""
 
-        if hasattr(entry, "entry_id"):
-            super().__init__(runtime, controller, entry=cast(ConfigEntry, entry))
-        else:
-            super().__init__(runtime, controller, entry_id=str(entry))
+        super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_boost_active"
         self._attr_translation_key = "boost_active"
 

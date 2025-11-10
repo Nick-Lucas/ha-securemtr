@@ -23,6 +23,7 @@ DEVICE_CLASS_TIMESTAMP = "timestamp"
 STATE_CLASS_MEASUREMENT = "measurement"
 STATE_CLASS_TOTAL_INCREASING = "total_increasing"
 
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -121,7 +122,7 @@ class SecuremtrSensorEntity(SecuremtrRuntimeEntityMixin, SensorEntity):
     ) -> None:
         """Initialise the sensor with runtime context and controller metadata."""
 
-        super().__init__(runtime, controller, entry=entry)
+        super().__init__(runtime, controller, entry)
 
     @property
     def available(self) -> bool:

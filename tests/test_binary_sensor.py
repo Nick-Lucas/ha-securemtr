@@ -1,30 +1,32 @@
 import asyncio
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from custom_components.securemtr import DOMAIN, SecuremtrController, SecuremtrRuntimeData
+from custom_components.securemtr import (
+    DOMAIN,
+    SecuremtrController,
+    SecuremtrRuntimeData,
+)
 from custom_components.securemtr.binary_sensor import (
     SecuremtrBoostActiveBinarySensor,
     async_setup_entry,
 )
 from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
 
 
-@dataclass(slots=True)
-class DummyEntry:
-    """Provide the minimal config entry attributes."""
-
-    entry_id: str
+from tests.helpers import create_config_entry
 
 
 class DummyBackend:
     """Provide backend stubs to satisfy the runtime interface."""
 
-    async def read_device_metadata(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
+    async def read_device_metadata(
+        self, *args: Any, **kwargs: Any
+    ) -> None:  # pragma: no cover
         """Unused helper for interface completeness."""
 
 
@@ -53,7 +55,7 @@ async def test_binary_sensor_setup_and_state() -> None:
 
     runtime = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[BinarySensorEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -114,7 +116,7 @@ async def test_binary_sensor_requires_controller() -> None:
     runtime = _create_runtime()
     runtime.controller = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
 
     with pytest.raises(HomeAssistantError):
         await async_setup_entry(hass, entry, lambda entities: None)
@@ -127,7 +129,7 @@ async def test_binary_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) ->
     runtime = _create_runtime()
     runtime.controller_ready = asyncio.Event()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
 
     monkeypatch.setattr(
         "custom_components.securemtr.entity._CONTROLLER_READY_TIMEOUT", 0.01
@@ -142,6 +144,7 @@ async def test_binary_sensor_async_added_to_hass_without_hass() -> None:
     """Ensure the dispatcher registration exits when hass is missing."""
 
     runtime = _create_runtime()
-    sensor = SecuremtrBoostActiveBinarySensor(runtime, runtime.controller, "entry")
+    entry = create_config_entry(entry_id="entry")
+    sensor = SecuremtrBoostActiveBinarySensor(runtime, runtime.controller, entry)
     sensor.hass = None
     await sensor.async_added_to_hass()
