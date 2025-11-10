@@ -1874,7 +1874,7 @@ def _resolve_anchor(
     intervals: Iterable[tuple[datetime, datetime]],
     runtime_hours: float,
 ) -> tuple[datetime, str, tuple[datetime, datetime] | None]:
-    """Select an anchor for the provided day and schedule context."""
+    """Select a schedule-aware anchor and interval for the provided day."""
 
     day_start = datetime(
         report_day.year,
@@ -1896,6 +1896,7 @@ def _resolve_anchor(
     tolerance_seconds = 60.0
     best_slack: float | None = None
     best_offset: float | None = None
+    best_anchor: datetime | None = None
 
     if runtime_seconds > 0.0:
         for start, end in intervals:
@@ -1906,22 +1907,32 @@ def _resolve_anchor(
             if clamped_end <= clamped_start:
                 continue
             span_seconds = (clamped_end - clamped_start).total_seconds()
-            if runtime_seconds > span_seconds + tolerance_seconds:
-                continue
             slack = abs(span_seconds - runtime_seconds)
             offset = abs((clamped_start - fallback_anchor).total_seconds())
+            allow_interval = runtime_seconds <= span_seconds + tolerance_seconds
+            candidate_interval: tuple[datetime, datetime] | None = None
+            if allow_interval:
+                candidate_interval = (clamped_start, clamped_end)
+
+            better = False
             if best_slack is None or slack < best_slack - 1e-6:
+                better = True
+            elif best_slack is not None and abs(slack - best_slack) <= 1e-6:
+                if best_offset is None or offset < best_offset - 1e-6:
+                    better = True
+                elif best_offset is not None and abs(offset - best_offset) <= 1e-6:
+                    if selected_interval is None and candidate_interval is not None:
+                        better = True
+
+            if better:
                 best_slack = slack
                 best_offset = offset
-                selected_interval = (clamped_start, clamped_end)
-            elif best_slack is not None and abs(slack - best_slack) <= 1e-6:
-                if best_offset is None or offset < best_offset:
-                    best_offset = offset
-                    selected_interval = (clamped_start, clamped_end)
+                best_anchor = clamped_start
+                selected_interval = candidate_interval
 
-    if selected_interval is not None:
+    if best_anchor is not None:
         anchor_source = "schedule"
-        anchor = selected_interval[0]
+        anchor = best_anchor
 
     if anchor < day_start:
         anchor = day_start
