@@ -20,6 +20,8 @@ from homeassistant import config_entries as hass_config_entries
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+
+from tests.helpers import create_config_entry
 from custom_components.securemtr import (
     DOMAIN,
     SecuremtrController,
@@ -1582,9 +1584,10 @@ async def test_prepare_consumption_samples_normalizes(
         sample_a.timestamp,
     ]
     assert all(isinstance(row["report_day"], date) for row in prepared.rows)
-    assert runtime.consumption_metrics_log[0]["report_day"] == prepared.rows[0][
-        "report_day"
-    ].isoformat()
+    assert (
+        runtime.consumption_metrics_log[0]["report_day"]
+        == prepared.rows[0]["report_day"].isoformat()
+    )
     assert prepared.options.timezone is not None
 
 
@@ -2571,7 +2574,10 @@ async def test_consumption_metrics_skips_statistics_with_invalid_entity(
     await consumption_metrics(hass, entry)
 
     assert not statistics_calls
-    assert "Skipping statistics for primary because entity_id securemtr_invalid is invalid" in caplog.text
+    assert (
+        "Skipping statistics for primary because entity_id securemtr_invalid is invalid"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
@@ -2661,7 +2667,17 @@ async def test_energy_dashboard_flow_validates_sensor_states(
     await hass.async_block_till_done()
 
     sensors: list[Any] = []
-    await sensor_async_setup_entry(hass, entry, sensors.extend)
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    sensor_entry = create_config_entry(
+        entry_id=entry.entry_id,
+        data=entry.data,
+        options=entry.options,
+        title=entry.title or "SecureMTR",
+        unique_id=entry.unique_id,
+    )
+    sensor_entry.hass = hass
+    hass.data[DOMAIN][sensor_entry.entry_id] = runtime
+    await sensor_async_setup_entry(hass, sensor_entry, sensors.extend)
 
     energy_entities = {
         entity.entity_id: entity
@@ -4242,7 +4258,9 @@ async def test_async_queue_backend_retry_success_invokes_callback(
     assert callback_calls == ["called"]
     assert attempt.await_count >= 2
     assert runtime.retry_task is None
-    assert any("Retrying Beanbag backend startup" in rec.message for rec in caplog.records)
+    assert any(
+        "Retrying Beanbag backend startup" in rec.message for rec in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -5152,7 +5170,10 @@ def test_resolve_anchor_tiebreaks_by_fallback_anchor() -> None:
     report_day = date(2024, 4, 5)
     intervals = [
         (datetime(2024, 4, 5, 1, 0, tzinfo=tz), datetime(2024, 4, 5, 2, 0, tzinfo=tz)),
-        (datetime(2024, 4, 5, 10, 0, tzinfo=tz), datetime(2024, 4, 5, 11, 0, tzinfo=tz)),
+        (
+            datetime(2024, 4, 5, 10, 0, tzinfo=tz),
+            datetime(2024, 4, 5, 11, 0, tzinfo=tz),
+        ),
     ]
 
     anchor, source, interval = _resolve_anchor(
@@ -5192,9 +5213,7 @@ def test_resolve_anchor_clamps_configured_anchor(
     )
     report_day = date(2024, 4, 5)
 
-    def early_anchor(
-        _day: date, _fallback: time | None, _tz: ZoneInfo
-    ) -> datetime:
+    def early_anchor(_day: date, _fallback: time | None, _tz: ZoneInfo) -> datetime:
         return datetime(2024, 4, 4, 23, 30, tzinfo=tz)
 
     monkeypatch.setattr(
@@ -5209,14 +5228,10 @@ def test_resolve_anchor_clamps_configured_anchor(
     assert interval is None
     assert anchor == datetime(2024, 4, 5, 0, 0, tzinfo=tz)
 
-    def late_anchor(
-        _day: date, _fallback: time | None, _tz: ZoneInfo
-    ) -> datetime:
+    def late_anchor(_day: date, _fallback: time | None, _tz: ZoneInfo) -> datetime:
         return datetime(2024, 4, 6, 0, 30, tzinfo=tz)
 
-    monkeypatch.setattr(
-        "custom_components.securemtr.safe_anchor_datetime", late_anchor
-    )
+    monkeypatch.setattr("custom_components.securemtr.safe_anchor_datetime", late_anchor)
 
     anchor_late, source_late, interval_late = _resolve_anchor(
         report_day, context, options, [], runtime_hours=0.0

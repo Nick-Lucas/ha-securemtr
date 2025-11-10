@@ -1,12 +1,15 @@
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from custom_components.securemtr import DOMAIN, SecuremtrController, SecuremtrRuntimeData
+from custom_components.securemtr import (
+    DOMAIN,
+    SecuremtrController,
+    SecuremtrRuntimeData,
+)
 from custom_components.securemtr.sensor import (
     DEVICE_CLASS_DURATION,
     DEVICE_CLASS_ENERGY,
@@ -21,7 +24,11 @@ from custom_components.securemtr.sensor import (
 )
 from custom_components.securemtr.zones import ZONE_METADATA
 from homeassistant.const import UnitOfEnergy, UnitOfTime
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
+
+
+from tests.helpers import create_config_entry
 
 
 SERIAL_SLUG = "serial_1"
@@ -29,17 +36,12 @@ PRIMARY_ENERGY_ENTITY_ID = f"sensor.securemtr_{SERIAL_SLUG}_primary_energy_kwh"
 BOOST_ENERGY_ENTITY_ID = f"sensor.securemtr_{SERIAL_SLUG}_boost_energy_kwh"
 
 
-@dataclass(slots=True)
-class DummyEntry:
-    """Provide the minimal config entry attributes."""
-
-    entry_id: str
-
-
 class DummyBackend:
     """Provide backend stubs to satisfy the runtime interface."""
 
-    async def read_device_metadata(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
+    async def read_device_metadata(
+        self, *args: Any, **kwargs: Any
+    ) -> None:  # pragma: no cover
         """Unused helper for interface completeness."""
 
 
@@ -74,7 +76,7 @@ def test_zone_payload_validates_per_zone_dicts() -> None:
     runtime.statistics_recent = {
         "primary": {"runtime_hours": 2.0},
     }
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     sensor = SecuremtrEnergyTotalSensor(
         runtime,
         runtime.controller,
@@ -104,21 +106,17 @@ async def test_sensor_reports_end_time() -> None:
 
     runtime = _create_runtime()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[SecuremtrSensorEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
 
     sensor = next(
-        entity
-        for entity in entities
-        if isinstance(entity, SecuremtrBoostEndsSensor)
+        entity for entity in entities if isinstance(entity, SecuremtrBoostEndsSensor)
     )
     assert sensor.unique_id == "serial_1_boost_ends"
     assert sensor.native_value is None
-    assert (
-        sensor.device_info["name"] == "E7+ Smart Water Heater Controller"
-    )
+    assert sensor.device_info["name"] == "E7+ Smart Water Heater Controller"
     assert sensor.available is True
     assert sensor.device_class == DEVICE_CLASS_TIMESTAMP
     assert sensor.has_entity_name is True
@@ -176,7 +174,7 @@ async def test_sensor_requires_controller() -> None:
     runtime = _create_runtime()
     runtime.controller = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
 
     with pytest.raises(HomeAssistantError):
         await async_setup_entry(hass, entry, lambda entities: None)
@@ -217,7 +215,7 @@ async def test_energy_sensors_report_totals() -> None:
     }
 
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[SecuremtrSensorEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -234,10 +232,7 @@ async def test_energy_sensors_report_totals() -> None:
     assert primary_energy.has_entity_name is True
     assert primary_energy.entity_id == PRIMARY_ENERGY_ENTITY_ID
     assert primary_energy.native_value == pytest.approx(12.5)
-    assert (
-        primary_energy.native_unit_of_measurement
-        == UnitOfEnergy.KILO_WATT_HOUR
-    )
+    assert primary_energy.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
     assert primary_energy.device_class == DEVICE_CLASS_ENERGY
     assert primary_energy.state_class == STATE_CLASS_TOTAL_INCREASING
     assert primary_energy.extra_state_attributes == {
@@ -250,7 +245,7 @@ async def test_energy_sensors_report_totals() -> None:
     assert device_info["manufacturer"] == "Secure Meters"
 
     runtime.energy_entity_ids = {}
-    runtime.config_entry = DummyEntry(entry_id="entry")
+    runtime.config_entry = create_config_entry(entry_id="entry")
     loop = asyncio.get_running_loop()
     primary_energy.hass = SimpleNamespace(
         async_create_task=lambda coro: loop.create_task(coro),
@@ -289,7 +284,9 @@ async def test_energy_sensors_report_totals() -> None:
     primary_runtime = sensors_by_id["serial_1_primary_runtime_daily"]
     assert isinstance(primary_runtime, SecuremtrDailyDurationSensor)
     assert primary_runtime.native_value == pytest.approx(3.25)
-    assert primary_runtime.translation_key == primary_metadata.translation_keys["runtime"]
+    assert (
+        primary_runtime.translation_key == primary_metadata.translation_keys["runtime"]
+    )
     assert primary_runtime.native_unit_of_measurement == UnitOfTime.HOURS
     assert primary_runtime.device_class == DEVICE_CLASS_DURATION
     assert primary_runtime.state_class == STATE_CLASS_MEASUREMENT
@@ -336,7 +333,7 @@ async def test_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _create_runtime()
     runtime.controller_ready = asyncio.Event()
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
 
     monkeypatch.setattr(
         "custom_components.securemtr.entity._CONTROLLER_READY_TIMEOUT", 0.01
@@ -362,7 +359,7 @@ async def test_energy_sensor_available_with_cached_state() -> None:
     }
 
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
-    entry = DummyEntry(entry_id="entry")
+    entry = create_config_entry(entry_id="entry")
     entities: list[SecuremtrSensorEntity] = []
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -373,7 +370,9 @@ async def test_energy_sensor_available_with_cached_state() -> None:
     assert energy_sensors
 
     primary_energy = next(
-        sensor for sensor in energy_sensors if sensor.unique_id.endswith("primary_energy_kwh")
+        sensor
+        for sensor in energy_sensors
+        if sensor.unique_id.endswith("primary_energy_kwh")
     )
     assert primary_energy.available is True
     assert primary_energy.native_value == pytest.approx(9.5)

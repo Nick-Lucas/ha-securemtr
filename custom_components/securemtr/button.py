@@ -79,7 +79,7 @@ class SecuremtrConsumptionMetricsButton(SecuremtrRuntimeEntityMixin, ButtonEntit
     ) -> None:
         """Initialise the consumption metrics button for the controller."""
 
-        super().__init__(runtime, controller, entry=entry)
+        super().__init__(runtime, controller, entry)
         slug = self._identifier_slug()
         self._attr_unique_id = f"{slug}_refresh_consumption"
         self._attr_translation_key = "refresh_consumption_metrics"
@@ -105,7 +105,7 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
     ) -> None:
         """Initialise the schedule logging button."""
 
-        super().__init__(runtime, controller, entry=entry)
+        super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_log_schedule"
         self._attr_translation_key = "log_weekly_schedules"
 
@@ -226,7 +226,7 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
     ) -> None:
         """Initialise the timed boost button for the requested duration."""
 
-        super().__init__(runtime, controller, entry=entry)
+        super().__init__(runtime, controller, entry)
         self._duration = duration_minutes
         self._attr_unique_id = f"{self._identifier_slug()}_boost_{duration_minutes}"
         translation_key = BOOST_BUTTON_TRANSLATION_KEYS.get(
@@ -242,7 +242,10 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         duration = self._duration
 
         await self._async_mutate(
-            operation=lambda backend, session, websocket, controller: backend.start_timed_boost(
+            operation=lambda backend,
+            session,
+            websocket,
+            controller: backend.start_timed_boost(
                 session,
                 websocket,
                 controller.gateway_id,
@@ -264,9 +267,7 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         now_local = dt_util.now()
         end_local = now_local + timedelta(minutes=duration)
         runtime.timed_boost_end_minute = end_local.hour * 60 + end_local.minute
-        runtime.timed_boost_end_time = coerce_end_time(
-            runtime.timed_boost_end_minute
-        )
+        runtime.timed_boost_end_time = coerce_end_time(runtime.timed_boost_end_minute)
 
 
 class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
@@ -280,7 +281,7 @@ class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
     ) -> None:
         """Initialise the timed boost cancellation button."""
 
-        super().__init__(runtime, controller, entry=entry)
+        super().__init__(runtime, controller, entry)
         self._attr_unique_id = f"{self._identifier_slug()}_boost_cancel"
         self._attr_translation_key = "cancel_boost"
 
@@ -299,7 +300,10 @@ class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
             raise HomeAssistantError("Timed boost is not currently active")
 
         await self._async_mutate(
-            operation=lambda backend, session, websocket, controller: backend.stop_timed_boost(
+            operation=lambda backend,
+            session,
+            websocket,
+            controller: backend.stop_timed_boost(
                 session,
                 websocket,
                 controller.gateway_id,
