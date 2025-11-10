@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterable
 from datetime import timedelta
 import logging
@@ -16,7 +15,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from . import (
-    DOMAIN,
     SecuremtrController,
     SecuremtrRuntimeData,
     async_dispatch_runtime_update,
@@ -28,13 +26,12 @@ from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
 from .entity import (
     SecuremtrRuntimeEntityMixin,
     async_dispatcher_connect as _async_dispatcher_connect,
+    async_get_ready_controller,
 )
 
 async_dispatcher_connect = _async_dispatcher_connect
 
 _LOGGER = logging.getLogger(__name__)
-
-_CONTROLLER_WAIT_TIMEOUT = 15.0
 
 _DAY_NAMES: tuple[str, ...] = (
     "Monday",
@@ -63,20 +60,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up Secure Meters button entities for a config entry."""
 
-    runtime: SecuremtrRuntimeData = hass.data[DOMAIN][entry.entry_id]
-
-    try:
-        await asyncio.wait_for(
-            runtime.controller_ready.wait(), _CONTROLLER_WAIT_TIMEOUT
-        )
-    except TimeoutError as error:
-        raise HomeAssistantError(
-            "Timed out waiting for Secure Meters controller metadata"
-        ) from error
-
-    controller = runtime.controller
-    if controller is None:
-        raise HomeAssistantError("Secure Meters controller metadata was not available")
+    runtime, controller = await async_get_ready_controller(hass, entry)
 
     async_add_entities(
         [
@@ -143,6 +127,7 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
         entry = self._entry
         async with runtime.command_lock:
             try:
+
                 async def _read_programs(
                     backend: BeanbagBackend,
                     session: BeanbagSession,
@@ -247,9 +232,7 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         )
         self._attr_translation_key = translation_key
         if translation_key == DEFAULT_BOOST_TRANSLATION_KEY:
-            self._attr_translation_placeholders = {
-                "duration": str(duration_minutes)
-            }
+            self._attr_translation_placeholders = {"duration": str(duration_minutes)}
 
     async def async_press(self) -> None:
         """Send the timed boost start command for the configured duration."""

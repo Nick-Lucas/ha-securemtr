@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 import logging
 
@@ -10,13 +9,13 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData
 from .entity import (
     SecuremtrRuntimeEntityMixin,
     async_dispatcher_connect as _async_dispatcher_connect,
+    async_get_ready_controller,
 )
 
 async_dispatcher_connect = _async_dispatcher_connect
@@ -28,9 +27,6 @@ DEVICE_CLASS_DURATION = "duration"
 DEVICE_CLASS_TIMESTAMP = "timestamp"
 STATE_CLASS_MEASUREMENT = "measurement"
 STATE_CLASS_TOTAL_INCREASING = "total_increasing"
-
-_CONTROLLER_WAIT_TIMEOUT = 15.0
-
 
 ZONE_ENTITY_TRANSLATIONS: dict[str, dict[str, str]] = {
     "primary": {
@@ -55,22 +51,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up the Secure Meters sensors for boost and statistics."""
 
-    runtime: SecuremtrRuntimeData = hass.data[DOMAIN][entry.entry_id]
     entry_label = getattr(entry, "title", None) or getattr(entry, "entry_id", DOMAIN)
     _LOGGER.info("Starting SecureMTR sensor setup for %s", entry_label)
 
-    try:
-        await asyncio.wait_for(
-            runtime.controller_ready.wait(), _CONTROLLER_WAIT_TIMEOUT
-        )
-    except TimeoutError as error:
-        raise HomeAssistantError(
-            "Timed out waiting for Secure Meters controller metadata"
-        ) from error
-
-    controller = runtime.controller
-    if controller is None:
-        raise HomeAssistantError("Secure Meters controller metadata was not available")
+    runtime, controller = await async_get_ready_controller(hass, entry)
 
     _LOGGER.info(
         "Preparing SecureMTR sensor entities for %s using controller %s",
@@ -323,9 +307,7 @@ class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
         self._zone = zone
         self._metric = metric
         self._attr_translation_key = translation_key
-        self._attr_unique_id = (
-            f"{self._identifier_slug()}_{zone}_{unique_suffix}"
-        )
+        self._attr_unique_id = f"{self._identifier_slug()}_{zone}_{unique_suffix}"
 
     def _recent_state(self) -> dict[str, object] | None:
         """Return the in-memory statistics summary for the zone."""

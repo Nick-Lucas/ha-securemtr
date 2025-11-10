@@ -108,6 +108,7 @@ custom_components.securemtr.sensor.SecuremtrDailyDurationSensor.native_value: Re
 custom_components.securemtr.sensor.SecuremtrDailyDurationSensor.extra_state_attributes: Provide the report day and cumulative energy context for duration sensors.
 custom_components.securemtr.entity.slugify_identifier: Convert a controller identifier into a slug for unique IDs.
 custom_components.securemtr.entity.build_device_info: Construct device registry metadata for the provided controller.
+custom_components.securemtr.entity.async_get_ready_controller: Return runtime context and controller metadata once ready.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.__init__: Initialise the entity with runtime context and dispatcher hooks.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.available: Return whether the controller metadata is currently available.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._runtime_connected: Return whether the backend runtime currently exposes controller state.

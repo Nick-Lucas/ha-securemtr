@@ -294,7 +294,7 @@ async def test_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     entry = DummyEntry(entry_id="entry")
 
     monkeypatch.setattr(
-        "custom_components.securemtr.sensor._CONTROLLER_WAIT_TIMEOUT", 0.01
+        "custom_components.securemtr.entity._CONTROLLER_READY_TIMEOUT", 0.01
     )
 
     with pytest.raises(HomeAssistantError):

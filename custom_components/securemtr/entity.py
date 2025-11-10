@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 import sys
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
@@ -17,6 +20,31 @@ from . import (
     SecuremtrRuntimeData,
     runtime_update_signal,
 )
+
+_CONTROLLER_READY_TIMEOUT = 15.0
+
+
+async def async_get_ready_controller(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> tuple[SecuremtrRuntimeData, SecuremtrController]:
+    """Return runtime context and controller metadata once ready."""
+
+    runtime: SecuremtrRuntimeData = hass.data[DOMAIN][entry.entry_id]
+
+    try:
+        await asyncio.wait_for(
+            runtime.controller_ready.wait(), _CONTROLLER_READY_TIMEOUT
+        )
+    except TimeoutError as error:
+        raise HomeAssistantError(
+            "Timed out waiting for Secure Meters controller metadata"
+        ) from error
+
+    controller = runtime.controller
+    if controller is None:
+        raise HomeAssistantError("Secure Meters controller metadata was not available")
+
+    return runtime, controller
 
 
 def slugify_identifier(identifier: str) -> str:
@@ -124,4 +152,3 @@ class SecuremtrRuntimeEntityMixin:
         controller = self._controller
         identifier = controller.serial_number or controller.identifier
         return slugify_identifier(identifier)
-

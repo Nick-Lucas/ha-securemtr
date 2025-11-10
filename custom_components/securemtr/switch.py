@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from homeassistant.components.switch import SwitchEntity
@@ -12,7 +11,6 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import (
-    DOMAIN,
     SecuremtrController,
     SecuremtrRuntimeData,
     async_dispatch_runtime_update,
@@ -22,13 +20,12 @@ from .beanbag import BeanbagError
 from .entity import (
     SecuremtrRuntimeEntityMixin,
     async_dispatcher_connect as _async_dispatcher_connect,
+    async_get_ready_controller,
 )
 
 async_dispatcher_connect = _async_dispatcher_connect
 
 _LOGGER = logging.getLogger(__name__)
-
-_CONTROLLER_WAIT_TIMEOUT = 15.0
 
 
 async def async_setup_entry(
@@ -38,20 +35,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up Secure Meters switch entities for a config entry."""
 
-    runtime: SecuremtrRuntimeData = hass.data[DOMAIN][entry.entry_id]
-
-    try:
-        await asyncio.wait_for(
-            runtime.controller_ready.wait(), _CONTROLLER_WAIT_TIMEOUT
-        )
-    except TimeoutError as error:
-        raise HomeAssistantError(
-            "Timed out waiting for Secure Meters controller metadata"
-        ) from error
-
-    controller = runtime.controller
-    if controller is None:
-        raise HomeAssistantError("Secure Meters controller metadata was not available")
+    runtime, controller = await async_get_ready_controller(hass, entry)
 
     async_add_entities(
         [
