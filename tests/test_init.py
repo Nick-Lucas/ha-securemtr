@@ -30,6 +30,7 @@ from custom_components.securemtr import (
     _async_fetch_controller,
     _async_register_services,
     _async_ensure_utility_meters,
+    _async_handle_backend_success,
     _build_controller,
     _build_zone_statistics_samples,
     _energy_store_key,
@@ -3732,6 +3733,77 @@ async def test_async_start_backend_invokes_refresh_callback_on_success(
 
 
 @pytest.mark.asyncio
+async def test_async_handle_backend_success_triggers_refresh_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ensure the backend success helper creates meters and runs callbacks."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.consumption_refresh_pending = True
+
+    callback_calls: list[str] = []
+
+    def _callback() -> None:
+        callback_calls.append("called")
+
+    ensure_helpers = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        ensure_helpers,
+    )
+
+    caplog.set_level(logging.INFO)
+    await _async_handle_backend_success(hass, entry, runtime, _callback)
+
+    assert ensure_helpers.await_count == 1
+    assert callback_calls == ["called"]
+    assert any(
+        "Beanbag backend connected for entry" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_start_backend_uses_success_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delegate post-startup handling to the success helper."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.consumption_refresh_callback = lambda: None
+
+    attempt = AsyncMock(return_value="success")
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        attempt,
+    )
+    helper = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_handle_backend_success",
+        helper,
+    )
+
+    await _async_start_backend(hass, entry, runtime)
+
+    assert helper.await_count == 1
+    call_args = helper.await_args_list[0]
+    assert call_args.args[:3] == (hass, entry, runtime)
+    assert call_args.args[3] is runtime.consumption_refresh_callback
+    assert runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
 async def test_async_start_backend_retry_then_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4171,6 +4243,58 @@ async def test_async_queue_backend_retry_success_invokes_callback(
     assert attempt.await_count >= 2
     assert runtime.retry_task is None
     assert any("Retrying Beanbag backend startup" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_async_queue_backend_retry_uses_success_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the shared helper when retries succeed."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+
+    async def fast_sleep(_delay: float) -> None:
+        return None
+
+    helper = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_handle_backend_success",
+        helper,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_attempt_backend_startup",
+        AsyncMock(return_value="success"),
+    )
+    monkeypatch.setattr("custom_components.securemtr._LOGIN_RETRY_DELAY", 0)
+    monkeypatch.setattr(
+        "custom_components.securemtr.asyncio.sleep",
+        fast_sleep,
+    )
+
+    callback = lambda: None
+    _async_queue_backend_retry(
+        hass,
+        entry,
+        runtime,
+        "entry",
+        on_success=callback,
+    )
+
+    task = runtime.retry_task
+    assert task is not None
+    await asyncio.wait_for(task, 0.1)
+
+    assert helper.await_count == 1
+    call_args = helper.await_args_list[0]
+    assert call_args.args[:3] == (hass, entry, runtime)
+    assert call_args.args[3] is callback
+    assert call_args.kwargs["after_retry"] is True
+    assert runtime.retry_task is None
 
 
 @pytest.mark.asyncio
