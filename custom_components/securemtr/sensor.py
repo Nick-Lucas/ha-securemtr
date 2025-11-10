@@ -17,6 +17,7 @@ from .entity import (
     async_dispatcher_connect as _async_dispatcher_connect,
     async_get_ready_controller,
 )
+from .zones import ZONE_METADATA
 
 async_dispatcher_connect = _async_dispatcher_connect
 
@@ -27,22 +28,6 @@ DEVICE_CLASS_DURATION = "duration"
 DEVICE_CLASS_TIMESTAMP = "timestamp"
 STATE_CLASS_MEASUREMENT = "measurement"
 STATE_CLASS_TOTAL_INCREASING = "total_increasing"
-
-ZONE_ENTITY_TRANSLATIONS: dict[str, dict[str, str]] = {
-    "primary": {
-        "label": "Primary",
-        "energy": "primary_energy_total",
-        "runtime": "primary_runtime_daily",
-        "scheduled": "primary_scheduled_daily",
-    },
-    "boost": {
-        "label": "Boost",
-        "energy": "boost_energy_total",
-        "runtime": "boost_runtime_daily",
-        "scheduled": "boost_scheduled_daily",
-    },
-}
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -70,15 +55,16 @@ async def async_setup_entry(
         sensors[0].unique_id,
     )
 
-    for zone_key, zone_translations in ZONE_ENTITY_TRANSLATIONS.items():
-        label = zone_translations["label"]
+    for zone_key, metadata in ZONE_METADATA.items():
+        label = metadata.label
+        translations = metadata.translation_keys
         sensors.append(
             SecuremtrEnergyTotalSensor(
                 runtime,
                 controller,
                 entry,
                 zone_key,
-                zone_translations["energy"],
+                translations["energy"],
             )
         )
         _LOGGER.info(
@@ -94,7 +80,7 @@ async def async_setup_entry(
                 entry,
                 zone_key,
                 "runtime",
-                zone_translations["runtime"],
+                translations["runtime"],
                 "runtime_daily",
             )
         )
@@ -105,7 +91,7 @@ async def async_setup_entry(
                 entry,
                 zone_key,
                 "scheduled",
-                zone_translations["scheduled"],
+                translations["scheduled"],
                 "scheduled_daily",
             )
         )
