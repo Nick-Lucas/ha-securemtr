@@ -840,8 +840,6 @@ async def _async_start_backend(
 
     _LOGGER.info("Starting Beanbag backend for %s", entry_identifier)
 
-    refresh_callback = runtime.consumption_refresh_callback
-
     try:
         outcome = await _async_attempt_backend_startup(
             entry,
@@ -851,10 +849,12 @@ async def _async_start_backend(
             entry_identifier=entry_identifier,
         )
         if outcome == "success":
-            await _async_ensure_utility_meters(hass, entry)
-            _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
-            if refresh_callback is not None and runtime.consumption_refresh_pending:
-                _invoke_refresh_callback(refresh_callback, entry_identifier)
+            await _async_handle_backend_success(
+                hass,
+                entry,
+                runtime,
+                runtime.consumption_refresh_callback,
+            )
             return
 
         if outcome == "retry" and _LOGIN_RETRY_DELAY <= 0:
@@ -870,13 +870,12 @@ async def _async_start_backend(
                     break
 
             if outcome == "success":
-                await _async_ensure_utility_meters(hass, entry)
-                _LOGGER.info("Beanbag backend connected for %s", entry_identifier)
-                if (
-                    refresh_callback is not None
-                    and runtime.consumption_refresh_pending
-                ):
-                    _invoke_refresh_callback(refresh_callback, entry_identifier)
+                await _async_handle_backend_success(
+                    hass,
+                    entry,
+                    runtime,
+                    runtime.consumption_refresh_callback,
+                )
                 return
 
             if outcome == "abort":
@@ -892,7 +891,7 @@ async def _async_start_backend(
                 entry,
                 runtime,
                 entry_identifier,
-                on_success=refresh_callback,
+                on_success=runtime.consumption_refresh_callback,
             )
             return
 
@@ -1011,13 +1010,13 @@ def _async_queue_backend_retry(
                     entry_identifier=entry_identifier,
                 )
                 if outcome == "success":
-                    await _async_ensure_utility_meters(hass, entry)
-                    _LOGGER.info(
-                        "Beanbag backend connected for %s after retry",
-                        entry_identifier,
+                    await _async_handle_backend_success(
+                        hass,
+                        entry,
+                        runtime,
+                        on_success,
+                        after_retry=True,
                     )
-                    if on_success is not None and runtime.consumption_refresh_pending:
-                        _invoke_refresh_callback(on_success, entry_identifier)
                     return
                 if outcome == "abort":
                     _LOGGER.error(
@@ -1040,6 +1039,24 @@ def _async_queue_backend_retry(
             runtime.retry_task = None
 
     runtime.retry_task = asyncio.create_task(_async_retry())
+
+
+async def _async_handle_backend_success(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    refresh_callback: Callable[[], None] | None = None,
+    *,
+    after_retry: bool = False,
+) -> None:
+    """Complete backend startup and trigger optional refresh callbacks."""
+
+    await _async_ensure_utility_meters(hass, entry)
+    entry_identifier = _entry_display_name(entry)
+    suffix = " after retry" if after_retry else ""
+    _LOGGER.info("Beanbag backend connected for %s%s", entry_identifier, suffix)
+    if refresh_callback is not None and runtime.consumption_refresh_pending:
+        _invoke_refresh_callback(refresh_callback, entry_identifier)
 
 
 async def _async_refresh_connection(
