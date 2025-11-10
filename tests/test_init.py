@@ -56,12 +56,19 @@ from custom_components.securemtr import (
     coerce_end_time,
     StatisticsOptions,
     ZoneContext,
+    PreparedSamples,
+    ZoneProcessingResult,
     async_setup_entry,
     async_unload_entry,
     ENERGY_STORE_VERSION,
     SERVICE_RESET_ENERGY,
     runtime_update_signal,
     consumption_metrics,
+    _validate_consumption_connection,
+    _prepare_consumption_samples,
+    _process_zone_samples,
+    _submit_statistics,
+    _update_runtime_state,
     UTILITY_METER_CYCLES,
     UTILITY_METER_DOMAIN,
 )
@@ -1477,6 +1484,274 @@ async def test_async_unload_entry_without_config_entries_helper(
     await hass.async_block_till_done()
 
     assert await async_unload_entry(hass, entry)
+
+
+@pytest.mark.asyncio
+async def test_validate_consumption_connection_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify connection validation returns runtime context when available."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry-validate",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
+    )
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    gateway = BeanbagGateway(
+        gateway_id="gw-1",
+        serial_number=None,
+        host_name=None,
+        capabilities={},
+    )
+    runtime.session = BeanbagSession(1, "sess", "token", None, (gateway,))
+    runtime.websocket = AsyncMock()
+    runtime.controller = SecuremtrController(
+        identifier="controller",
+        name="Controller",
+        gateway_id="gw-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    refresh_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_refresh_connection",
+        refresh_mock,
+    )
+
+    result = await _validate_consumption_connection(hass, entry, "entry-validate")
+    assert result is not None
+    runtime_result, controller_result, session_result, websocket_result = result
+    assert runtime_result is runtime
+    assert controller_result is runtime.controller
+    assert session_result is runtime.session
+    assert websocket_result is runtime.websocket
+    refresh_mock.assert_awaited_once_with(entry, runtime)
+
+
+@pytest.mark.asyncio
+async def test_prepare_consumption_samples_normalizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure sample preparation sorts entries and records log rows."""
+
+    entry = DummyConfigEntry(
+        entry_id="entry-prepare",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
+    )
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    controller = SecuremtrController(
+        identifier="controller",
+        name="Controller",
+        gateway_id="gw-1",
+    )
+    base = datetime(2024, 1, 10, 6, tzinfo=timezone.utc)
+    sample_a = BeanbagEnergySample(
+        timestamp=int((base + timedelta(days=1)).timestamp()),
+        primary_energy_kwh=1.5,
+        boost_energy_kwh=0.4,
+        primary_scheduled_minutes=90,
+        primary_active_minutes=60,
+        boost_scheduled_minutes=0,
+        boost_active_minutes=0,
+    )
+    sample_b = BeanbagEnergySample(
+        timestamp=int(base.timestamp()),
+        primary_energy_kwh=0.8,
+        boost_energy_kwh=0.1,
+        primary_scheduled_minutes=60,
+        primary_active_minutes=30,
+        boost_scheduled_minutes=0,
+        boost_active_minutes=0,
+    )
+    fetch_mock = AsyncMock(return_value=[sample_a, sample_b])
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_fetch_energy_samples",
+        fetch_mock,
+    )
+
+    prepared = await _prepare_consumption_samples(
+        entry, runtime, controller, "entry-prepare"
+    )
+
+    assert isinstance(prepared, PreparedSamples)
+    assert [row["epoch_seconds"] for row in prepared.rows] == [
+        sample_b.timestamp,
+        sample_a.timestamp,
+    ]
+    assert all(isinstance(row["report_day"], date) for row in prepared.rows)
+    assert runtime.consumption_metrics_log[0]["report_day"] == prepared.rows[0][
+        "report_day"
+    ].isoformat()
+    assert prepared.options.timezone is not None
+
+
+@pytest.mark.asyncio
+async def test_process_zone_samples_returns_result(
+    monkeypatch: pytest.MonkeyPatch,
+    store_instances,
+) -> None:
+    """Confirm zone processing updates accumulators and statistics."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry-process",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
+    )
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+    gateway = BeanbagGateway(
+        gateway_id="gw-1",
+        serial_number=None,
+        host_name=None,
+        capabilities={},
+    )
+    runtime.session = BeanbagSession(1, "sess", "token", None, (gateway,))
+    runtime.websocket = AsyncMock()
+    controller = SecuremtrController(
+        identifier="controller",
+        name="Controller",
+        gateway_id="gw-1",
+    )
+
+    processed_rows = [
+        {
+            "report_day": date(2024, 1, 10),
+            "primary_energy_kwh": 1.0,
+            "primary_active_minutes": 60,
+            "primary_scheduled_minutes": 60,
+            "boost_energy_kwh": 0.5,
+            "boost_active_minutes": 30,
+            "boost_scheduled_minutes": 30,
+        }
+    ]
+    options = StatisticsOptions(
+        timezone=ZoneInfo("UTC"),
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(7, 0),
+        fallback_power_kw=2.0,
+        prefer_device_energy=True,
+    )
+
+    program_mock = AsyncMock(side_effect=[None, None])
+    monkeypatch.setattr(
+        "custom_components.securemtr._read_zone_program",
+        program_mock,
+    )
+
+    result = await _process_zone_samples(
+        hass,
+        entry,
+        runtime,
+        runtime.session,
+        runtime.websocket,
+        controller,
+        processed_rows,
+        options,
+        "entry-process",
+    )
+
+    assert result.energy_state_changed
+    assert result.dispatch_needed
+    assert "primary" in result.recent_measurements
+    assert "primary" in result.statistics_samples
+    assert runtime.energy_accumulator is not None
+    assert runtime.energy_store is not None
+    assert program_mock.await_count == 2
+
+
+def test_submit_statistics_writes_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Validate statistics submission forwards prepared samples."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry-submit",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
+    )
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    runtime.energy_entity_ids = {
+        "primary": "sensor.securemtr_controller_primary_energy_kwh"
+    }
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+    controller = SecuremtrController(
+        identifier="controller",
+        name="Controller",
+        gateway_id="gw-1",
+    )
+
+    sample = StatisticData(
+        start=datetime(2024, 1, 10, tzinfo=timezone.utc),
+        sum=1.0,
+        state=1.0,
+    )
+    recorded: list[tuple[StatisticMetaData, list[StatisticData]]] = []
+
+    def capture(
+        _hass: HomeAssistant,
+        metadata: StatisticMetaData,
+        statistics: Iterable[StatisticData],
+    ) -> None:
+        recorded.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        capture,
+    )
+
+    _submit_statistics(hass, entry, controller, {"primary": []})
+    assert not recorded
+
+    _submit_statistics(hass, entry, controller, {"primary": [sample]})
+
+    assert recorded
+    metadata, stats = recorded[0]
+    assert metadata["statistic_id"].endswith("primary_energy_kwh")
+    assert stats[0]["sum"] == sample["sum"]
+
+
+def test_update_runtime_state_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure runtime updates persist sensor state and dispatch events."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry-update",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
+    )
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    runtime.consumption_refresh_pending = True
+    dispatch_calls: list[tuple[FakeHass, str]] = []
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_dispatch_runtime_update",
+        lambda hass_obj, entry_id: dispatch_calls.append((hass_obj, entry_id)),
+    )
+
+    sensor_state = {
+        "primary": {"energy_sum": 3.0},
+        "boost": {"energy_sum": 0.5},
+    }
+    result = ZoneProcessingResult(
+        statistics_samples={},
+        sensor_state=sensor_state,
+        recent_measurements={"primary": {"report_day": "2024-01-10"}},
+        energy_state_changed=True,
+        dispatch_needed=True,
+    )
+
+    _update_runtime_state(
+        hass,
+        entry,
+        runtime,
+        result,
+        "entry-update",
+        2,
+    )
+
+    assert runtime.energy_state == sensor_state
+    assert runtime.statistics_recent == result.recent_measurements
+    assert runtime.consumption_refresh_pending is False
+    assert dispatch_calls == [(hass, entry.entry_id)]
 
 
 @pytest.mark.asyncio
