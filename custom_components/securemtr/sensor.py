@@ -157,6 +157,15 @@ class SecuremtrSensorEntity(SecuremtrRuntimeEntityMixin, SensorEntity):
 
         return self._attr_state_class
 
+    def _zone_payload(self, attr_name: str, zone: str) -> dict[str, object] | None:
+        """Return the validated per-zone payload for the runtime attribute."""
+
+        payload = getattr(self._runtime, attr_name, None)
+        if not isinstance(payload, dict):
+            return None
+        zone_state = payload.get(zone)
+        return zone_state if isinstance(zone_state, dict) else None
+
 
 class SecuremtrBoostEndsSensor(SecuremtrSensorEntity):
     """Report the expected end time of the active boost run."""
@@ -223,20 +232,11 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
 
             hass.async_create_task(_async_ensure_utility_meters(hass, runtime_entry))
 
-    def _zone_state(self) -> dict[str, object] | None:
-        """Return the persisted energy state for the zone."""
-
-        state = self._runtime.energy_state
-        if not isinstance(state, dict):
-            return None
-        zone_state = state.get(self._zone)
-        return zone_state if isinstance(zone_state, dict) else None
-
     @property
     def native_value(self) -> float | None:
         """Return the cumulative energy total in kilowatt-hours."""
 
-        zone_state = self._zone_state()
+        zone_state = self._zone_payload("energy_state", self._zone)
         if not zone_state:
             return None
         energy_raw = zone_state.get("energy_sum")
@@ -248,7 +248,7 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
     def extra_state_attributes(self) -> dict[str, object] | None:
         """Return metadata about the most recent statistic day."""
 
-        zone_state = self._zone_state()
+        zone_state = self._zone_payload("energy_state", self._zone)
         if not zone_state:
             return None
         last_day = zone_state.get("last_day")
@@ -289,20 +289,11 @@ class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
         self._attr_translation_key = translation_key
         self._attr_unique_id = f"{self._identifier_slug()}_{zone}_{unique_suffix}"
 
-    def _recent_state(self) -> dict[str, object] | None:
-        """Return the in-memory statistics summary for the zone."""
-
-        recent = self._runtime.statistics_recent
-        if not isinstance(recent, dict):
-            return None
-        zone_state = recent.get(self._zone)
-        return zone_state if isinstance(zone_state, dict) else None
-
     @property
     def native_value(self) -> float | None:
         """Return the previous day's duration in hours."""
 
-        zone_state = self._recent_state()
+        zone_state = self._zone_payload("statistics_recent", self._zone)
         if not zone_state:
             return None
 
@@ -316,7 +307,7 @@ class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
     def extra_state_attributes(self) -> dict[str, object] | None:
         """Return the report day and cumulative energy context."""
 
-        zone_state = self._recent_state()
+        zone_state = self._zone_payload("statistics_recent", self._zone)
         if not zone_state:
             return None
 

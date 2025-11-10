@@ -114,6 +114,7 @@ custom_components.securemtr.binary_sensor.async_setup_entry: Set up the Secure M
 custom_components.securemtr.binary_sensor.SecuremtrBoostActiveBinarySensor.is_on: Return whether the timed boost is active.
 custom_components.securemtr.sensor.async_setup_entry: Set up the Secure Meters sensors for boost and statistics.
 custom_components.securemtr.sensor.SecuremtrSensorEntity: Provide shared behaviour for Secure Meters sensors.
+custom_components.securemtr.sensor.SecuremtrSensorEntity._zone_payload: Return the validated per-zone payload for the runtime attribute.
 custom_components.securemtr.sensor.SecuremtrBoostEndsSensor.native_value: Return the boost end timestamp when active.
 custom_components.securemtr.sensor.SecuremtrEnergyTotalSensor.native_value: Return the cumulative energy total in kilowatt-hours for the zone.
 custom_components.securemtr.sensor.SecuremtrEnergyTotalSensor.extra_state_attributes: Provide the most recent statistic day for the zone energy total.

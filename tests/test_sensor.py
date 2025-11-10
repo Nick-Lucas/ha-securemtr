@@ -63,6 +63,41 @@ def _create_runtime() -> SecuremtrRuntimeData:
     return runtime
 
 
+def test_zone_payload_validates_per_zone_dicts() -> None:
+    """Ensure the helper returns per-zone dict payloads when valid."""
+
+    runtime = _create_runtime()
+    runtime.energy_state = {
+        "primary": {"energy_sum": 1.0},
+        "boost": "invalid",
+    }
+    runtime.statistics_recent = {
+        "primary": {"runtime_hours": 2.0},
+    }
+    entry = DummyEntry(entry_id="entry")
+    sensor = SecuremtrEnergyTotalSensor(
+        runtime,
+        runtime.controller,
+        entry,
+        "primary",
+        "energy",
+    )
+
+    assert sensor._zone_payload("energy_state", "primary") == {"energy_sum": 1.0}
+    assert sensor._zone_payload("energy_state", "boost") is None
+    assert sensor._zone_payload("energy_state", "missing") is None
+
+    runtime.energy_state = None
+    assert sensor._zone_payload("energy_state", "primary") is None
+
+    assert sensor._zone_payload("statistics_recent", "primary") == {
+        "runtime_hours": 2.0
+    }
+
+    runtime.statistics_recent = []  # type: ignore[assignment]
+    assert sensor._zone_payload("statistics_recent", "primary") is None
+
+
 @pytest.mark.asyncio
 async def test_sensor_reports_end_time() -> None:
     """Ensure the sensor reports the boost end timestamp when active."""
