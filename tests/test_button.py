@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 
 import pytest
 
+import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import (
     DOMAIN,
     SecuremtrController,
@@ -195,12 +196,26 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
 
     fixed_now = datetime(2024, 1, 1, 10, 15, tzinfo=timezone.utc)
     monkeypatch.setattr("homeassistant.util.dt.now", lambda: fixed_now)
+    dispatcher_calls: list[tuple[object, str]] = []
     monkeypatch.setattr(
-        "custom_components.securemtr.button.async_dispatch_runtime_update",
-        lambda hass_obj, entry_id: None,
+        "custom_components.securemtr.runtime_helpers.async_dispatch_runtime_update",
+        lambda hass_obj, entry_id: dispatcher_calls.append((hass_obj, entry_id)),
+    )
+
+    helper_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    original_helper = runtime_helpers.async_mutate_runtime
+
+    async def _wrapped_helper(*args: Any, **kwargs: Any) -> Any:
+        helper_calls.append((args, kwargs))
+        return await original_helper(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.button.async_mutate_runtime",
+        _wrapped_helper,
     )
 
     boost_button.hass = SimpleNamespace()
+    hass_obj = boost_button.hass
     await boost_button.async_press()
 
     assert backend.start_calls == [
@@ -209,6 +224,7 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
     assert runtime.timed_boost_active is True
     assert runtime.timed_boost_end_minute == (10 * 60 + 45)
     assert runtime.timed_boost_end_time == coerce_end_time(10 * 60 + 45)
+    assert dispatcher_calls == [(hass_obj, "entry")]
 
     boost_button.hass = None
     await boost_button.async_press()
@@ -218,6 +234,8 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
         "gateway-1",
         30,
     )
+    assert dispatcher_calls == [(hass_obj, "entry")]
+    assert len(helper_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -439,12 +457,26 @@ async def test_cancel_button_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(cancel_button, SecuremtrCancelBoostButton)
     assert cancel_button.available is True
 
+    dispatcher_calls: list[tuple[object, str]] = []
     monkeypatch.setattr(
-        "custom_components.securemtr.button.async_dispatch_runtime_update",
-        lambda hass_obj, entry_id: None,
+        "custom_components.securemtr.runtime_helpers.async_dispatch_runtime_update",
+        lambda hass_obj, entry_id: dispatcher_calls.append((hass_obj, entry_id)),
+    )
+
+    helper_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    original_helper = runtime_helpers.async_mutate_runtime
+
+    async def _wrapped_helper(*args: Any, **kwargs: Any) -> Any:
+        helper_calls.append((args, kwargs))
+        return await original_helper(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.button.async_mutate_runtime",
+        _wrapped_helper,
     )
 
     cancel_button.hass = SimpleNamespace()
+    hass_obj = cancel_button.hass
     await cancel_button.async_press()
 
     assert backend.stop_calls == [
@@ -453,6 +485,7 @@ async def test_cancel_button_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
     assert runtime.timed_boost_active is False
     assert runtime.timed_boost_end_minute is None
     assert runtime.timed_boost_end_time is None
+    assert dispatcher_calls == [(hass_obj, "entry")]
 
     with pytest.raises(HomeAssistantError):
         await cancel_button.async_press()
@@ -467,6 +500,8 @@ async def test_cancel_button_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
         runtime.websocket,
         "gateway-1",
     )
+    assert dispatcher_calls == [(hass_obj, "entry")]
+    assert len(helper_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -532,7 +567,7 @@ async def test_cancel_button_backend_error(monkeypatch: pytest.MonkeyPatch) -> N
         entity for entity in entities if entity.unique_id.endswith("boost_cancel")
     )
     monkeypatch.setattr(
-        "custom_components.securemtr.button.async_dispatch_runtime_update",
+        "custom_components.securemtr.runtime_helpers.async_dispatch_runtime_update",
         lambda hass_obj, entry_id: None,
     )
     cancel_button.hass = SimpleNamespace()

@@ -4,22 +4,21 @@ from __future__ import annotations
 
 import logging
 
+from aiohttp import ClientWebSocketResponse
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import (
-    SecuremtrController,
-    SecuremtrRuntimeData,
-    async_dispatch_runtime_update,
-    async_execute_controller_command,
-)
+from . import SecuremtrController, SecuremtrRuntimeData
+from .beanbag import BeanbagBackend, BeanbagSession
 from .entity import (
     SecuremtrRuntimeEntityMixin,
     async_dispatcher_connect as _async_dispatcher_connect,
     async_get_ready_controller,
 )
+from .runtime_helpers import async_mutate_runtime
 
 async_dispatcher_connect = _async_dispatcher_connect
 
@@ -78,34 +77,41 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Drive the backend to the requested primary power state."""
 
         runtime = self._runtime
+        entry = self._entry
+        if entry is None:  # pragma: no cover - defensive guard
+            raise HomeAssistantError("Config entry is not available")
 
-        await async_execute_controller_command(
+        async def _call_operation(
+            backend: BeanbagBackend,
+            session: BeanbagSession,
+            websocket: ClientWebSocketResponse,
+            controller: SecuremtrController,
+        ) -> None:
+            if turn_on:
+                await backend.turn_controller_on(session, websocket, controller.gateway_id)
+                return
+
+            await backend.turn_controller_off(session, websocket, controller.gateway_id)
+
+        await async_mutate_runtime(
             runtime,
-            self._entry,
-            (
-                lambda backend, session, websocket, controller: backend.turn_controller_on(
-                    session,
-                    websocket,
-                    controller.gateway_id,
-                )
-                if turn_on
-                else backend.turn_controller_off(
-                    session,
-                    websocket,
-                    controller.gateway_id,
-                )
-            ),
+            entry,
+            entry_id=self._entry_id,
+            hass=self.hass,
+            operation=_call_operation,
+            mutation=lambda data: self._apply_power_state(data, turn_on),
             log_context="Failed to toggle Secure Meters controller",
+            write_ha_state=self.async_write_ha_state,
         )
 
+    @staticmethod
+    def _apply_power_state(
+        runtime: SecuremtrRuntimeData,
+        turn_on: bool,
+    ) -> None:
+        """Update runtime state after toggling the controller power."""
+
         runtime.primary_power_on = turn_on
-
-        hass = self.hass
-        if hass is None:
-            return
-
-        self.async_write_ha_state()
-        async_dispatch_runtime_update(hass, self._entry_id)
 
 
 class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
@@ -143,24 +149,31 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Drive the backend to the requested timed boost state."""
 
         runtime = self._runtime
+        entry = self._entry
+        if entry is None:  # pragma: no cover - defensive guard
+            raise HomeAssistantError("Config entry is not available")
 
-        await async_execute_controller_command(
+        await async_mutate_runtime(
             runtime,
-            self._entry,
-            lambda backend, session, websocket, controller: backend.set_timed_boost_enabled(
+            entry,
+            entry_id=self._entry_id,
+            hass=self.hass,
+            operation=lambda backend, session, websocket, controller: backend.set_timed_boost_enabled(
                 session,
                 websocket,
                 controller.gateway_id,
                 enabled=enabled,
             ),
+            mutation=lambda data: self._apply_timed_boost_state(data, enabled),
             log_context="Failed to toggle Secure Meters timed boost feature",
+            write_ha_state=self.async_write_ha_state,
         )
 
+    @staticmethod
+    def _apply_timed_boost_state(
+        runtime: SecuremtrRuntimeData,
+        enabled: bool,
+    ) -> None:
+        """Update runtime state after toggling timed boost."""
+
         runtime.timed_boost_enabled = enabled
-
-        hass = self.hass
-        if hass is None:
-            return
-
-        self.async_write_ha_state()
-        async_dispatch_runtime_update(hass, self._entry_id)

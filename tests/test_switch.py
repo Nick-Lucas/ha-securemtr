@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 import pytest
 
+import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import (
     DOMAIN,
     SecuremtrController,
@@ -150,12 +151,26 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
         _fake_run_with_reconnect,
     )
 
+    dispatcher_calls: list[tuple[object, str]] = []
     monkeypatch.setattr(
-        "custom_components.securemtr.switch.async_dispatch_runtime_update",
-        lambda hass_obj, entry_id: None,
+        "custom_components.securemtr.runtime_helpers.async_dispatch_runtime_update",
+        lambda hass_obj, entry_id: dispatcher_calls.append((hass_obj, entry_id)),
+    )
+
+    helper_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    original_helper = runtime_helpers.async_mutate_runtime
+
+    async def _wrapped_helper(*args: Any, **kwargs: Any) -> Any:
+        helper_calls.append((args, kwargs))
+        return await original_helper(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.switch.async_mutate_runtime",
+        _wrapped_helper,
     )
 
     power_switch.hass = SimpleNamespace()
+    power_hass = power_switch.hass
     power_switch.entity_id = "switch.securemtr_controller"
     state_writes: list[str] = []
 
@@ -180,6 +195,7 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert state_writes == []
 
     timed_switch.hass = SimpleNamespace()
+    timed_hass = timed_switch.hass
     timed_switch.entity_id = "switch.securemtr_timed_boost"
     timed_state_writes: list[str] = []
 
@@ -209,6 +225,8 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert runtime.timed_boost_enabled is False
     assert timed_switch.is_on is False
     assert timed_state_writes == []
+    assert dispatcher_calls == [(power_hass, "entry"), (timed_hass, "entry")]
+    assert len(helper_calls) == 4
 
 
 def test_switch_device_info_without_serial() -> None:
