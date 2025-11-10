@@ -9,8 +9,6 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import (
@@ -19,10 +17,14 @@ from . import (
     SecuremtrRuntimeData,
     async_dispatch_runtime_update,
     async_run_with_reconnect,
-    runtime_update_signal,
 )
 from .beanbag import BeanbagError
-from .entity import build_device_info, slugify_identifier
+from .entity import (
+    SecuremtrRuntimeEntityMixin,
+    async_dispatcher_connect as _async_dispatcher_connect,
+)
+
+async_dispatcher_connect = _async_dispatcher_connect
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,61 +61,7 @@ async def async_setup_entry(
     )
 
 
-class _SecuremtrBaseSwitch(SwitchEntity):
-    """Provide shared behaviour for Secure Meters switch entities."""
-
-    _attr_should_poll = False
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        runtime: SecuremtrRuntimeData,
-        controller: SecuremtrController,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialise the switch with runtime context and controller metadata."""
-
-        self._runtime = runtime
-        self._controller = controller
-        self._entry = entry
-        self._entry_id = entry.entry_id
-
-    @property
-    def available(self) -> bool:
-        """Report whether the underlying WebSocket is connected."""
-
-        return (
-            self._runtime.websocket is not None and self._runtime.controller is not None
-        )
-
-    async def async_added_to_hass(self) -> None:
-        """Register runtime callbacks when the entity is added to Home Assistant."""
-
-        await super().async_added_to_hass()
-        hass = self.hass
-        if hass is None:
-            return
-
-        remove = async_dispatcher_connect(
-            hass, runtime_update_signal(self._entry_id), self.async_write_ha_state
-        )
-        self.async_on_remove(remove)
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Return device registry information for the controller."""
-
-        return build_device_info(self._controller)
-
-    def _identifier_slug(self) -> str:
-        """Return the slugified identifier for the controller."""
-
-        controller = self._controller
-        identifier = controller.serial_number or controller.identifier
-        return slugify_identifier(identifier)
-
-
-class SecuremtrPowerSwitch(_SecuremtrBaseSwitch):
+class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
     """Represent a maintained power toggle for the Secure Meters controller."""
 
     def __init__(
@@ -124,7 +72,7 @@ class SecuremtrPowerSwitch(_SecuremtrBaseSwitch):
     ) -> None:
         """Initialise the switch entity with runtime context."""
 
-        super().__init__(runtime, controller, entry)
+        super().__init__(runtime, controller, entry=entry)
         self._attr_unique_id = f"{self._identifier_slug()}_primary_power"
         self._attr_translation_key = "controller_power"
 
@@ -189,7 +137,7 @@ class SecuremtrPowerSwitch(_SecuremtrBaseSwitch):
         async_dispatch_runtime_update(hass, self._entry_id)
 
 
-class SecuremtrTimedBoostSwitch(_SecuremtrBaseSwitch):
+class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
     """Expose the timed boost feature toggle reported by Beanbag."""
 
     def __init__(
@@ -200,7 +148,7 @@ class SecuremtrTimedBoostSwitch(_SecuremtrBaseSwitch):
     ) -> None:
         """Initialise the timed boost switch for the controller."""
 
-        super().__init__(runtime, controller, entry)
+        super().__init__(runtime, controller, entry=entry)
         self._attr_unique_id = f"{self._identifier_slug()}_timed_boost"
         self._attr_translation_key = "timed_boost"
 

@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
-from homeassistant.helpers.device_registry import DeviceInfo
+from collections.abc import Callable
+import sys
+from typing import Any
 
-from . import DEFAULT_DEVICE_LABEL, DOMAIN, SecuremtrController
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
+from . import (
+    DEFAULT_DEVICE_LABEL,
+    DOMAIN,
+    SecuremtrController,
+    SecuremtrRuntimeData,
+    runtime_update_signal,
+)
 
 
 def slugify_identifier(identifier: str) -> str:
@@ -29,3 +41,87 @@ def build_device_info(controller: SecuremtrController) -> DeviceInfo:
         sw_version=controller.firmware_version,
         serial_number=controller.serial_number,
     )
+
+
+class SecuremtrRuntimeEntityMixin:
+    """Provide shared runtime helpers for Secure Meters entities."""
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        runtime: SecuremtrRuntimeData,
+        controller: SecuremtrController,
+        *,
+        entry: ConfigEntry | None = None,
+        entry_id: str | None = None,
+    ) -> None:
+        """Initialise the entity with runtime context and dispatcher hooks."""
+
+        super().__init__()
+        self._runtime = runtime
+        self._controller = controller
+        self._entry: ConfigEntry | None = entry
+        if entry is not None:
+            self._entry_id = entry.entry_id
+        elif entry_id is not None:
+            self._entry_id = entry_id
+        else:
+            raise ValueError(  # pragma: no cover - defensive validation
+                "Either entry or entry_id must be provided for SecureMTR entities"
+            )
+
+    @property
+    def available(self) -> bool:
+        """Return whether the controller metadata is currently available."""
+
+        return self._runtime_connected()
+
+    def _runtime_connected(self) -> bool:
+        """Return whether the backend runtime currently exposes controller state."""
+
+        return (
+            self._runtime.websocket is not None and self._runtime.controller is not None
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Register dispatcher callbacks when the entity is added to Home Assistant."""
+
+        await super().async_added_to_hass()
+        hass = self.hass
+        if hass is None:
+            return
+
+        connector = self._resolve_dispatcher_connect()
+        remove = connector(
+            hass, runtime_update_signal(self._entry_id), self.async_write_ha_state
+        )
+        self.async_on_remove(remove)
+
+    def _resolve_dispatcher_connect(
+        self,
+    ) -> Callable[[Any, str, Callable[..., Any]], Callable[[], None]]:
+        """Return the dispatcher connect helper, honouring per-module overrides."""
+
+        module = sys.modules.get(self.__module__)
+        if module is not None:
+            connector = getattr(module, "async_dispatcher_connect", None)
+            if callable(connector):
+                return connector
+
+        return async_dispatcher_connect  # pragma: no cover - fallback path
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information for the associated controller."""
+
+        return build_device_info(self._controller)
+
+    def _identifier_slug(self) -> str:
+        """Return the slugified identifier for the controller."""
+
+        controller = self._controller
+        identifier = controller.serial_number or controller.identifier
+        return slugify_identifier(identifier)
+
