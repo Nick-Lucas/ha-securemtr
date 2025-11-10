@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -16,6 +18,7 @@ from . import (
     SecuremtrRuntimeData,
     runtime_update_signal,
 )
+from .runtime_helpers import MutationCallable, OperationCallable, async_mutate_runtime
 
 _CONTROLLER_READY_TIMEOUT = 15.0
 
@@ -134,3 +137,41 @@ class SecuremtrRuntimeEntityMixin:
         controller = self._controller
         identifier = controller.serial_number or controller.identifier
         return slugify_identifier(identifier)
+
+    async def _async_mutate(
+        self,
+        *,
+        operation: OperationCallable,
+        mutation: MutationCallable,
+        log_context: str,
+        error_message: str | None = None,
+        exception_types: tuple[type[Exception], ...] | type[Exception] | None = None,
+        write_state: bool = False,
+    ) -> Any:
+        """Execute a runtime mutation using the entity's stored context."""
+
+        entry = self._entry
+        if entry is None:
+            raise HomeAssistantError("Config entry is not available")
+
+        if exception_types is None:
+            exception_tuple: tuple[type[Exception], ...] | None = None
+        elif isinstance(exception_types, tuple):
+            exception_tuple = exception_types
+        else:
+            exception_tuple = (exception_types,)
+
+        write_ha_state = self.async_write_ha_state if write_state else None
+
+        return await async_mutate_runtime(
+            self._runtime,
+            entry,
+            entry_id=self._entry_id,
+            hass=self.hass,
+            operation=operation,
+            mutation=mutation,
+            log_context=log_context,
+            error_message=error_message,
+            exception_types=exception_tuple,
+            write_ha_state=write_ha_state,
+        )

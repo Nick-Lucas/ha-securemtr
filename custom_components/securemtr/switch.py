@@ -8,13 +8,11 @@ from aiohttp import ClientWebSocketResponse
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SecuremtrController, SecuremtrRuntimeData
 from .beanbag import BeanbagBackend, BeanbagSession
 from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
-from .runtime_helpers import async_mutate_runtime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,11 +68,6 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
     async def _async_set_power_state(self, turn_on: bool) -> None:
         """Drive the backend to the requested primary power state."""
 
-        runtime = self._runtime
-        entry = self._entry
-        if entry is None:  # pragma: no cover - defensive guard
-            raise HomeAssistantError("Config entry is not available")
-
         async def _call_operation(
             backend: BeanbagBackend,
             session: BeanbagSession,
@@ -87,15 +80,11 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
 
             await backend.turn_controller_off(session, websocket, controller.gateway_id)
 
-        await async_mutate_runtime(
-            runtime,
-            entry,
-            entry_id=self._entry_id,
-            hass=self.hass,
+        await self._async_mutate(
             operation=_call_operation,
             mutation=lambda data: self._apply_power_state(data, turn_on),
             log_context="Failed to toggle Secure Meters controller",
-            write_ha_state=self.async_write_ha_state,
+            write_state=True,
         )
 
     @staticmethod
@@ -142,16 +131,7 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
     async def _async_set_timed_boost(self, enabled: bool) -> None:
         """Drive the backend to the requested timed boost state."""
 
-        runtime = self._runtime
-        entry = self._entry
-        if entry is None:  # pragma: no cover - defensive guard
-            raise HomeAssistantError("Config entry is not available")
-
-        await async_mutate_runtime(
-            runtime,
-            entry,
-            entry_id=self._entry_id,
-            hass=self.hass,
+        await self._async_mutate(
             operation=lambda backend, session, websocket, controller: backend.set_timed_boost_enabled(
                 session,
                 websocket,
@@ -160,7 +140,7 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
             ),
             mutation=lambda data: self._apply_timed_boost_state(data, enabled),
             log_context="Failed to toggle Secure Meters timed boost feature",
-            write_ha_state=self.async_write_ha_state,
+            write_state=True,
         )
 
     @staticmethod
