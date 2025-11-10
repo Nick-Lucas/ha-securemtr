@@ -17,7 +17,6 @@ from homeassistant.util import dt as dt_util
 from . import (
     SecuremtrController,
     SecuremtrRuntimeData,
-    async_dispatch_runtime_update,
     async_execute_controller_command,
     coerce_end_time,
     consumption_metrics,
@@ -28,6 +27,7 @@ from .entity import (
     async_dispatcher_connect as _async_dispatcher_connect,
     async_get_ready_controller,
 )
+from .runtime_helpers import async_mutate_runtime
 
 async_dispatcher_connect = _async_dispatcher_connect
 
@@ -233,33 +233,41 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
 
         runtime = self._runtime
         entry = self._entry
+        if entry is None:  # pragma: no cover - defensive guard
+            raise HomeAssistantError("Config entry is not available")
 
-        await async_execute_controller_command(
+        duration = self._duration
+
+        await async_mutate_runtime(
             runtime,
             entry,
-            lambda backend, session, websocket, controller: backend.start_timed_boost(
+            entry_id=self._entry_id,
+            hass=self.hass,
+            operation=lambda backend, session, websocket, controller: backend.start_timed_boost(
                 session,
                 websocket,
                 controller.gateway_id,
-                duration_minutes=self._duration,
+                duration_minutes=duration,
             ),
+            mutation=lambda data: self._apply_timed_boost_start(data, duration),
             log_context="Failed to start Secure Meters timed boost",
             exception_types=(BeanbagError, ValueError),
         )
 
+    @staticmethod
+    def _apply_timed_boost_start(
+        runtime: SecuremtrRuntimeData,
+        duration: int,
+    ) -> None:
+        """Update runtime state for a newly started timed boost."""
+
         runtime.timed_boost_active = True
         now_local = dt_util.now()
-        end_local = now_local + timedelta(minutes=self._duration)
+        end_local = now_local + timedelta(minutes=duration)
         runtime.timed_boost_end_minute = end_local.hour * 60 + end_local.minute
         runtime.timed_boost_end_time = coerce_end_time(
             runtime.timed_boost_end_minute
         )
-
-        hass = self.hass
-        if hass is None:
-            return
-
-        async_dispatch_runtime_update(hass, self._entry_id)
 
 
 class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
@@ -291,26 +299,31 @@ class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         if runtime.timed_boost_active is not True:
             raise HomeAssistantError("Timed boost is not currently active")
 
-        await async_execute_controller_command(
+        entry = self._entry
+        if entry is None:  # pragma: no cover - defensive guard
+            raise HomeAssistantError("Config entry is not available")
+
+        await async_mutate_runtime(
             runtime,
-            self._entry,
-            lambda backend, session, websocket, controller: backend.stop_timed_boost(
+            entry,
+            entry_id=self._entry_id,
+            hass=self.hass,
+            operation=lambda backend, session, websocket, controller: backend.stop_timed_boost(
                 session,
                 websocket,
                 controller.gateway_id,
             ),
+            mutation=self._apply_timed_boost_stop,
             log_context="Failed to cancel Secure Meters timed boost",
         )
+
+    @staticmethod
+    def _apply_timed_boost_stop(runtime: SecuremtrRuntimeData) -> None:
+        """Update runtime state after cancelling a timed boost."""
 
         runtime.timed_boost_active = False
         runtime.timed_boost_end_minute = None
         runtime.timed_boost_end_time = None
-
-        hass = self.hass
-        if hass is None:
-            return
-
-        async_dispatch_runtime_update(hass, self._entry_id)
 
 
 __all__ = [
