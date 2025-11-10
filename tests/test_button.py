@@ -352,7 +352,7 @@ async def test_schedule_button_backend_error(caplog: pytest.LogCaptureFixture) -
         with pytest.raises(HomeAssistantError):
             await schedule_button.async_press()
 
-    assert backend.read_calls == ["primary"]
+    assert backend.read_calls == ["primary", "boost"]
     assert any("Failed to read Secure Meters weekly schedule" in record for record in caplog.messages)
 
 

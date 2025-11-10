@@ -31,7 +31,9 @@ custom_components.securemtr.__init__._submit_statistics: Record prepared statist
 custom_components.securemtr.__init__._update_runtime_state: Persist runtime state derived from the latest consumption refresh.
 custom_components.securemtr.__init__._energy_store_key: Return the persistent storage key for accumulated energy state.
 custom_components.securemtr.__init__._load_statistics_options: Derive statistics options from the configuration entry using the Home Assistant timezone when available.
-custom_components.securemtr.__init__._read_zone_program: Fetch the weekly program for a zone, returning None on failure.
+custom_components.securemtr.runtime_helpers.async_read_zone_program: Fetch the weekly program for a zone, returning None on failure.
+custom_components.securemtr.runtime_helpers.async_execute_controller_command: Delegate controller commands to the integration runtime helper.
+custom_components.securemtr.runtime_helpers.async_dispatch_runtime_update: Dispatch runtime updates via the integration signal helper.
 custom_components.securemtr.__init__._build_zone_statistics_samples: Return statistic samples for a runtime segment anchored to a day.
 custom_components.securemtr.__init__._resolve_anchor: Select a schedule-aware anchor and interval for the provided day.
 custom_components.securemtr.__init__._normalize_identifier: Return a sanitized identifier candidate when possible.

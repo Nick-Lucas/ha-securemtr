@@ -1,22 +1,20 @@
-"""Runtime mutation helpers for Secure Meters entities."""
+"""Runtime helpers for Secure Meters entities."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from aiohttp import ClientWebSocketResponse
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from . import (
-    SecuremtrController,
-    SecuremtrRuntimeData,
-    async_dispatch_runtime_update,
-    async_execute_controller_command,
-)
-from .beanbag import BeanbagBackend, BeanbagSession
+from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
+
+if TYPE_CHECKING:
+    from . import SecuremtrController, SecuremtrRuntimeData
 
 _ResultT = TypeVar("_ResultT")
 
@@ -25,16 +23,40 @@ OperationCallable = Callable[
         BeanbagBackend,
         BeanbagSession,
         ClientWebSocketResponse,
-        SecuremtrController,
+        "SecuremtrController",
     ],
     Awaitable[_ResultT],
 ]
 
-MutationCallable = Callable[[SecuremtrRuntimeData], Awaitable[None] | None]
+MutationCallable = Callable[["SecuremtrRuntimeData"], Awaitable[None] | None]
+
+
+_LOGGER = logging.getLogger(__name__)
+
+
+async def async_execute_controller_command(
+    runtime: "SecuremtrRuntimeData",
+    entry: ConfigEntry,
+    operation: OperationCallable,
+    **kwargs: object,
+) -> _ResultT:
+    """Delegate controller commands to the integration runtime helper."""
+
+    from . import async_execute_controller_command as package_executor
+
+    return await package_executor(runtime, entry, operation, **kwargs)
+
+
+def async_dispatch_runtime_update(hass: HomeAssistant, entry_id: str) -> None:
+    """Dispatch runtime updates via the integration signal helper."""
+
+    from . import async_dispatch_runtime_update as package_dispatch
+
+    package_dispatch(hass, entry_id)
 
 
 async def async_mutate_runtime(
-    runtime: SecuremtrRuntimeData,
+    runtime: "SecuremtrRuntimeData",
     entry: ConfigEntry,
     *,
     entry_id: str,
@@ -75,4 +97,38 @@ async def async_mutate_runtime(
     return result
 
 
-__all__ = ["async_mutate_runtime"]
+async def async_read_zone_program(
+    backend: BeanbagBackend,
+    session: BeanbagSession,
+    websocket: ClientWebSocketResponse,
+    *,
+    gateway_id: str,
+    zone: str,
+    entry_identifier: str,
+) -> WeeklyProgram | None:
+    """Fetch the weekly program for a zone, returning None on failure."""
+
+    try:
+        return await backend.read_weekly_program(
+            session,
+            websocket,
+            gateway_id,
+            zone=zone,
+        )
+    except BeanbagError as error:
+        _LOGGER.error(
+            "Failed to fetch %s weekly program for %s: %s",
+            zone,
+            entry_identifier,
+            error,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "Unexpected error while fetching %s weekly program for %s",
+            zone,
+            entry_identifier,
+        )
+    return None
+
+
+__all__ = ["async_mutate_runtime", "async_read_zone_program"]
