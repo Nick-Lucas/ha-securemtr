@@ -423,6 +423,25 @@ class ZoneContext:
 
 
 @dataclass(slots=True)
+class PreparedSamples:
+    """Represent normalised consumption samples ready for processing."""
+
+    rows: list[dict[str, Any]]
+    options: StatisticsOptions
+
+
+@dataclass(slots=True)
+class ZoneProcessingResult:
+    """Collect the outcomes from zone-level consumption processing."""
+
+    statistics_samples: dict[str, list[StatisticData]]
+    sensor_state: dict[str, Any]
+    recent_measurements: dict[str, Any]
+    energy_state_changed: bool
+    dispatch_needed: bool
+
+
+@dataclass(slots=True)
 class SecuremtrRuntimeData:
     """Track runtime Beanbag backend state for a config entry."""
 
@@ -1354,21 +1373,72 @@ def _build_controller(
     )
 
 
-async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
-    hass: HomeAssistant, entry: ConfigEntry
-) -> None:
+async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Refresh and persist seven-day consumption metrics for the controller."""
 
     entry_identifier = _entry_display_name(entry)
+    validation = await _validate_consumption_connection(
+        hass, entry, entry_identifier
+    )
+    if validation is None:
+        return
+
+    runtime, controller, session, websocket = validation
+
+    prepared = await _prepare_consumption_samples(
+        entry, runtime, controller, entry_identifier
+    )
+    if prepared is None:
+        return
+
+    zone_result = await _process_zone_samples(
+        hass,
+        entry,
+        runtime,
+        session,
+        websocket,
+        controller,
+        prepared.rows,
+        prepared.options,
+        entry_identifier,
+    )
+
+    _submit_statistics(hass, entry, controller, zone_result.statistics_samples)
+
+    _update_runtime_state(
+        hass,
+        entry,
+        runtime,
+        zone_result,
+        entry_identifier,
+        len(prepared.rows),
+    )
+
+
+async def _validate_consumption_connection(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    entry_identifier: str,
+) -> (
+    tuple[
+        SecuremtrRuntimeData,
+        "SecuremtrController",
+        BeanbagSession,
+        ClientWebSocketResponse,
+    ]
+    | None
+):
+    """Ensure the runtime, controller, and transport objects are available."""
+
     domain_state = hass.data.get(DOMAIN, {})
-    runtime: SecuremtrRuntimeData | None = domain_state.get(entry.entry_id)
+    runtime = domain_state.get(entry.entry_id)
 
     if runtime is None:
         _LOGGER.error(
             "Runtime data unavailable while requesting consumption metrics for %s",
             entry_identifier,
         )
-        return
+        return None
 
     controller = runtime.controller
     if controller is None and runtime.session is not None:
@@ -1377,14 +1447,15 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
             "Skipping consumption metrics refresh for %s; controller unavailable",
             entry_identifier,
         )
-        return
+        return None
 
     if not await _async_refresh_connection(entry, runtime):
         runtime.consumption_refresh_pending = True
-        return
+        return None
 
     session = runtime.session
     websocket = runtime.websocket
+    controller = runtime.controller
 
     if session is None or websocket is None or controller is None:
         runtime.consumption_refresh_pending = True
@@ -1392,19 +1463,30 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
             "Secure Meters connection unavailable for energy history request: %s",
             entry_identifier,
         )
-        return
+        return None
+
+    return runtime, controller, session, websocket
+
+
+async def _prepare_consumption_samples(
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    controller: "SecuremtrController",
+    entry_identifier: str,
+) -> PreparedSamples | None:
+    """Fetch, trim, and normalise recent consumption samples."""
 
     samples = await _async_fetch_energy_samples(
         entry, runtime, controller, entry_identifier
     )
     if samples is None:
-        return
+        return None
 
     if not samples:
         runtime.consumption_metrics_log = []
         runtime.consumption_refresh_pending = False
         _LOGGER.debug("No consumption samples returned for %s", entry_identifier)
-        return
+        return None
 
     samples = sorted(samples, key=lambda sample: sample.timestamp)
     if len(samples) > 7:
@@ -1440,10 +1522,21 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
 
     runtime.consumption_metrics_log = log_rows
 
-    session = runtime.session
-    websocket = runtime.websocket
-    assert session is not None
-    assert websocket is not None
+    return PreparedSamples(rows=processed_rows, options=options)
+
+
+async def _process_zone_samples(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    session: BeanbagSession,
+    websocket: ClientWebSocketResponse,
+    controller: "SecuremtrController",
+    processed_rows: list[dict[str, Any]],
+    options: StatisticsOptions,
+    entry_identifier: str,
+) -> ZoneProcessingResult:
+    """Apply per-zone calibrations, persistence, and statistic preparation."""
 
     primary_program = await _read_zone_program(
         runtime,
@@ -1541,15 +1634,11 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
         runtime.energy_accumulator = accumulator
 
     await accumulator.async_load()
-    if runtime.energy_state is None:
-        runtime.energy_state = accumulator.as_sensor_state()
 
     recent_measurements: dict[str, Any] = dict(runtime.statistics_recent or {})
     zone_summaries: dict[str, tuple[date, float | None, float | None]] = {}
-    energy_changed = False
-    runtime_updated = False
-
     statistics_samples: dict[str, list[StatisticData]] = {}
+    energy_changed = False
 
     for zone_key, context in contexts.items():
         calibration = calibrations[zone_key]
@@ -1666,7 +1755,6 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
             statistics_samples[zone_key] = zone_records
 
         if latest_day is not None:
-            runtime_updated = True
             zone_summaries[zone_key] = (
                 latest_day,
                 latest_runtime_hours,
@@ -1674,17 +1762,7 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
             )
 
     sensor_state = accumulator.as_sensor_state()
-    if energy_changed or runtime.energy_state is None:
-        runtime.energy_state = sensor_state
-        runtime_updated = True
-        primary_total = float(sensor_state.get("primary", {}).get("energy_sum", 0.0))
-        boost_total = float(sensor_state.get("boost", {}).get("energy_sum", 0.0))
-        _LOGGER.info(
-            "Updated cumulative energy state for %s: primary=%.3f kWh boost=%.3f kWh",
-            entry_identifier,
-            primary_total,
-            boost_total,
-        )
+    energy_state_changed = bool(energy_changed or runtime.energy_state is None)
 
     for zone_key, summary in zone_summaries.items():
         report_day, runtime_hours, scheduled_hours = summary
@@ -1700,11 +1778,30 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
             "energy_sum": float(zone_energy.get("energy_sum", 0.0)),
         }
 
-    runtime.statistics_recent = recent_measurements
+    dispatch_needed = energy_state_changed or bool(zone_summaries)
+
+    return ZoneProcessingResult(
+        statistics_samples=statistics_samples,
+        sensor_state=sensor_state,
+        recent_measurements=recent_measurements,
+        energy_state_changed=energy_state_changed,
+        dispatch_needed=dispatch_needed,
+    )
+
+
+def _submit_statistics(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    controller: "SecuremtrController",
+    statistics_samples: Mapping[str, list[StatisticData]],
+) -> None:
+    """Record prepared statistic samples for each zone."""
 
     energy_entity_ids = _energy_sensor_entity_ids(hass, entry, controller)
 
     for zone_key, samples in statistics_samples.items():
+        if not samples:
+            continue
         entity_id = energy_entity_ids.get(zone_key)
         if entity_id is None:
             continue
@@ -1751,13 +1848,37 @@ async def consumption_metrics(  # noqa: C901 - high-level workflow orchestration
                 statistic_id,
             )
 
-    if runtime_updated:
+
+def _update_runtime_state(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    result: ZoneProcessingResult,
+    entry_identifier: str,
+    processed_rows: int,
+) -> None:
+    """Persist runtime state derived from the latest consumption refresh."""
+
+    runtime.statistics_recent = result.recent_measurements
+
+    if result.energy_state_changed:
+        runtime.energy_state = result.sensor_state
+        primary_total = float(result.sensor_state.get("primary", {}).get("energy_sum", 0.0))
+        boost_total = float(result.sensor_state.get("boost", {}).get("energy_sum", 0.0))
+        _LOGGER.info(
+            "Updated cumulative energy state for %s: primary=%.3f kWh boost=%.3f kWh",
+            entry_identifier,
+            primary_total,
+            boost_total,
+        )
+
+    if result.dispatch_needed:
         async_dispatch_runtime_update(hass, entry.entry_id)
 
     runtime.consumption_refresh_pending = False
     _LOGGER.debug(
         "Secure Meters consumption metrics updated (%s entries)",
-        len(processed_rows),
+        processed_rows,
     )
 
 
