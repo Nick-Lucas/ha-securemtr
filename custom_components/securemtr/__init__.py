@@ -65,6 +65,7 @@ from .utils import (
     safe_anchor_datetime as safe_anchor_datetime,
     split_runtime_segments as split_runtime_segments,
 )
+from .zones import ZONE_KEYS
 
 DOMAIN = "securemtr"
 
@@ -96,7 +97,6 @@ ENERGY_STORE_VERSION = 1
 SERVICE_RESET_ENERGY = "reset_energy_accumulator"
 ATTR_ENTRY_ID = "entry_id"
 ATTR_ZONE = "zone"
-ENERGY_ZONES = ("primary", "boost")
 _RESET_SERVICE_FLAG = "_reset_service_registered"
 _LOGIN_RETRY_DELAY = 5.0
 _MAX_IMMEDIATE_STARTUP_RETRIES = 2
@@ -115,7 +115,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     schema = vol.Schema(
         {
             vol.Required(ATTR_ENTRY_ID): str,
-            vol.Optional(ATTR_ZONE, default=ENERGY_ZONES[0]): vol.In(ENERGY_ZONES),
+            vol.Optional(ATTR_ZONE, default=ZONE_KEYS[0]): vol.In(ZONE_KEYS),
         }
     )
 
@@ -540,7 +540,7 @@ def _energy_sensor_entity_ids(
 
     registry = er.async_get(hass)
     entity_ids: dict[str, str] = {}
-    suffixes = {zone: f"_{zone}_energy_kwh" for zone in ENERGY_ZONES}
+    suffixes = {zone: f"_{zone}_energy_kwh" for zone in ZONE_KEYS}
 
     domain_state = hass.data.get(DOMAIN, {})
     runtime = domain_state.get(entry.entry_id)
