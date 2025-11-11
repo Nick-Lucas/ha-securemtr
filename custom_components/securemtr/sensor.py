@@ -13,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData
 from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
-from .zones import ZONE_METADATA
+from .zones import ZONE_METADATA, ZoneMetadata
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,52 +50,40 @@ async def async_setup_entry(
         sensors[0].unique_id,
     )
 
-    for zone_key, metadata in ZONE_METADATA.items():
+    for metadata in ZONE_METADATA.values():
         label = metadata.label
-        translations = metadata.translation_keys
-        sensors.append(
-            SecuremtrEnergyTotalSensor(
-                runtime,
-                controller,
-                entry,
-                zone_key,
-                translations["energy"],
-            )
+        energy_sensor = SecuremtrEnergyTotalSensor(
+            runtime,
+            controller,
+            entry,
+            metadata,
         )
+        sensors.append(energy_sensor)
         _LOGGER.info(
             "Prepared SecureMTR %s energy sensor (entity_id=%s, unique_id=%s)",
             label,
-            sensors[-1].entity_id,
-            sensors[-1].unique_id,
+            energy_sensor.entity_id,
+            energy_sensor.unique_id,
         )
-        sensors.append(
-            SecuremtrDailyDurationSensor(
+
+        for metric_key, translation_key in metadata.translation_keys.items():
+            if metric_key == "energy":
+                continue
+            duration_sensor = SecuremtrDailyDurationSensor(
                 runtime,
                 controller,
                 entry,
-                zone_key,
-                "runtime",
-                translations["runtime"],
-                "runtime_daily",
+                metadata,
+                metric_key,
+                translation_key,
             )
-        )
-        sensors.append(
-            SecuremtrDailyDurationSensor(
-                runtime,
-                controller,
-                entry,
-                zone_key,
-                "scheduled",
-                translations["scheduled"],
-                "scheduled_daily",
+            sensors.append(duration_sensor)
+            _LOGGER.debug(
+                "Prepared SecureMTR %s %s sensor (unique_id=%s)",
+                label,
+                metric_key,
+                duration_sensor.unique_id,
             )
-        )
-        _LOGGER.debug(
-            "Prepared SecureMTR %s runtime/schedule sensors (unique_ids=%s, %s)",
-            label,
-            sensors[-2].unique_id,
-            sensors[-1].unique_id,
-        )
 
     async_add_entities(sensors)
     _LOGGER.info(
@@ -206,17 +194,22 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
         entry: ConfigEntry,
-        zone: str,
-        translation_key: str,
+        metadata: ZoneMetadata,
     ) -> None:
         """Initialise the energy total sensor for the requested zone."""
 
         super().__init__(runtime, controller, entry)
-        self._zone = zone
-        self._attr_translation_key = translation_key
+        self._metadata = metadata
+        self._zone = metadata.key
+        translation_key = metadata.translation_keys.get("energy")
+        if translation_key:
+            self._attr_translation_key = translation_key
         identifier_slug = self._identifier_slug()
-        self._attr_unique_id = f"{identifier_slug}_{zone}_energy_kwh"
-        self.entity_id = f"sensor.securemtr_{identifier_slug}_{zone}_energy_kwh"
+        suffix = metadata.sensor_suffixes.get("energy")
+        if suffix is None:
+            suffix = f"{metadata.key}_energy_kwh"
+        self._attr_unique_id = f"{identifier_slug}_{suffix}"
+        self.entity_id = f"sensor.securemtr_{identifier_slug}_{suffix}"
 
     async def async_added_to_hass(self) -> None:
         """Register created energy sensors with runtime context."""
@@ -277,18 +270,21 @@ class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
         runtime: SecuremtrRuntimeData,
         controller: SecuremtrController,
         entry: ConfigEntry,
-        zone: str,
+        metadata: ZoneMetadata,
         metric: str,
         translation_key: str,
-        unique_suffix: str,
     ) -> None:
         """Initialise the daily duration sensor for the requested zone."""
 
         super().__init__(runtime, controller, entry)
-        self._zone = zone
+        self._metadata = metadata
+        self._zone = metadata.key
         self._metric = metric
         self._attr_translation_key = translation_key
-        self._attr_unique_id = f"{self._identifier_slug()}_{zone}_{unique_suffix}"
+        suffix = metadata.sensor_suffixes.get(metric)
+        if suffix is None:
+            suffix = f"{metadata.key}_{metric}_daily"
+        self._attr_unique_id = f"{self._identifier_slug()}_{suffix}"
 
     @property
     def native_value(self) -> float | None:
