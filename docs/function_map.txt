@@ -24,7 +24,7 @@ custom_components.securemtr.__init__._async_fetch_energy_samples: Fetch energy h
 custom_components.securemtr.__init__.consumption_metrics: Coordinate connection validation, sample preparation, zone processing, statistic submission, and runtime updates for daily energy history.
 custom_components.securemtr.statistics.PreparedSamples: Represent normalised consumption samples ready for processing.
 custom_components.securemtr.statistics.ZoneProcessingResult: Collect the outcomes from zone-level consumption processing.
-custom_components.securemtr.statistics._read_zone_programs: Fetch and canonicalise weekly programs for each zone.
+custom_components.securemtr.runtime_helpers.async_read_zone_programs: Fetch weekly programs for each zone and their canonical forms.
 custom_components.securemtr.statistics._build_zone_contexts: Construct zone contexts describing metadata and schedules.
 custom_components.securemtr.statistics._build_zone_calibrations: Generate per-zone energy calibrations.
 custom_components.securemtr.statistics._process_zone_records: Update accumulators and build statistic samples for each zone.

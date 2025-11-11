@@ -424,7 +424,7 @@ async def test_schedule_button_logs_program(caplog: pytest.LogCaptureFixture) ->
     assert isinstance(schedule_button, SecuremtrLogWeeklyScheduleButton)
 
     schedule_button.hass = SimpleNamespace()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         await schedule_button.async_press()
 
     assert backend.read_calls == ["primary", "boost"]
@@ -434,6 +434,14 @@ async def test_schedule_button_logs_program(caplog: pytest.LogCaptureFixture) ->
     assert any("boost zone" in record for record in caplog.messages)
     assert any("Monday" in record and "01:00" in record for record in caplog.messages)
     assert any("Saturday" in record and "08:00" in record for record in caplog.messages)
+    assert any(
+        "Canonical weekly schedule" in record and "primary zone" in record
+        for record in caplog.messages
+    )
+    assert any(
+        "Canonical weekly schedule" in record and "boost zone" in record
+        for record in caplog.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -463,6 +471,7 @@ async def test_schedule_button_backend_error(caplog: pytest.LogCaptureFixture) -
         "Failed to read Secure Meters weekly schedule" in record
         for record in caplog.messages
     )
+    assert any("missing zones" in record for record in caplog.messages)
 
 
 @pytest.mark.asyncio

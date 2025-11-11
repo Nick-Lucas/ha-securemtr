@@ -12,6 +12,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
+from .schedule import canonicalize_weekly
+from .zones import ZONE_METADATA
 
 if TYPE_CHECKING:
     from . import SecuremtrController, SecuremtrRuntimeData
@@ -131,6 +133,34 @@ async def async_read_zone_program(
     return None
 
 
+async def async_read_zone_programs(
+    backend: BeanbagBackend,
+    session: BeanbagSession,
+    websocket: ClientWebSocketResponse,
+    *,
+    gateway_id: str,
+    entry_identifier: str,
+) -> tuple[dict[str, WeeklyProgram | None], dict[str, list[tuple[int, int]] | None]]:
+    """Fetch weekly programs for each zone and their canonical forms."""
+
+    programs: dict[str, WeeklyProgram | None] = {}
+    canonicals: dict[str, list[tuple[int, int]] | None] = {}
+
+    for zone_key in ZONE_METADATA:
+        program = await async_read_zone_program(
+            backend,
+            session,
+            websocket,
+            gateway_id=gateway_id,
+            zone=zone_key,
+            entry_identifier=entry_identifier,
+        )
+        programs[zone_key] = program
+        canonicals[zone_key] = canonicalize_weekly(program) if program else None
+
+    return programs, canonicals
+
+
 def controller_gateway_operation(
     method_name: str, /, **operation_kwargs: Any
 ) -> OperationCallable[_ResultT]:
@@ -158,5 +188,6 @@ def controller_gateway_operation(
 __all__ = [
     "async_mutate_runtime",
     "async_read_zone_program",
+    "async_read_zone_programs",
     "controller_gateway_operation",
 ]

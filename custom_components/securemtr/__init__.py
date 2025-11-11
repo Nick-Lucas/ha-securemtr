@@ -55,10 +55,10 @@ from .statistics import (
     _build_zone_contexts as _build_zone_contexts,
     _build_zone_statistics_samples as _build_zone_statistics_samples,
     _process_zone_records as _process_zone_records,
-    _read_zone_programs as _read_zone_programs,
     _resolve_anchor as _resolve_anchor,
     _submit_statistics_samples as _submit_statistics_samples,
 )
+from .runtime_helpers import async_read_zone_programs
 from .utils import (
     EnergyCalibration as EnergyCalibration,
     assign_report_day,
@@ -1506,7 +1506,7 @@ async def _process_zone_samples(
 ) -> ZoneProcessingResult:
     """Apply per-zone calibrations, persistence, and statistic preparation."""
 
-    programs, canonicals = await _read_zone_programs(
+    programs, canonicals = await async_read_zone_programs(
         runtime.backend,
         session,
         websocket,

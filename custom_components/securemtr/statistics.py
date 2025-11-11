@@ -18,7 +18,7 @@ from homeassistant.util import dt as dt_util
 from . import runtime_helpers
 from .beanbag import BeanbagBackend, BeanbagSession, WeeklyProgram
 from .energy import EnergyAccumulator
-from .schedule import canonicalize_weekly, day_intervals
+from .schedule import day_intervals
 from .utils import (
     EnergyCalibration,
     calibrate_energy_scale,
@@ -73,34 +73,6 @@ class ZoneProcessingResult:
     recent_measurements: dict[str, Any]
     energy_state_changed: bool
     dispatch_needed: bool
-
-
-async def _read_zone_programs(
-    backend: BeanbagBackend,
-    session: BeanbagSession,
-    websocket: ClientWebSocketResponse,
-    *,
-    gateway_id: str,
-    entry_identifier: str,
-) -> tuple[dict[str, WeeklyProgram | None], dict[str, list[tuple[int, int]] | None]]:
-    """Fetch and canonicalise weekly programs for each zone."""
-
-    programs: dict[str, WeeklyProgram | None] = {}
-    canonicals: dict[str, list[tuple[int, int]] | None] = {}
-
-    for zone_key in ZONE_METADATA:
-        program = await runtime_helpers.async_read_zone_program(
-            backend,
-            session,
-            websocket,
-            gateway_id=gateway_id,
-            zone=zone_key,
-            entry_identifier=entry_identifier,
-        )
-        programs[zone_key] = program
-        canonicals[zone_key] = canonicalize_weekly(program) if program else None
-
-    return programs, canonicals
 
 
 def _build_zone_contexts(
