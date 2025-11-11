@@ -12,6 +12,7 @@ import pytest
 
 import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import (
+    DEFAULT_DEVICE_LABEL,
     DOMAIN,
     SecuremtrController,
     SecuremtrRuntimeData,
@@ -25,6 +26,7 @@ from custom_components.securemtr.button import (
     SecuremtrTimedBoostButton,
     async_setup_entry,
 )
+from custom_components.securemtr.entity import controller_display_label
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
@@ -99,6 +101,40 @@ def _create_runtime() -> tuple[SecuremtrRuntimeData, DummyBackend]:
     runtime.timed_boost_enabled = True
     runtime.controller_ready.set()
     return runtime, backend
+
+
+def test_controller_display_label_fallbacks() -> None:
+    """Verify controller labels fall back through metadata attributes."""
+
+    controller = SecuremtrController(
+        identifier=" controller-1 ",
+        name="  ",
+        gateway_id=" gateway-1 ",
+        serial_number=None,
+        firmware_version=None,
+        model=None,
+    )
+    assert controller_display_label(controller) == "controller-1"
+
+    controller_gateway = SecuremtrController(
+        identifier=" ",
+        name="",
+        gateway_id=" gateway-1 ",
+        serial_number="  ",
+        firmware_version=None,
+        model=None,
+    )
+    assert controller_display_label(controller_gateway) == "gateway-1"
+
+    controller_missing = SecuremtrController(
+        identifier=" ",
+        name="",
+        gateway_id=" ",
+        serial_number="  ",
+        firmware_version=None,
+        model=None,
+    )
+    assert controller_display_label(controller_missing) == DEFAULT_DEVICE_LABEL
 
 
 @pytest.fixture(autouse=True)
@@ -359,7 +395,9 @@ async def test_schedule_button_logs_program(caplog: pytest.LogCaptureFixture) ->
         await schedule_button.async_press()
 
     assert backend.read_calls == ["primary", "boost"]
+    controller_label = controller_display_label(runtime.controller)
     assert any("primary zone" in record for record in caplog.messages)
+    assert any(controller_label in record for record in caplog.messages)
     assert any("boost zone" in record for record in caplog.messages)
     assert any("Monday" in record and "01:00" in record for record in caplog.messages)
     assert any("Saturday" in record and "08:00" in record for record in caplog.messages)
