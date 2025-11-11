@@ -18,7 +18,12 @@ from . import (
     SecuremtrRuntimeData,
     runtime_update_signal,
 )
-from .runtime_helpers import MutationCallable, OperationCallable, async_mutate_runtime
+from .runtime_helpers import (
+    MutationCallable,
+    OperationCallable,
+    async_mutate_runtime,
+    controller_gateway_operation,
+)
 
 _CONTROLLER_READY_TIMEOUT = 15.0
 
@@ -195,4 +200,32 @@ class SecuremtrRuntimeEntityMixin:
             error_message=error_message,
             exception_types=exception_tuple,
             write_ha_state=write_ha_state,
+        )
+
+
+class SecuremtrCommandMixin(SecuremtrRuntimeEntityMixin):
+    """Provide helpers for executing controller gateway commands."""
+
+    async def _async_controller_command(
+        self,
+        method_name: str,
+        /,
+        *,
+        runtime_update: MutationCallable,
+        log_context: str,
+        error_message: str | None = None,
+        exception_types: tuple[type[Exception], ...] | type[Exception] | None = None,
+        write_state: bool = False,
+        **operation_kwargs: Any,
+    ) -> Any:
+        """Execute a controller command using the runtime mutation helper."""
+
+        operation = controller_gateway_operation(method_name, **operation_kwargs)
+        return await self._async_mutate(
+            operation=operation,
+            mutation=runtime_update,
+            log_context=log_context,
+            error_message=error_message,
+            exception_types=exception_types,
+            write_state=write_state,
         )

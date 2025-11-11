@@ -23,11 +23,12 @@ from . import (
 )
 from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
 from .entity import (
+    SecuremtrCommandMixin,
     SecuremtrRuntimeEntityMixin,
     async_get_ready_controller,
     controller_display_label,
 )
-from .runtime_helpers import async_read_zone_program, controller_gateway_operation
+from .runtime_helpers import async_read_zone_program
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -207,7 +208,7 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
         return formatted
 
 
-class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
+class SecuremtrTimedBoostButton(SecuremtrCommandMixin, ButtonEntity):
     """Trigger a timed boost run for a fixed duration."""
 
     def __init__(
@@ -234,11 +235,10 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
 
         duration = self._duration
 
-        await self._async_mutate(
-            operation=controller_gateway_operation(
-                "start_timed_boost", duration_minutes=duration
-            ),
-            mutation=lambda data: self._apply_timed_boost_start(data, duration),
+        await self._async_controller_command(
+            "start_timed_boost",
+            duration_minutes=duration,
+            runtime_update=lambda data: self._apply_timed_boost_start(data, duration),
             log_context="Failed to start Secure Meters timed boost",
             exception_types=(BeanbagError, ValueError),
         )
@@ -257,7 +257,7 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         runtime.timed_boost_end_time = coerce_end_time(runtime.timed_boost_end_minute)
 
 
-class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
+class SecuremtrCancelBoostButton(SecuremtrCommandMixin, ButtonEntity):
     """Cancel an active timed boost run."""
 
     def __init__(
@@ -286,9 +286,9 @@ class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         if runtime.timed_boost_active is not True:
             raise HomeAssistantError("Timed boost is not currently active")
 
-        await self._async_mutate(
-            operation=controller_gateway_operation("stop_timed_boost"),
-            mutation=self._apply_timed_boost_stop,
+        await self._async_controller_command(
+            "stop_timed_boost",
+            runtime_update=self._apply_timed_boost_stop,
             log_context="Failed to cancel Secure Meters timed boost",
         )
 

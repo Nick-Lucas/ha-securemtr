@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 
 import pytest
 
+import custom_components.securemtr.entity as securemtr_entity
 import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import (
     DEFAULT_DEVICE_LABEL,
@@ -235,15 +236,33 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
         lambda hass_obj, entry_id: dispatcher_calls.append((hass_obj, entry_id)),
     )
 
-    helper_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    original_helper = runtime_helpers.async_mutate_runtime
+    helper_calls: list[dict[str, Any]] = []
+    original_helper = securemtr_entity.SecuremtrCommandMixin._async_controller_command
 
-    async def _wrapped_helper(*args: Any, **kwargs: Any) -> Any:
-        helper_calls.append((args, kwargs))
-        return await original_helper(*args, **kwargs)
+    async def _wrapped_helper(
+        self: Any,
+        method_name: str,
+        *,
+        runtime_update: Any,
+        **kwargs: Any,
+    ) -> Any:
+        helper_calls.append(
+            {
+                "self": self,
+                "method_name": method_name,
+                "runtime_update": runtime_update,
+                "kwargs": dict(kwargs),
+            }
+        )
+        return await original_helper(
+            self,
+            method_name,
+            runtime_update=runtime_update,
+            **kwargs,
+        )
 
     monkeypatch.setattr(
-        "custom_components.securemtr.entity.async_mutate_runtime",
+        "custom_components.securemtr.entity.SecuremtrCommandMixin._async_controller_command",
         _wrapped_helper,
     )
 
@@ -258,10 +277,13 @@ async def test_boost_button_triggers_backend(monkeypatch: pytest.MonkeyPatch) ->
     assert runtime.timed_boost_end_minute == (10 * 60 + 45)
     assert runtime.timed_boost_end_time == coerce_end_time(10 * 60 + 45)
     assert dispatcher_calls == [(hass_obj, "entry")]
+    assert helper_calls[0]["method_name"] == "start_timed_boost"
     assert (
-        helper_calls[0][1]["log_context"] == "Failed to start Secure Meters timed boost"
+        helper_calls[0]["kwargs"]["log_context"]
+        == "Failed to start Secure Meters timed boost"
     )
-    assert helper_calls[0][1]["write_ha_state"] is None
+    assert helper_calls[0]["kwargs"]["exception_types"] == (BeanbagError, ValueError)
+    assert helper_calls[0]["kwargs"].get("write_state", False) is False
 
     boost_button.hass = None
     await boost_button.async_press()
@@ -290,22 +312,33 @@ async def test_boost_button_helper_failure(monkeypatch: pytest.MonkeyPatch) -> N
         entity for entity in entities if entity.unique_id.endswith("boost_30")
     )
 
+    recorded_method: list[str] = []
     recorded_kwargs: dict[str, Any] = {}
 
-    async def _failing_helper(*args: Any, **kwargs: Any) -> Any:
+    async def _failing_helper(
+        self: Any,
+        method_name: str,
+        *,
+        runtime_update: Any,
+        **kwargs: Any,
+    ) -> Any:
+        recorded_method.append(method_name)
         recorded_kwargs.update(kwargs)
         raise HomeAssistantError("boom")
 
     monkeypatch.setattr(
-        "custom_components.securemtr.entity.async_mutate_runtime",
+        "custom_components.securemtr.entity.SecuremtrCommandMixin._async_controller_command",
         _failing_helper,
     )
 
     with pytest.raises(HomeAssistantError, match="boom"):
         await boost_button.async_press()
 
-    assert recorded_kwargs["log_context"] == "Failed to start Secure Meters timed boost"
-    assert recorded_kwargs["write_ha_state"] is None
+    assert recorded_method == ["start_timed_boost"]
+    assert (
+        recorded_kwargs["log_context"] == "Failed to start Secure Meters timed boost"
+    )
+    assert recorded_kwargs.get("write_state", False) is False
     assert backend.start_calls == []
 
 
@@ -539,15 +572,33 @@ async def test_cancel_button_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda hass_obj, entry_id: dispatcher_calls.append((hass_obj, entry_id)),
     )
 
-    helper_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    original_helper = runtime_helpers.async_mutate_runtime
+    helper_calls: list[dict[str, Any]] = []
+    original_helper = securemtr_entity.SecuremtrCommandMixin._async_controller_command
 
-    async def _wrapped_helper(*args: Any, **kwargs: Any) -> Any:
-        helper_calls.append((args, kwargs))
-        return await original_helper(*args, **kwargs)
+    async def _wrapped_helper(
+        self: Any,
+        method_name: str,
+        *,
+        runtime_update: Any,
+        **kwargs: Any,
+    ) -> Any:
+        helper_calls.append(
+            {
+                "self": self,
+                "method_name": method_name,
+                "runtime_update": runtime_update,
+                "kwargs": dict(kwargs),
+            }
+        )
+        return await original_helper(
+            self,
+            method_name,
+            runtime_update=runtime_update,
+            **kwargs,
+        )
 
     monkeypatch.setattr(
-        "custom_components.securemtr.entity.async_mutate_runtime",
+        "custom_components.securemtr.entity.SecuremtrCommandMixin._async_controller_command",
         _wrapped_helper,
     )
 
@@ -560,6 +611,12 @@ async def test_cancel_button_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
     assert runtime.timed_boost_end_minute is None
     assert runtime.timed_boost_end_time is None
     assert dispatcher_calls == [(hass_obj, "entry")]
+    assert helper_calls[0]["method_name"] == "stop_timed_boost"
+    assert (
+        helper_calls[0]["kwargs"]["log_context"]
+        == "Failed to cancel Secure Meters timed boost"
+    )
+    assert helper_calls[0]["kwargs"].get("write_state", False) is False
 
     with pytest.raises(HomeAssistantError):
         await cancel_button.async_press()

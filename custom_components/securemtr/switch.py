@@ -10,8 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SecuremtrController, SecuremtrRuntimeData
-from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
-from .runtime_helpers import controller_gateway_operation
+from .entity import SecuremtrCommandMixin, async_get_ready_controller
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,7 +32,7 @@ async def async_setup_entry(
     )
 
 
-class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
+class SecuremtrPowerSwitch(SecuremtrCommandMixin, SwitchEntity):
     """Represent a maintained power toggle for the Secure Meters controller."""
 
     def __init__(
@@ -68,9 +67,9 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Drive the backend to the requested primary power state."""
 
         method_name = "turn_controller_on" if turn_on else "turn_controller_off"
-        await self._async_mutate(
-            operation=controller_gateway_operation(method_name),
-            mutation=lambda data: self._apply_power_state(data, turn_on),
+        await self._async_controller_command(
+            method_name,
+            runtime_update=lambda data: self._apply_power_state(data, turn_on),
             log_context="Failed to toggle Secure Meters controller",
             write_state=True,
         )
@@ -85,7 +84,7 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         runtime.primary_power_on = turn_on
 
 
-class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
+class SecuremtrTimedBoostSwitch(SecuremtrCommandMixin, SwitchEntity):
     """Expose the timed boost feature toggle reported by Beanbag."""
 
     def __init__(
@@ -119,11 +118,10 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
     async def _async_set_timed_boost(self, enabled: bool) -> None:
         """Drive the backend to the requested timed boost state."""
 
-        await self._async_mutate(
-            operation=controller_gateway_operation(
-                "set_timed_boost_enabled", enabled=enabled
-            ),
-            mutation=lambda data: self._apply_timed_boost_state(data, enabled),
+        await self._async_controller_command(
+            "set_timed_boost_enabled",
+            enabled=enabled,
+            runtime_update=lambda data: self._apply_timed_boost_state(data, enabled),
             log_context="Failed to toggle Secure Meters timed boost feature",
             write_state=True,
         )

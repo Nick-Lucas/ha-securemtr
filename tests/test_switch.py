@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, cast
 
 import pytest
 
+import custom_components.securemtr.entity as securemtr_entity
 import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import (
     DOMAIN,
@@ -152,15 +153,33 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
         lambda hass_obj, entry_id: dispatcher_calls.append((hass_obj, entry_id)),
     )
 
-    helper_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    original_helper = runtime_helpers.async_mutate_runtime
+    helper_calls: list[dict[str, Any]] = []
+    original_helper = securemtr_entity.SecuremtrCommandMixin._async_controller_command
 
-    async def _wrapped_helper(*args: Any, **kwargs: Any) -> Any:
-        helper_calls.append((args, kwargs))
-        return await original_helper(*args, **kwargs)
+    async def _wrapped_helper(
+        self: Any,
+        method_name: str,
+        *,
+        runtime_update: Any,
+        **kwargs: Any,
+    ) -> Any:
+        helper_calls.append(
+            {
+                "self": self,
+                "method_name": method_name,
+                "runtime_update": runtime_update,
+                "kwargs": dict(kwargs),
+            }
+        )
+        return await original_helper(
+            self,
+            method_name,
+            runtime_update=runtime_update,
+            **kwargs,
+        )
 
     monkeypatch.setattr(
-        "custom_components.securemtr.entity.async_mutate_runtime",
+        "custom_components.securemtr.entity.SecuremtrCommandMixin._async_controller_command",
         _wrapped_helper,
     )
 
@@ -179,10 +198,12 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert runtime.primary_power_on is True
     assert power_switch.is_on is True
     assert state_writes == ["write"]
+    assert helper_calls[0]["method_name"] == "turn_controller_on"
     assert (
-        helper_calls[0][1]["log_context"] == "Failed to toggle Secure Meters controller"
+        helper_calls[0]["kwargs"]["log_context"]
+        == "Failed to toggle Secure Meters controller"
     )
-    assert helper_calls[0][1]["write_ha_state"] is _record_state_write
+    assert helper_calls[0]["kwargs"].get("write_state") is True
 
     power_switch.hass = None
     state_writes.clear()
@@ -210,11 +231,12 @@ async def test_switch_setup_creates_entity(monkeypatch: pytest.MonkeyPatch) -> N
     assert runtime.timed_boost_enabled is True
     assert timed_switch.is_on is True
     assert timed_state_writes == ["write"]
+    assert helper_calls[2]["method_name"] == "set_timed_boost_enabled"
     assert (
-        helper_calls[2][1]["log_context"]
+        helper_calls[2]["kwargs"]["log_context"]
         == "Failed to toggle Secure Meters timed boost feature"
     )
-    assert helper_calls[2][1]["write_ha_state"] is _record_timed_state_write
+    assert helper_calls[2]["kwargs"].get("write_state") is True
 
     timed_switch.hass = None
     timed_state_writes.clear()
@@ -243,22 +265,33 @@ async def test_power_switch_helper_failure(monkeypatch: pytest.MonkeyPatch) -> N
     )
     switch.hass = SimpleNamespace()
 
+    recorded_method: list[str] = []
     recorded_kwargs: dict[str, Any] = {}
 
-    async def _failing_helper(*args: Any, **kwargs: Any) -> Any:
+    async def _failing_helper(
+        self: Any,
+        method_name: str,
+        *,
+        runtime_update: Any,
+        **kwargs: Any,
+    ) -> Any:
+        recorded_method.append(method_name)
         recorded_kwargs.update(kwargs)
         raise HomeAssistantError("boom")
 
     monkeypatch.setattr(
-        "custom_components.securemtr.entity.async_mutate_runtime",
+        "custom_components.securemtr.entity.SecuremtrCommandMixin._async_controller_command",
         _failing_helper,
     )
 
     with pytest.raises(HomeAssistantError, match="boom"):
         await switch.async_turn_on()
 
-    assert recorded_kwargs["log_context"] == "Failed to toggle Secure Meters controller"
-    assert recorded_kwargs["write_ha_state"].__self__ is switch
+    assert recorded_method == ["turn_controller_on"]
+    assert (
+        recorded_kwargs["log_context"] == "Failed to toggle Secure Meters controller"
+    )
+    assert recorded_kwargs.get("write_state") is True
 
 
 def test_power_switch_requires_config_entry() -> None:
