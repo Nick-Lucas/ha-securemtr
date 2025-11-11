@@ -184,7 +184,7 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
     """Expose the cumulative energy total for a controller zone."""
 
     _attr_device_class = SensorDeviceClass.ENERGY
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_state_class: SensorStateClass | None = None
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
 
     def __init__(
@@ -232,6 +232,12 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
         energy_raw = zone_state.get("energy_sum")
         if isinstance(energy_raw, (int, float)):
             return float(energy_raw)
+        return None
+
+    @property
+    def state_class(self) -> SensorStateClass | None:
+        """Return None because recorder statistics are provided externally."""
+
         return None
 
     @property
