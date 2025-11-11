@@ -101,7 +101,7 @@ from custom_components.securemtr.sensor import (
     SecuremtrEnergyTotalSensor,
     async_setup_entry as sensor_async_setup_entry,
 )
-from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass
 from custom_components.securemtr.utils import assign_report_day
 from custom_components.securemtr.schedule import canonicalize_weekly, day_intervals
 from custom_components.securemtr.entity import slugify_identifier
@@ -2644,6 +2644,28 @@ async def test_energy_dashboard_flow_validates_sensor_states(
 
     backend = BatchedBackend(fake_session, batches)
 
+    recorded_statistics: list[tuple[StatisticMetaData, list[StatisticData]]] = []
+
+    def _capture_statistics(
+        _hass: HomeAssistant,
+        metadata: StatisticMetaData,
+        statistics: Iterable[StatisticData],
+    ) -> None:
+        recorded_statistics.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        _capture_statistics,
+    )
+
+    def _fail_import(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("unexpected recorder statistics writer invoked")
+
+    monkeypatch.setattr(
+        "homeassistant.components.recorder.statistics.async_import_statistics",
+        _fail_import,
+    )
+
     monkeypatch.setattr(
         "custom_components.securemtr.async_get_clientsession",
         lambda hass_obj: fake_session,
@@ -2691,8 +2713,7 @@ async def test_energy_dashboard_flow_validates_sensor_states(
 
     assert primary_sensor.device_class is SensorDeviceClass.ENERGY
     assert primary_sensor.device_class == "energy"
-    assert primary_sensor.state_class is SensorStateClass.TOTAL_INCREASING
-    assert primary_sensor.state_class == "total_increasing"
+    assert primary_sensor.state_class is None
     assert primary_sensor.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
     assert boost_sensor.device_class is SensorDeviceClass.ENERGY
     assert boost_sensor.device_class == "energy"
@@ -2742,6 +2763,12 @@ async def test_energy_dashboard_flow_validates_sensor_states(
 
     initial_dispatch_count = len(dispatch_calls)
     initial_history_count = len(backend.energy_history_calls)
+    assert recorded_statistics
+    expected_stat_ids = {
+        PRIMARY_ENERGY_ENTITY_ID.replace("sensor.", "sensor:"),
+        BOOST_ENERGY_ENTITY_ID.replace("sensor.", "sensor:"),
+    }
+    assert {metadata["statistic_id"] for metadata, _ in recorded_statistics} == expected_stat_ids
 
     for step, batch in enumerate(batches[1:], start=1):
         await consumption_metrics(hass, entry)
