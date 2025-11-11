@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from importlib import import_module
 import logging
 from types import MappingProxyType
@@ -18,8 +18,7 @@ from homeassistant import config_entries as hass_config_entries
 from homeassistant.components.recorder.statistics import (
     StatisticData,
     StatisticMeanType,
-    StatisticMetaData,
-    async_add_external_statistics,
+    async_add_external_statistics as async_add_external_statistics,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -28,7 +27,6 @@ from homeassistant.const import (
     CONF_PASSWORD,
     CONF_TIME_ZONE,
     EVENT_HOMEASSISTANT_CLOSE,
-    UnitOfEnergy,
 )
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
@@ -46,20 +44,27 @@ from .beanbag import (
     BeanbagGateway,
     BeanbagSession,
     BeanbagStateSnapshot,
-    WeeklyProgram,
 )
 from .energy import EnergyAccumulator
-from .schedule import canonicalize_weekly, day_intervals
-from .utils import (
-    EnergyCalibration,
-    assign_report_day,
-    calibrate_energy_scale,
-    energy_from_row,
-    safe_anchor_datetime,
-    split_runtime_segments,
+from .statistics import (
+    PreparedSamples as PreparedSamples,
+    StatisticsOptions as StatisticsOptions,
+    ZoneContext as ZoneContext,
+    ZoneProcessingResult as ZoneProcessingResult,
+    _build_zone_calibrations as _build_zone_calibrations,
+    _build_zone_contexts as _build_zone_contexts,
+    _build_zone_statistics_samples as _build_zone_statistics_samples,
+    _process_zone_records as _process_zone_records,
+    _read_zone_programs as _read_zone_programs,
+    _resolve_anchor as _resolve_anchor,
+    _submit_statistics_samples as _submit_statistics_samples,
 )
-from .zones import ZONE_METADATA
-from . import runtime_helpers
+from .utils import (
+    EnergyCalibration as EnergyCalibration,
+    assign_report_day,
+    safe_anchor_datetime as safe_anchor_datetime,
+    split_runtime_segments as split_runtime_segments,
+)
 
 DOMAIN = "securemtr"
 
@@ -394,53 +399,6 @@ def _prune_helper_candidates(
                 helpers.remove(helper_entry)
             if not helpers:
                 helpers_by_source.pop(helper_key, None)
-
-
-@dataclass(slots=True)
-class StatisticsOptions:
-    """Represent statistics configuration derived from entry options."""
-
-    timezone: ZoneInfo
-    timezone_name: str
-    primary_anchor: time
-    boost_anchor: time
-    fallback_power_kw: float
-    prefer_device_energy: bool
-
-
-@dataclass(slots=True)
-class ZoneContext:
-    """Describe mapping and schedule context for a controller zone."""
-
-    label: str
-    energy_field: str
-    runtime_field: str
-    scheduled_field: str
-    energy_suffix: str
-    runtime_suffix: str
-    schedule_suffix: str
-    fallback_anchor: time
-    program: WeeklyProgram | None
-    canonical: list[tuple[int, int]] | None
-
-
-@dataclass(slots=True)
-class PreparedSamples:
-    """Represent normalised consumption samples ready for processing."""
-
-    rows: list[dict[str, Any]]
-    options: StatisticsOptions
-
-
-@dataclass(slots=True)
-class ZoneProcessingResult:
-    """Collect the outcomes from zone-level consumption processing."""
-
-    statistics_samples: dict[str, list[StatisticData]]
-    sensor_state: dict[str, Any]
-    recent_measurements: dict[str, Any]
-    energy_state_changed: bool
-    dispatch_needed: bool
 
 
 @dataclass(slots=True)
@@ -1548,80 +1506,18 @@ async def _process_zone_samples(
 ) -> ZoneProcessingResult:
     """Apply per-zone calibrations, persistence, and statistic preparation."""
 
-    primary_program = await runtime_helpers.async_read_zone_program(
+    programs, canonicals = await _read_zone_programs(
         runtime.backend,
         session,
         websocket,
         gateway_id=controller.gateway_id,
-        zone="primary",
-        entry_identifier=entry_identifier,
-    )
-    boost_program = await runtime_helpers.async_read_zone_program(
-        runtime.backend,
-        session,
-        websocket,
-        gateway_id=controller.gateway_id,
-        zone="boost",
         entry_identifier=entry_identifier,
     )
 
-    primary_canonical = (
-        canonicalize_weekly(primary_program) if primary_program is not None else None
+    contexts = _build_zone_contexts(options, programs, canonicals)
+    calibrations = _build_zone_calibrations(
+        processed_rows, contexts, options, entry_identifier
     )
-    boost_canonical = (
-        canonicalize_weekly(boost_program) if boost_program is not None else None
-    )
-
-    programs = {"primary": primary_program, "boost": boost_program}
-    canonicals = {"primary": primary_canonical, "boost": boost_canonical}
-    anchors = {
-        zone_key: getattr(options, f"{zone_key}_anchor") for zone_key in programs
-    }
-
-    contexts: dict[str, ZoneContext] = {
-        zone_key: ZoneContext(
-            label=metadata.label,
-            energy_field=metadata.energy_field,
-            runtime_field=metadata.runtime_field,
-            scheduled_field=metadata.scheduled_field,
-            energy_suffix=metadata.energy_suffix,
-            runtime_suffix=metadata.runtime_suffix,
-            schedule_suffix=metadata.schedule_suffix,
-            fallback_anchor=anchors[zone_key],
-            program=programs[zone_key],
-            canonical=canonicals[zone_key],
-        )
-        for zone_key, metadata in ZONE_METADATA.items()
-    }
-
-    calibrations: dict[str, EnergyCalibration] = {
-        zone_key: calibrate_energy_scale(
-            processed_rows,
-            metadata.energy_field,
-            metadata.runtime_field,
-            options.fallback_power_kw,
-        )
-        for zone_key, metadata in ZONE_METADATA.items()
-    }
-
-    for zone_key, calibration in calibrations.items():
-        context = contexts[zone_key]
-        _LOGGER.info(
-            "%s calibration for %s: use_scale=%s scale=%.6f source=%s",
-            context.label,
-            entry_identifier,
-            calibration.use_scale,
-            calibration.scale,
-            calibration.source,
-        )
-
-    if not options.prefer_device_energy:
-        calibrations["primary"] = EnergyCalibration(
-            False, options.fallback_power_kw, "duration_power"
-        )
-        calibrations["boost"] = EnergyCalibration(
-            False, options.fallback_power_kw, "duration_power"
-        )
 
     store = runtime.energy_store
     if store is None:
@@ -1635,132 +1531,20 @@ async def _process_zone_samples(
 
     await accumulator.async_load()
 
+    (
+        statistics_samples,
+        zone_summaries,
+        energy_changed,
+    ) = await _process_zone_records(
+        accumulator,
+        processed_rows,
+        contexts,
+        calibrations,
+        options,
+        entry_identifier,
+    )
+
     recent_measurements: dict[str, Any] = dict(runtime.statistics_recent or {})
-    zone_summaries: dict[str, tuple[date, float | None, float | None]] = {}
-    statistics_samples: dict[str, list[StatisticData]] = {}
-    energy_changed = False
-
-    for zone_key, context in contexts.items():
-        calibration = calibrations[zone_key]
-        latest_runtime_hours: float | None = None
-        latest_scheduled_hours: float | None = None
-        latest_day: date | None = None
-        running_sum = accumulator.zone_total(zone_key)
-        zone_records: list[StatisticData] = []
-
-        for row in processed_rows:
-            report_day: date = row["report_day"]
-
-            energy_value = energy_from_row(
-                row,
-                context.energy_field,
-                context.runtime_field,
-                calibration,
-                options.fallback_power_kw,
-            )
-            energy_value = max(0.0, energy_value)
-            before_total = running_sum
-            updated = await accumulator.async_add_day(
-                zone_key, report_day, energy_value
-            )
-            zone_total = accumulator.zone_total(zone_key)
-            if updated:
-                energy_changed = True
-                _LOGGER.info(
-                    "SecureMTR %s energy on %s for %s: day=%.3f kWh cumulative=%.3f kWh",
-                    context.label,
-                    report_day.isoformat(),
-                    entry_identifier,
-                    energy_value,
-                    zone_total,
-                )
-
-            runtime_minutes = float(row.get(context.runtime_field, 0.0))
-            runtime_hours = max(runtime_minutes, 0.0) / 60.0
-
-            intervals: list[tuple[datetime, datetime]] = []
-            if context.program is not None and context.canonical is not None:
-                intervals = day_intervals(
-                    context.program,
-                    day=report_day,
-                    tz=options.timezone,
-                    canonical=context.canonical,
-                )
-
-            anchor, anchor_source, anchor_interval = _resolve_anchor(
-                report_day,
-                context,
-                options,
-                intervals,
-                runtime_hours,
-            )
-
-            scheduled_minutes = float(row.get(context.scheduled_field, 0.0))
-            scheduled_hours = max(scheduled_minutes, 0.0) / 60.0
-
-            _LOGGER.debug(
-                "%s energy sample for %s on %s (updated=%s): anchor_source=%s anchor=%s energy=%.3f runtime_h=%.2f scheduled_h=%.2f intervals=%d",
-                context.label,
-                entry_identifier,
-                report_day.isoformat(),
-                updated,
-                anchor_source,
-                anchor.isoformat(),
-                energy_value,
-                runtime_hours,
-                scheduled_hours,
-                len(intervals),
-            )
-
-            segment_energy = zone_total - before_total
-            if (
-                updated
-                and runtime_hours > 0
-                and energy_value > 0
-                and segment_energy > 0
-            ):
-                records = _build_zone_statistics_samples(
-                    anchor,
-                    runtime_hours,
-                    segment_energy,
-                    before_total,
-                    interval=anchor_interval,
-                )
-                if records:
-                    zone_records.extend(records)
-
-            running_sum = zone_total
-
-            latest_runtime_hours = runtime_hours
-            latest_scheduled_hours = scheduled_hours
-            latest_day = report_day
-
-        if zone_records:
-            first_record = zone_records[0]
-            last_record = zone_records[-1]
-            _LOGGER.debug(
-                "%s prepared %d statistic samples for %s: first_start=%s last_start=%s first_sum=%.3f last_sum=%.3f",
-                context.label,
-                len(zone_records),
-                zone_key,
-                first_record["start"].isoformat()
-                if isinstance(first_record.get("start"), datetime)
-                else first_record.get("start"),
-                last_record["start"].isoformat()
-                if isinstance(last_record.get("start"), datetime)
-                else last_record.get("start"),
-                float(first_record.get("sum", 0.0)),
-                float(last_record.get("sum", 0.0)),
-            )
-            statistics_samples[zone_key] = zone_records
-
-        if latest_day is not None:
-            zone_summaries[zone_key] = (
-                latest_day,
-                latest_runtime_hours,
-                latest_scheduled_hours,
-            )
-
     sensor_state = accumulator.as_sensor_state()
     energy_state_changed = bool(energy_changed or runtime.energy_state is None)
 
@@ -1789,6 +1573,7 @@ async def _process_zone_samples(
     )
 
 
+
 def _submit_statistics(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -1798,55 +1583,13 @@ def _submit_statistics(
     """Record prepared statistic samples for each zone."""
 
     energy_entity_ids = _energy_sensor_entity_ids(hass, entry, controller)
-
-    for zone_key, samples in statistics_samples.items():
-        if not samples:
-            continue
-        entity_id = energy_entity_ids.get(zone_key)
-        if entity_id is None:
-            continue
-        if "." not in entity_id:
-            _LOGGER.error(
-                "Skipping statistics for %s because entity_id %s is invalid",
-                zone_key,
-                entity_id,
-            )
-            continue
-        statistic_domain, object_id = entity_id.split(".", 1)
-        statistic_id = f"{statistic_domain}:{object_id}"
-        metadata: StatisticMetaData = {
-            "has_sum": True,
-            "mean_type": StatisticMeanType.NONE,
-            "name": None,
-            "source": statistic_domain,
-            "statistic_id": statistic_id,
-            "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
-            "unit_class": "energy",
-        }
-        try:
-            first_sample = samples[0]
-            last_sample = samples[-1]
-            _LOGGER.debug(
-                "Recording %d statistic samples for %s (statistic_id=%s): first_start=%s last_start=%s first_sum=%.3f last_sum=%.3f",
-                len(samples),
-                zone_key,
-                statistic_id,
-                first_sample["start"].isoformat()
-                if isinstance(first_sample.get("start"), datetime)
-                else first_sample.get("start"),
-                last_sample["start"].isoformat()
-                if isinstance(last_sample.get("start"), datetime)
-                else last_sample.get("start"),
-                float(first_sample.get("sum", 0.0)),
-                float(last_sample.get("sum", 0.0)),
-            )
-            async_add_external_statistics(hass, metadata, samples)
-        except HomeAssistantError:
-            _LOGGER.exception(
-                "Failed to add statistics for %s (statistic_id=%s)",
-                zone_key,
-                statistic_id,
-            )
+    _submit_statistics_samples(
+        hass,
+        statistics_samples,
+        energy_entity_ids,
+        statistic_writer=async_add_external_statistics,
+        mean_type=StatisticMeanType.NONE,
+    )
 
 
 def _update_runtime_state(
@@ -1982,130 +1725,6 @@ def _load_statistics_options(entry: ConfigEntry) -> StatisticsOptions:
         fallback_power_kw=fallback_power_kw,
         prefer_device_energy=prefer_device_energy,
     )
-
-
-def _build_zone_statistics_samples(
-    anchor: datetime,
-    runtime_hours: float,
-    segment_energy: float,
-    before_total: float,
-    *,
-    interval: tuple[datetime, datetime] | None = None,
-) -> list[StatisticData]:
-    """Return statistic samples for a runtime segment anchored to a day."""
-
-    if runtime_hours <= 0 or segment_energy <= 0:
-        return []
-
-    segments = split_runtime_segments(anchor, runtime_hours, segment_energy)
-    cumulative = before_total
-    records: list[StatisticData] = []
-    interval_start: datetime | None = None
-    interval_end: datetime | None = None
-    if interval is not None:
-        interval_start, interval_end = interval
-
-    for slot_start, _slot_hours, slot_energy in segments:
-        if slot_energy <= 0:
-            continue
-        record_start = slot_start
-        if interval_start is not None and interval_end is not None:
-            record_start = max(record_start, interval_start)
-            if record_start >= interval_end:
-                continue
-        cumulative += slot_energy
-        records.append(
-            StatisticData(
-                start=dt_util.as_utc(record_start),
-                sum=cumulative,
-                state=cumulative,
-            )
-        )
-
-    return records
-
-
-def _resolve_anchor(
-    report_day: date,
-    context: ZoneContext,
-    options: StatisticsOptions,
-    intervals: Iterable[tuple[datetime, datetime]],
-    runtime_hours: float,
-) -> tuple[datetime, str, tuple[datetime, datetime] | None]:
-    """Select a schedule-aware anchor and interval for the provided day."""
-
-    day_start = datetime(
-        report_day.year,
-        report_day.month,
-        report_day.day,
-        tzinfo=options.timezone,
-    )
-    day_end = day_start + timedelta(days=1)
-
-    fallback_anchor = safe_anchor_datetime(
-        report_day, context.fallback_anchor, options.timezone
-    )
-
-    selected_interval: tuple[datetime, datetime] | None = None
-    anchor_source = "configured"
-    anchor = fallback_anchor
-
-    runtime_seconds = max(runtime_hours, 0.0) * 3600.0
-    tolerance_seconds = 60.0
-    best_slack: float | None = None
-    best_offset: float | None = None
-    best_anchor: datetime | None = None
-
-    if runtime_seconds > 0.0:
-        for start, end in intervals:
-            if end <= start:
-                continue
-            clamped_start = max(start, day_start)
-            clamped_end = min(end, day_end)
-            if clamped_end <= clamped_start:
-                continue
-            span_seconds = (clamped_end - clamped_start).total_seconds()
-            slack = abs(span_seconds - runtime_seconds)
-            offset = abs((clamped_start - fallback_anchor).total_seconds())
-            allow_interval = runtime_seconds <= span_seconds + tolerance_seconds
-            candidate_interval: tuple[datetime, datetime] | None = None
-            if allow_interval:
-                candidate_interval = (clamped_start, clamped_end)
-
-            better = False
-            if best_slack is None or slack < best_slack - 1e-6:
-                better = True
-            elif best_slack is not None and abs(slack - best_slack) <= 1e-6:
-                if best_offset is None or offset < best_offset - 1e-6:
-                    better = True
-                elif best_offset is not None and abs(offset - best_offset) <= 1e-6:
-                    if selected_interval is None and candidate_interval is not None:
-                        better = True
-
-            if better:
-                best_slack = slack
-                best_offset = offset
-                best_anchor = clamped_start
-                selected_interval = candidate_interval
-
-    if best_anchor is not None:
-        anchor_source = "schedule"
-        anchor = best_anchor
-
-    if anchor < day_start:
-        anchor = day_start
-    elif anchor >= day_end:
-        anchor = day_end - timedelta(microseconds=1)
-
-    _LOGGER.debug(
-        "%s anchor for %s on %s using %s: %s",
-        context.label,
-        options.timezone_name,
-        report_day.isoformat(),
-        anchor_source,
-        anchor.isoformat(),
-    )
-    return anchor, anchor_source, selected_interval
 
 
 def _normalize_identifier(value: Any) -> str | None:

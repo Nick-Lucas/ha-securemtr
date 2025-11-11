@@ -102,7 +102,14 @@ from custom_components.securemtr.sensor import (
     async_setup_entry as sensor_async_setup_entry,
 )
 from homeassistant.components.sensor import SensorDeviceClass
-from custom_components.securemtr.utils import assign_report_day
+from custom_components.securemtr.statistics import (
+    _build_zone_calibrations as statistics_build_zone_calibrations,
+    _build_zone_contexts as statistics_build_zone_contexts,
+    _process_zone_records as statistics_process_zone_records,
+    _read_zone_programs as statistics_read_zone_programs,
+    _submit_statistics_samples as statistics_submit_statistics_samples,
+)
+from custom_components.securemtr.utils import assign_report_day, EnergyCalibration
 from custom_components.securemtr.schedule import canonicalize_weekly, day_intervals
 from custom_components.securemtr.entity import slugify_identifier
 from custom_components.securemtr.runtime_helpers import async_read_zone_program
@@ -1591,6 +1598,235 @@ async def test_prepare_consumption_samples_normalizes(
 
 
 @pytest.mark.asyncio
+async def test_read_zone_programs_canonicalises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure zone program retrieval canonicalises schedules."""
+
+    calls: list[tuple[str, str, str]] = []
+
+    program_primary = cast(WeeklyProgram, ((0, None, None),) * 7)
+
+    async def fake_read(
+        _backend: Any,
+        _session: Any,
+        _websocket: Any,
+        *,
+        gateway_id: str,
+        zone: str,
+        entry_identifier: str,
+    ) -> WeeklyProgram | None:
+        calls.append((zone, gateway_id, entry_identifier))
+        if zone == "primary":
+            return program_primary
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.runtime_helpers.async_read_zone_program",
+        fake_read,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.canonicalize_weekly",
+        lambda program: [1] if program is not None else None,
+    )
+
+    programs, canonicals = await statistics_read_zone_programs(
+        AsyncMock(),
+        AsyncMock(),
+        AsyncMock(),
+        gateway_id="gw-1",
+        entry_identifier="entry-123",
+    )
+
+    assert programs["primary"] is program_primary
+    assert programs["boost"] is None
+    assert canonicals["primary"] == [1]
+    assert canonicals["boost"] is None
+    assert calls == [("primary", "gw-1", "entry-123"), ("boost", "gw-1", "entry-123")]
+
+
+def test_build_zone_contexts_populates_fields() -> None:
+    """Verify zone contexts incorporate metadata and schedules."""
+
+    options = StatisticsOptions(
+        timezone=ZoneInfo("UTC"),
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(7, 0),
+        fallback_power_kw=2.0,
+        prefer_device_energy=True,
+    )
+    programs: dict[str, WeeklyProgram | None] = {"primary": (), "boost": None}
+    canonicals = {"primary": [(0, 60)], "boost": None}
+
+    contexts = statistics_build_zone_contexts(options, programs, canonicals)
+
+    primary = contexts["primary"]
+    assert primary.program == ()
+    assert primary.canonical == [(0, 60)]
+    assert primary.fallback_anchor == options.primary_anchor
+    assert primary.energy_field == "primary_energy_kwh"
+
+
+def test_build_zone_calibrations_respects_preferences(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirm calibration generation honours fallback behaviour."""
+
+    options = StatisticsOptions(
+        timezone=ZoneInfo("UTC"),
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(7, 0),
+        fallback_power_kw=3.5,
+        prefer_device_energy=False,
+    )
+    programs: dict[str, WeeklyProgram | None] = {"primary": None, "boost": None}
+    canonicals = {"primary": None, "boost": None}
+    contexts = statistics_build_zone_contexts(options, programs, canonicals)
+
+    captured: list[tuple[str, str]] = []
+
+    def fake_calibrate(
+        _rows: list[dict[str, Any]],
+        energy_field: str,
+        runtime_field: str,
+        _fallback: float,
+    ) -> EnergyCalibration:
+        captured.append((energy_field, runtime_field))
+        return EnergyCalibration(True, 1.0, "device")
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.calibrate_energy_scale",
+        fake_calibrate,
+    )
+
+    calibrations = statistics_build_zone_calibrations(
+        [{"report_day": date(2024, 1, 1)}],
+        contexts,
+        options,
+        "entry-calibration",
+    )
+
+    assert captured == [
+        ("primary_energy_kwh", "primary_active_minutes"),
+        ("boost_energy_kwh", "boost_active_minutes"),
+    ]
+    assert not calibrations["primary"].use_scale
+    assert calibrations["primary"].scale == options.fallback_power_kw
+    assert calibrations["primary"].source == "duration_power"
+    assert not calibrations["boost"].use_scale
+
+
+@pytest.mark.asyncio
+async def test_process_zone_records_updates_accumulator() -> None:
+    """Ensure per-zone processing updates totals and statistics."""
+
+    class RecordingAccumulator:
+        def __init__(self) -> None:
+            self.totals = {"primary": 0.0}
+            self.ledger: dict[tuple[str, date], float] = {}
+
+        def zone_total(self, zone: str) -> float:
+            return self.totals.get(zone, 0.0)
+
+        async def async_add_day(self, zone: str, report_day: date, energy: float) -> bool:
+            key = (zone, report_day)
+            previous = self.ledger.get(key)
+            self.ledger[key] = energy
+            if previous is not None and abs(previous - energy) <= 1e-6:
+                return False
+            delta = energy - (previous or 0.0)
+            self.totals[zone] = self.totals.get(zone, 0.0) + delta
+            return True
+
+    options = StatisticsOptions(
+        timezone=ZoneInfo("UTC"),
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(7, 0),
+        fallback_power_kw=2.0,
+        prefer_device_energy=True,
+    )
+    programs: dict[str, WeeklyProgram | None] = {"primary": None}
+    canonicals = {"primary": None}
+    contexts = {
+        "primary": ZoneContext(
+            label="Primary",
+            energy_field="primary_energy_kwh",
+            runtime_field="primary_active_minutes",
+            scheduled_field="primary_scheduled_minutes",
+            energy_suffix="energy",
+            runtime_suffix="runtime",
+            schedule_suffix="schedule",
+            fallback_anchor=options.primary_anchor,
+            program=None,
+            canonical=None,
+        )
+    }
+    calibrations = {"primary": EnergyCalibration(True, 1.0, "device")}
+    processed_rows = [
+        {
+            "report_day": date(2024, 1, 10),
+            "primary_energy_kwh": 1.5,
+            "primary_active_minutes": 60,
+            "primary_scheduled_minutes": 90,
+        }
+    ]
+
+    samples, summaries, changed = await statistics_process_zone_records(
+        RecordingAccumulator(),
+        processed_rows,
+        contexts,
+        calibrations,
+        options,
+        "entry-process",
+    )
+
+    assert changed is True
+    assert "primary" in summaries
+    report_day, runtime_hours, scheduled_hours = summaries["primary"]
+    assert report_day == date(2024, 1, 10)
+    assert runtime_hours == pytest.approx(1.0)
+    assert scheduled_hours == pytest.approx(1.5)
+    assert samples["primary"][-1]["sum"] == pytest.approx(1.5)
+
+
+def test_submit_statistics_samples_emits_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate helper emits statistics for valid entities."""
+
+    hass = FakeHass()
+    sample = StatisticData(
+        start=datetime(2024, 1, 10, tzinfo=timezone.utc),
+        sum=1.0,
+        state=1.0,
+    )
+    recorded: list[tuple[StatisticMetaData, list[StatisticData]]] = []
+
+    def capture(
+        _hass: HomeAssistant,
+        metadata: StatisticMetaData,
+        statistics: Iterable[StatisticData],
+    ) -> None:
+        recorded.append((metadata, list(statistics)))
+
+    statistics_submit_statistics_samples(
+        hass,
+        {"primary": [sample], "boost": []},
+        {"primary": "sensor.securemtr_controller_primary_energy_kwh"},
+        statistic_writer=capture,
+        mean_type=StatisticMeanType.NONE,
+    )
+
+    assert recorded
+    metadata, stats = recorded[0]
+    assert metadata["statistic_id"].endswith("primary_energy_kwh")
+    assert stats[0]["sum"] == sample["sum"]
+
+
+@pytest.mark.asyncio
 async def test_process_zone_samples_returns_result(
     monkeypatch: pytest.MonkeyPatch,
     store_instances,
@@ -1663,6 +1899,10 @@ async def test_process_zone_samples_returns_result(
     )
     monkeypatch.setattr(
         "custom_components.securemtr.ZoneContext",
+        RecordingZoneContext,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.ZoneContext",
         RecordingZoneContext,
     )
 
@@ -4871,6 +5111,10 @@ async def test_consumption_metrics_uses_duration_calibration(
     monkeypatch.setattr(
         "custom_components.securemtr.EnergyCalibration", CalibrationStub
     )
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.EnergyCalibration",
+        CalibrationStub,
+    )
 
     await consumption_metrics(hass, entry)
 
@@ -5248,6 +5492,9 @@ def test_resolve_anchor_clamps_configured_anchor(
     monkeypatch.setattr(
         "custom_components.securemtr.safe_anchor_datetime", early_anchor
     )
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.safe_anchor_datetime", early_anchor
+    )
 
     anchor, source, interval = _resolve_anchor(
         report_day, context, options, [], runtime_hours=0.0
@@ -5261,6 +5508,9 @@ def test_resolve_anchor_clamps_configured_anchor(
         return datetime(2024, 4, 6, 0, 30, tzinfo=tz)
 
     monkeypatch.setattr("custom_components.securemtr.safe_anchor_datetime", late_anchor)
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.safe_anchor_datetime", late_anchor
+    )
 
     anchor_late, source_late, interval_late = _resolve_anchor(
         report_day, context, options, [], runtime_hours=0.0
@@ -5300,6 +5550,10 @@ def test_build_zone_samples_skips_zero_energy_slots(
         "custom_components.securemtr.split_runtime_segments",
         fake_segments,
     )
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.split_runtime_segments",
+        fake_segments,
+    )
 
     samples = _build_zone_statistics_samples(anchor, 1.0, 1.5, 2.0)
 
@@ -5326,6 +5580,10 @@ def test_build_zone_samples_clamps_to_interval(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(
         "custom_components.securemtr.split_runtime_segments",
+        fake_segments,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.statistics.split_runtime_segments",
         fake_segments,
     )
 
