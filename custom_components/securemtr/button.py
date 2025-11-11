@@ -22,7 +22,11 @@ from . import (
     consumption_metrics,
 )
 from .beanbag import BeanbagBackend, BeanbagError, BeanbagSession, WeeklyProgram
-from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
+from .entity import (
+    SecuremtrRuntimeEntityMixin,
+    async_get_ready_controller,
+    controller_display_label,
+)
 from .runtime_helpers import async_read_zone_program
 
 _LOGGER = logging.getLogger(__name__)
@@ -120,12 +124,7 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
             websocket: ClientWebSocketResponse,
             controller: SecuremtrController,
         ) -> tuple[WeeklyProgram | None, WeeklyProgram | None]:
-            controller_label = (
-                controller.name
-                or controller.serial_number
-                or controller.identifier
-                or controller.gateway_id
-            )
+            controller_label = controller_display_label(controller)
             primary = await async_read_zone_program(
                 backend,
                 session,
@@ -159,12 +158,7 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
         if controller is None:  # pragma: no cover - defensive guard
             raise HomeAssistantError("Secure Meters controller is not connected")
 
-        controller_label = (
-            controller.name
-            or controller.serial_number
-            or controller.identifier
-            or controller.gateway_id
-        )
+        controller_label = controller_display_label(controller)
 
         primary_summary = self._format_program_summary(primary_program)
         boost_summary = self._format_program_summary(boost_program)

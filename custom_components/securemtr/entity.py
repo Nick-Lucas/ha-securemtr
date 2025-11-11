@@ -70,6 +70,25 @@ def build_device_info(controller: SecuremtrController) -> DeviceInfo:
     )
 
 
+def controller_display_label(controller: SecuremtrController) -> str:
+    """Return the preferred display label for a controller."""
+
+    def _clean(value: str | None) -> str | None:
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate:
+                return candidate
+        return None
+
+    return (
+        _clean(controller.name)
+        or _clean(controller.serial_number)
+        or _clean(controller.identifier)
+        or _clean(controller.gateway_id)
+        or DEFAULT_DEVICE_LABEL
+    )
+
+
 class SecuremtrRuntimeEntityMixin:
     """Provide shared runtime helpers for Secure Meters entities."""
 
