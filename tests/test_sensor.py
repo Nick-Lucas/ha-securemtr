@@ -22,7 +22,7 @@ from custom_components.securemtr.sensor import (
     STATE_CLASS_TOTAL_INCREASING,
     async_setup_entry,
 )
-from custom_components.securemtr.zones import ZONE_METADATA
+from custom_components.securemtr.zones import ZONE_METADATA, ZoneMetadata
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
@@ -65,6 +65,70 @@ def _create_runtime() -> SecuremtrRuntimeData:
     return runtime
 
 
+def test_energy_sensor_suffix_defaults_when_missing() -> None:
+    """Ensure the energy sensor falls back to default suffix strings."""
+
+    runtime = _create_runtime()
+    entry = create_config_entry(entry_id="entry")
+    metadata = ZoneMetadata(
+        key="fallback",
+        label="Fallback",
+        energy_field="fallback_energy_kwh",
+        runtime_field="fallback_active_minutes",
+        scheduled_field="fallback_scheduled_minutes",
+        energy_suffix="fallback_energy_kwh",
+        runtime_suffix="fallback_runtime_h",
+        schedule_suffix="fallback_sched_h",
+        translation_keys={"energy": "fallback_energy"},
+        sensor_suffixes={},
+    )
+
+    sensor = SecuremtrEnergyTotalSensor(
+        runtime,
+        runtime.controller,
+        entry,
+        metadata,
+    )
+
+    assert sensor.unique_id == "serial_1_fallback_energy_kwh"
+    assert sensor.entity_id == "sensor.securemtr_serial_1_fallback_energy_kwh"
+    assert sensor.translation_key == "fallback_energy"
+
+
+def test_duration_sensor_suffix_defaults_when_missing() -> None:
+    """Ensure duration sensors fall back to default suffix strings."""
+
+    runtime = _create_runtime()
+    entry = create_config_entry(entry_id="entry")
+    metadata = ZoneMetadata(
+        key="fallback",
+        label="Fallback",
+        energy_field="fallback_energy_kwh",
+        runtime_field="fallback_active_minutes",
+        scheduled_field="fallback_scheduled_minutes",
+        energy_suffix="fallback_energy_kwh",
+        runtime_suffix="fallback_runtime_h",
+        schedule_suffix="fallback_sched_h",
+        translation_keys={
+            "energy": "fallback_energy",
+            "runtime": "fallback_runtime",
+        },
+        sensor_suffixes={"energy": "fallback_energy_kwh"},
+    )
+
+    sensor = SecuremtrDailyDurationSensor(
+        runtime,
+        runtime.controller,
+        entry,
+        metadata,
+        "runtime",
+        metadata.translation_keys["runtime"],
+    )
+
+    assert sensor.unique_id == "serial_1_fallback_runtime_daily"
+    assert sensor.translation_key == "fallback_runtime"
+
+
 def test_zone_payload_validates_per_zone_dicts() -> None:
     """Ensure the helper returns per-zone dict payloads when valid."""
 
@@ -81,8 +145,7 @@ def test_zone_payload_validates_per_zone_dicts() -> None:
         runtime,
         runtime.controller,
         entry,
-        "primary",
-        "energy",
+        ZONE_METADATA["primary"],
     )
 
     assert sensor._zone_payload("energy_state", "primary") == {"energy_sum": 1.0}
@@ -226,7 +289,9 @@ async def test_energy_sensors_report_totals() -> None:
     primary_metadata = ZONE_METADATA["primary"]
     boost_metadata = ZONE_METADATA["boost"]
 
-    primary_energy = sensors_by_id["serial_1_primary_energy_kwh"]
+    primary_energy = sensors_by_id[
+        f"{SERIAL_SLUG}_{primary_metadata.sensor_suffixes['energy']}"
+    ]
     assert isinstance(primary_energy, SecuremtrEnergyTotalSensor)
     assert primary_energy.translation_key == primary_metadata.translation_keys["energy"]
     assert primary_energy.has_entity_name is True
@@ -264,7 +329,9 @@ async def test_energy_sensors_report_totals() -> None:
         await primary_energy.async_added_to_hass()
     assert runtime.energy_entity_ids["primary"] == PRIMARY_ENERGY_ENTITY_ID
 
-    boost_energy = sensors_by_id["serial_1_boost_energy_kwh"]
+    boost_energy = sensors_by_id[
+        f"{SERIAL_SLUG}_{boost_metadata.sensor_suffixes['energy']}"
+    ]
     assert isinstance(boost_energy, SecuremtrEnergyTotalSensor)
     assert boost_energy.translation_key == boost_metadata.translation_keys["energy"]
     assert boost_energy.has_entity_name is True
@@ -281,7 +348,9 @@ async def test_energy_sensors_report_totals() -> None:
     assert primary_energy.native_value == pytest.approx(12.5)
     assert boost_energy.available is True
 
-    primary_runtime = sensors_by_id["serial_1_primary_runtime_daily"]
+    primary_runtime = sensors_by_id[
+        f"{SERIAL_SLUG}_{primary_metadata.sensor_suffixes['runtime']}"
+    ]
     assert isinstance(primary_runtime, SecuremtrDailyDurationSensor)
     assert primary_runtime.native_value == pytest.approx(3.25)
     assert (
@@ -295,11 +364,15 @@ async def test_energy_sensors_report_totals() -> None:
     assert primary_runtime_attrs["report_day"] == "2024-03-01"
     assert primary_runtime_attrs["energy_total_kwh"] == pytest.approx(12.5)
 
-    boost_runtime = sensors_by_id["serial_1_boost_runtime_daily"]
+    boost_runtime = sensors_by_id[
+        f"{SERIAL_SLUG}_{boost_metadata.sensor_suffixes['runtime']}"
+    ]
     assert boost_runtime.native_value == pytest.approx(0.5)
     assert boost_runtime.translation_key == boost_metadata.translation_keys["runtime"]
 
-    primary_scheduled = sensors_by_id["serial_1_primary_scheduled_daily"]
+    primary_scheduled = sensors_by_id[
+        f"{SERIAL_SLUG}_{primary_metadata.sensor_suffixes['scheduled']}"
+    ]
     assert primary_scheduled.native_value == pytest.approx(4.0)
     assert (
         primary_scheduled.translation_key
@@ -309,6 +382,14 @@ async def test_energy_sensors_report_totals() -> None:
     assert primary_scheduled_attrs is not None
     assert primary_scheduled_attrs["report_day"] == "2024-03-01"
     assert primary_scheduled_attrs["energy_total_kwh"] == pytest.approx(12.5)
+
+    boost_scheduled = sensors_by_id[
+        f"{SERIAL_SLUG}_{boost_metadata.sensor_suffixes['scheduled']}"
+    ]
+    assert (
+        boost_scheduled.translation_key
+        == boost_metadata.translation_keys["scheduled"]
+    )
 
     runtime.energy_state = {"boost": {"energy_sum": "invalid", "last_day": 123}}
     assert boost_energy.native_value is None

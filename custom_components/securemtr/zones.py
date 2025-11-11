@@ -20,6 +20,7 @@ class ZoneMetadata:
     runtime_suffix: str
     schedule_suffix: str
     translation_keys: Mapping[str, str]
+    sensor_suffixes: Mapping[str, str]
 
 
 _ZONE_TRANSLATIONS_PRIMARY = MappingProxyType(
@@ -38,6 +39,22 @@ _ZONE_TRANSLATIONS_BOOST = MappingProxyType(
     }
 )
 
+_ZONE_SENSOR_SUFFIXES_PRIMARY = MappingProxyType(
+    {
+        "energy": "primary_energy_kwh",
+        "runtime": "primary_runtime_daily",
+        "scheduled": "primary_scheduled_daily",
+    }
+)
+
+_ZONE_SENSOR_SUFFIXES_BOOST = MappingProxyType(
+    {
+        "energy": "boost_energy_kwh",
+        "runtime": "boost_runtime_daily",
+        "scheduled": "boost_scheduled_daily",
+    }
+)
+
 ZONE_METADATA: Mapping[str, ZoneMetadata] = MappingProxyType(
     {
         "primary": ZoneMetadata(
@@ -50,6 +67,7 @@ ZONE_METADATA: Mapping[str, ZoneMetadata] = MappingProxyType(
             runtime_suffix="primary_runtime_h",
             schedule_suffix="primary_sched_h",
             translation_keys=_ZONE_TRANSLATIONS_PRIMARY,
+            sensor_suffixes=_ZONE_SENSOR_SUFFIXES_PRIMARY,
         ),
         "boost": ZoneMetadata(
             key="boost",
@@ -61,6 +79,7 @@ ZONE_METADATA: Mapping[str, ZoneMetadata] = MappingProxyType(
             runtime_suffix="boost_runtime_h",
             schedule_suffix="boost_sched_h",
             translation_keys=_ZONE_TRANSLATIONS_BOOST,
+            sensor_suffixes=_ZONE_SENSOR_SUFFIXES_BOOST,
         ),
     }
 )
