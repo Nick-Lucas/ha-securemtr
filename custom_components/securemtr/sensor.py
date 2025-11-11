@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.core import HomeAssistant
@@ -16,13 +20,6 @@ from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
 from .zones import ZONE_METADATA, ZoneMetadata
 
 _LOGGER = logging.getLogger(__name__)
-
-DEVICE_CLASS_ENERGY = "energy"
-DEVICE_CLASS_DURATION = "duration"
-DEVICE_CLASS_TIMESTAMP = "timestamp"
-STATE_CLASS_MEASUREMENT = "measurement"
-STATE_CLASS_TOTAL_INCREASING = "total_increasing"
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -98,8 +95,8 @@ class SecuremtrSensorEntity(SecuremtrRuntimeEntityMixin, SensorEntity):
 
     _attr_should_poll = False
     _attr_has_entity_name = True
-    _attr_device_class: str | None = None
-    _attr_state_class: str | None = None
+    _attr_device_class: SensorDeviceClass | None = None
+    _attr_state_class: SensorStateClass | None = None
     _attr_native_unit_of_measurement: str | None = None
 
     def __init__(
@@ -129,7 +126,7 @@ class SecuremtrSensorEntity(SecuremtrRuntimeEntityMixin, SensorEntity):
         return False
 
     @property
-    def device_class(self) -> str | None:
+    def device_class(self) -> SensorDeviceClass | None:
         """Return the assigned sensor device class."""
 
         return self._attr_device_class
@@ -141,7 +138,7 @@ class SecuremtrSensorEntity(SecuremtrRuntimeEntityMixin, SensorEntity):
         return self._attr_native_unit_of_measurement
 
     @property
-    def state_class(self) -> str | None:
+    def state_class(self) -> SensorStateClass | None:
         """Return the statistics state class for the sensor value."""
 
         return self._attr_state_class
@@ -159,7 +156,7 @@ class SecuremtrSensorEntity(SecuremtrRuntimeEntityMixin, SensorEntity):
 class SecuremtrBoostEndsSensor(SecuremtrSensorEntity):
     """Report the expected end time of the active boost run."""
 
-    _attr_device_class = DEVICE_CLASS_TIMESTAMP
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(
         self,
@@ -185,8 +182,8 @@ class SecuremtrBoostEndsSensor(SecuremtrSensorEntity):
 class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
     """Expose the cumulative energy total for a controller zone."""
 
-    _attr_device_class = DEVICE_CLASS_ENERGY
-    _attr_state_class = STATE_CLASS_TOTAL_INCREASING
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
 
     def __init__(
@@ -261,8 +258,8 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
 class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
     """Expose the previous day's runtime or scheduled duration."""
 
-    _attr_device_class = DEVICE_CLASS_DURATION
-    _attr_state_class = STATE_CLASS_MEASUREMENT
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfTime.HOURS
 
     def __init__(

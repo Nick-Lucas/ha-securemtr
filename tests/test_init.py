@@ -98,11 +98,10 @@ from custom_components.securemtr.config_flow import (
     DEFAULT_TIMEZONE,
 )
 from custom_components.securemtr.sensor import (
-    DEVICE_CLASS_ENERGY,
     SecuremtrEnergyTotalSensor,
-    STATE_CLASS_TOTAL_INCREASING,
     async_setup_entry as sensor_async_setup_entry,
 )
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from custom_components.securemtr.utils import assign_report_day
 from custom_components.securemtr.schedule import canonicalize_weekly, day_intervals
 from custom_components.securemtr.entity import slugify_identifier
@@ -2690,10 +2689,13 @@ async def test_energy_dashboard_flow_validates_sensor_states(
     primary_sensor = energy_entities[PRIMARY_ENERGY_ENTITY_ID]
     boost_sensor = energy_entities[BOOST_ENERGY_ENTITY_ID]
 
-    assert primary_sensor.device_class == DEVICE_CLASS_ENERGY
-    assert primary_sensor.state_class == STATE_CLASS_TOTAL_INCREASING
+    assert primary_sensor.device_class is SensorDeviceClass.ENERGY
+    assert primary_sensor.device_class == "energy"
+    assert primary_sensor.state_class is SensorStateClass.TOTAL_INCREASING
+    assert primary_sensor.state_class == "total_increasing"
     assert primary_sensor.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
-    assert boost_sensor.device_class == DEVICE_CLASS_ENERGY
+    assert boost_sensor.device_class is SensorDeviceClass.ENERGY
+    assert boost_sensor.device_class == "energy"
 
     first_day_iso = assign_report_day(
         datetime.fromtimestamp(all_samples[0].timestamp, timezone.utc), tz
