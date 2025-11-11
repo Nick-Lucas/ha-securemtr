@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import logging
 
-from aiohttp import ClientWebSocketResponse
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SecuremtrController, SecuremtrRuntimeData
-from .beanbag import BeanbagBackend, BeanbagSession
 from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
+from .runtime_helpers import controller_gateway_operation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,22 +67,9 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
     async def _async_set_power_state(self, turn_on: bool) -> None:
         """Drive the backend to the requested primary power state."""
 
-        async def _call_operation(
-            backend: BeanbagBackend,
-            session: BeanbagSession,
-            websocket: ClientWebSocketResponse,
-            controller: SecuremtrController,
-        ) -> None:
-            if turn_on:
-                await backend.turn_controller_on(
-                    session, websocket, controller.gateway_id
-                )
-                return
-
-            await backend.turn_controller_off(session, websocket, controller.gateway_id)
-
+        method_name = "turn_controller_on" if turn_on else "turn_controller_off"
         await self._async_mutate(
-            operation=_call_operation,
+            operation=controller_gateway_operation(method_name),
             mutation=lambda data: self._apply_power_state(data, turn_on),
             log_context="Failed to toggle Secure Meters controller",
             write_state=True,
@@ -134,14 +120,8 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Drive the backend to the requested timed boost state."""
 
         await self._async_mutate(
-            operation=lambda backend,
-            session,
-            websocket,
-            controller: backend.set_timed_boost_enabled(
-                session,
-                websocket,
-                controller.gateway_id,
-                enabled=enabled,
+            operation=controller_gateway_operation(
+                "set_timed_boost_enabled", enabled=enabled
             ),
             mutation=lambda data: self._apply_timed_boost_state(data, enabled),
             log_context="Failed to toggle Secure Meters timed boost feature",
