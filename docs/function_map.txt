@@ -22,12 +22,17 @@ custom_components.securemtr.__init__._async_fetch_controller: Retrieve controlle
 custom_components.securemtr.__init__._build_controller: Translate metadata and gateway context into a controller object.
 custom_components.securemtr.__init__._async_fetch_energy_samples: Fetch energy history for the active controller with reconnection.
 custom_components.securemtr.__init__.consumption_metrics: Coordinate connection validation, sample preparation, zone processing, statistic submission, and runtime updates for daily energy history.
-custom_components.securemtr.__init__.PreparedSamples: Represent normalised consumption samples ready for processing.
-custom_components.securemtr.__init__.ZoneProcessingResult: Collect the outcomes from zone-level consumption processing.
+custom_components.securemtr.statistics.PreparedSamples: Represent normalised consumption samples ready for processing.
+custom_components.securemtr.statistics.ZoneProcessingResult: Collect the outcomes from zone-level consumption processing.
+custom_components.securemtr.statistics._read_zone_programs: Fetch and canonicalise weekly programs for each zone.
+custom_components.securemtr.statistics._build_zone_contexts: Construct zone contexts describing metadata and schedules.
+custom_components.securemtr.statistics._build_zone_calibrations: Generate per-zone energy calibrations.
+custom_components.securemtr.statistics._process_zone_records: Update accumulators and build statistic samples for each zone.
 custom_components.securemtr.__init__._validate_consumption_connection: Ensure the runtime, controller, and transport objects are available for consumption refreshes.
 custom_components.securemtr.__init__._prepare_consumption_samples: Fetch, trim, and normalise recent consumption samples.
 custom_components.securemtr.__init__._process_zone_samples: Apply per-zone calibrations, persistence, and statistic preparation.
 custom_components.securemtr.__init__._submit_statistics: Record prepared statistic samples for each zone.
+custom_components.securemtr.statistics._submit_statistics_samples: Forward prepared statistic samples to the recorder.
 custom_components.securemtr.__init__._update_runtime_state: Persist runtime state derived from the latest consumption refresh.
 custom_components.securemtr.__init__._energy_store_key: Return the persistent storage key for accumulated energy state.
 custom_components.securemtr.__init__._load_statistics_options: Derive statistics options from the configuration entry using the Home Assistant timezone when available.
@@ -35,8 +40,8 @@ custom_components.securemtr.runtime_helpers.async_read_zone_program: Fetch the w
 custom_components.securemtr.runtime_helpers.async_execute_controller_command: Delegate controller commands to the integration runtime helper.
 custom_components.securemtr.runtime_helpers.async_dispatch_runtime_update: Dispatch runtime updates via the integration signal helper.
 custom_components.securemtr.runtime_helpers.controller_gateway_operation: Return an operation invoking a backend method with the controller gateway.
-custom_components.securemtr.__init__._build_zone_statistics_samples: Return statistic samples for a runtime segment anchored to a day.
-custom_components.securemtr.__init__._resolve_anchor: Select a schedule-aware anchor and interval for the provided day.
+custom_components.securemtr.statistics._build_zone_statistics_samples: Return statistic samples for a runtime segment anchored to a day.
+custom_components.securemtr.statistics._resolve_anchor: Select a schedule-aware anchor and interval for the provided day.
 custom_components.securemtr.__init__._normalize_identifier: Return a sanitized identifier candidate when possible.
 custom_components.securemtr.__init__.runtime_update_signal: Return the dispatcher signal name for runtime updates.
 custom_components.securemtr.__init__.async_dispatch_runtime_update: Notify entities that runtime state has been updated.
