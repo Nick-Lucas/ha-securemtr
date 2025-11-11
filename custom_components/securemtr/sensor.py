@@ -21,6 +21,7 @@ from .zones import ZONE_METADATA, ZoneMetadata
 
 _LOGGER = logging.getLogger(__name__)
 
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -167,7 +168,7 @@ class SecuremtrBoostEndsSensor(SecuremtrSensorEntity):
         """Initialise the boost end-time sensor."""
 
         super().__init__(runtime, controller, entry)
-        self._attr_unique_id = f"{self._identifier_slug()}_boost_ends"
+        self._set_slug_identifiers("boost_ends")
         self._attr_translation_key = "boost_ends"
 
     @property
@@ -201,12 +202,10 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
         translation_key = metadata.translation_keys.get("energy")
         if translation_key:
             self._attr_translation_key = translation_key
-        identifier_slug = self._identifier_slug()
         suffix = metadata.sensor_suffixes.get("energy")
         if suffix is None:
             suffix = f"{metadata.key}_energy_kwh"
-        self._attr_unique_id = f"{identifier_slug}_{suffix}"
-        self.entity_id = f"sensor.securemtr_{identifier_slug}_{suffix}"
+        self._set_slug_identifiers(suffix, entity_domain="sensor")
 
     async def async_added_to_hass(self) -> None:
         """Register created energy sensors with runtime context."""
@@ -281,7 +280,7 @@ class SecuremtrDailyDurationSensor(SecuremtrSensorEntity):
         suffix = metadata.sensor_suffixes.get(metric)
         if suffix is None:
             suffix = f"{metadata.key}_{metric}_daily"
-        self._attr_unique_id = f"{self._identifier_slug()}_{suffix}"
+        self._set_slug_identifiers(suffix)
 
     @property
     def native_value(self) -> float | None:

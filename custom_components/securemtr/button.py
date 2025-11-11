@@ -80,8 +80,7 @@ class SecuremtrConsumptionMetricsButton(SecuremtrRuntimeEntityMixin, ButtonEntit
         """Initialise the consumption metrics button for the controller."""
 
         super().__init__(runtime, controller, entry)
-        slug = self._identifier_slug()
-        self._attr_unique_id = f"{slug}_refresh_consumption"
+        self._set_slug_identifiers("refresh_consumption")
         self._attr_translation_key = "refresh_consumption_metrics"
 
     async def async_press(self) -> None:
@@ -106,7 +105,7 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
         """Initialise the schedule logging button."""
 
         super().__init__(runtime, controller, entry)
-        self._attr_unique_id = f"{self._identifier_slug()}_log_schedule"
+        self._set_slug_identifiers("log_schedule")
         self._attr_translation_key = "log_weekly_schedules"
 
     async def async_press(self) -> None:
@@ -228,7 +227,7 @@ class SecuremtrTimedBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
 
         super().__init__(runtime, controller, entry)
         self._duration = duration_minutes
-        self._attr_unique_id = f"{self._identifier_slug()}_boost_{duration_minutes}"
+        self._set_slug_identifiers(f"boost_{duration_minutes}")
         translation_key = BOOST_BUTTON_TRANSLATION_KEYS.get(
             duration_minutes, DEFAULT_BOOST_TRANSLATION_KEY
         )
@@ -282,7 +281,7 @@ class SecuremtrCancelBoostButton(SecuremtrRuntimeEntityMixin, ButtonEntity):
         """Initialise the timed boost cancellation button."""
 
         super().__init__(runtime, controller, entry)
-        self._attr_unique_id = f"{self._identifier_slug()}_boost_cancel"
+        self._set_slug_identifiers("boost_cancel")
         self._attr_translation_key = "cancel_boost"
 
     @property
