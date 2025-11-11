@@ -11,18 +11,14 @@ from custom_components.securemtr import (
     SecuremtrRuntimeData,
 )
 from custom_components.securemtr.sensor import (
-    DEVICE_CLASS_DURATION,
-    DEVICE_CLASS_ENERGY,
-    DEVICE_CLASS_TIMESTAMP,
     SecuremtrBoostEndsSensor,
     SecuremtrDailyDurationSensor,
     SecuremtrEnergyTotalSensor,
     SecuremtrSensorEntity,
-    STATE_CLASS_MEASUREMENT,
-    STATE_CLASS_TOTAL_INCREASING,
     async_setup_entry,
 )
 from custom_components.securemtr.zones import ZONE_METADATA, ZoneMetadata
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
@@ -181,7 +177,8 @@ async def test_sensor_reports_end_time() -> None:
     assert sensor.native_value is None
     assert sensor.device_info["name"] == "E7+ Smart Water Heater Controller"
     assert sensor.available is True
-    assert sensor.device_class == DEVICE_CLASS_TIMESTAMP
+    assert sensor.device_class is SensorDeviceClass.TIMESTAMP
+    assert sensor.device_class == "timestamp"
     assert sensor.has_entity_name is True
 
     sensor.hass = SimpleNamespace()
@@ -298,8 +295,10 @@ async def test_energy_sensors_report_totals() -> None:
     assert primary_energy.entity_id == PRIMARY_ENERGY_ENTITY_ID
     assert primary_energy.native_value == pytest.approx(12.5)
     assert primary_energy.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
-    assert primary_energy.device_class == DEVICE_CLASS_ENERGY
-    assert primary_energy.state_class == STATE_CLASS_TOTAL_INCREASING
+    assert primary_energy.device_class is SensorDeviceClass.ENERGY
+    assert primary_energy.device_class == "energy"
+    assert primary_energy.state_class is SensorStateClass.TOTAL_INCREASING
+    assert primary_energy.state_class == "total_increasing"
     assert primary_energy.extra_state_attributes == {
         "last_report_day": "2024-03-01",
         "series_start_day": "2024-02-20",
@@ -357,8 +356,10 @@ async def test_energy_sensors_report_totals() -> None:
         primary_runtime.translation_key == primary_metadata.translation_keys["runtime"]
     )
     assert primary_runtime.native_unit_of_measurement == UnitOfTime.HOURS
-    assert primary_runtime.device_class == DEVICE_CLASS_DURATION
-    assert primary_runtime.state_class == STATE_CLASS_MEASUREMENT
+    assert primary_runtime.device_class is SensorDeviceClass.DURATION
+    assert primary_runtime.device_class == "duration"
+    assert primary_runtime.state_class is SensorStateClass.MEASUREMENT
+    assert primary_runtime.state_class == "measurement"
     primary_runtime_attrs = primary_runtime.extra_state_attributes
     assert primary_runtime_attrs is not None
     assert primary_runtime_attrs["report_day"] == "2024-03-01"
