@@ -143,6 +143,7 @@ custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin.device_info: Retu
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._identifier_slug: Return the slugified identifier for the controller.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._set_slug_identifiers: Assign slug-based identifiers for the entity.
 custom_components.securemtr.entity.SecuremtrRuntimeEntityMixin._async_mutate: Execute a runtime mutation using the entity's stored context.
+custom_components.securemtr.entity.SecuremtrCommandMixin._async_controller_command: Execute a controller command using the runtime mutation helper.
 custom_components.securemtr.button.async_setup_entry: Set up Secure Meters button entities for a config entry.
 custom_components.securemtr.runtime_helpers.async_mutate_runtime: Execute an operation, mutate the runtime, and notify listeners.
 custom_components.securemtr.beanbag.BeanbagEnergySample: Hold a single energy history sample reported by Beanbag.
