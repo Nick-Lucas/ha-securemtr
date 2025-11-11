@@ -131,6 +131,19 @@ class SecuremtrRuntimeEntityMixin:
         identifier = controller.serial_number or controller.identifier
         return slugify_identifier(identifier)
 
+    def _set_slug_identifiers(
+        self, *suffix_parts: str, entity_domain: str | None = None
+    ) -> str:
+        """Assign slug-based identifiers for the entity."""
+
+        slug = self._identifier_slug()
+        suffix = "_".join(part for part in suffix_parts if part)
+        unique_id = f"{slug}_{suffix}" if suffix else slug
+        self._attr_unique_id = unique_id
+        if entity_domain:
+            self.entity_id = f"{entity_domain}.securemtr_{unique_id}"
+        return unique_id
+
     async def _async_mutate(
         self,
         *,

@@ -44,7 +44,7 @@ class SecuremtrBoostActiveBinarySensor(SecuremtrRuntimeEntityMixin, BinarySensor
         """Initialise the boost active sensor."""
 
         super().__init__(runtime, controller, entry)
-        self._attr_unique_id = f"{self._identifier_slug()}_boost_active"
+        self._set_slug_identifiers("boost_active")
         self._attr_translation_key = "boost_active"
 
     @property

@@ -46,7 +46,7 @@ class SecuremtrPowerSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Initialise the switch entity with runtime context."""
 
         super().__init__(runtime, controller, entry)
-        self._attr_unique_id = f"{self._identifier_slug()}_primary_power"
+        self._set_slug_identifiers("primary_power")
         self._attr_translation_key = "controller_power"
 
     @property
@@ -111,7 +111,7 @@ class SecuremtrTimedBoostSwitch(SecuremtrRuntimeEntityMixin, SwitchEntity):
         """Initialise the timed boost switch for the controller."""
 
         super().__init__(runtime, controller, entry)
-        self._attr_unique_id = f"{self._identifier_slug()}_timed_boost"
+        self._set_slug_identifiers("timed_boost")
         self._attr_translation_key = "timed_boost"
 
     @property
