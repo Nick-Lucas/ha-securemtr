@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, TypeVar
+from typing import Any, TYPE_CHECKING, TypeVar, cast
 
 from aiohttp import ClientWebSocketResponse
 from homeassistant.config_entries import ConfigEntry
@@ -131,4 +131,32 @@ async def async_read_zone_program(
     return None
 
 
-__all__ = ["async_mutate_runtime", "async_read_zone_program"]
+def controller_gateway_operation(
+    method_name: str, /, **operation_kwargs: Any
+) -> OperationCallable[_ResultT]:
+    """Return an operation invoking a backend method with the controller gateway."""
+
+    async def _operation(
+        backend: BeanbagBackend,
+        session: BeanbagSession,
+        websocket: ClientWebSocketResponse,
+        controller: "SecuremtrController",
+    ) -> _ResultT:
+        backend_method = cast(
+            Callable[..., Awaitable[_ResultT]], getattr(backend, method_name)
+        )
+        return await backend_method(
+            session,
+            websocket,
+            controller.gateway_id,
+            **operation_kwargs,
+        )
+
+    return _operation
+
+
+__all__ = [
+    "async_mutate_runtime",
+    "async_read_zone_program",
+    "controller_gateway_operation",
+]
