@@ -85,4 +85,7 @@ ZONE_METADATA: Mapping[str, ZoneMetadata] = MappingProxyType(
 )
 
 
-__all__ = ["ZONE_METADATA", "ZoneMetadata"]
+ZONE_KEYS: tuple[str, ...] = tuple(ZONE_METADATA.keys())
+
+
+__all__ = ["ZONE_KEYS", "ZONE_METADATA", "ZoneMetadata"]

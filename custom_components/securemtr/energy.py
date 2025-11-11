@@ -10,9 +10,9 @@ from typing import Any, TypedDict
 
 from homeassistant.helpers.storage import Store
 
-_LOGGER = logging.getLogger(__name__)
+from .zones import ZONE_KEYS
 
-_ZONE_KEYS = ("primary", "boost")
+_LOGGER = logging.getLogger(__name__)
 _TOLERANCE = 1e-3
 _DIGEST_PRECISION = "{:.6f}"  # Match recorder rounding to improve idempotency.
 _FREEZE_TOLERANCE = 0.02
@@ -150,7 +150,7 @@ class EnergyAccumulator:
     def __post_init__(self) -> None:
         """Initialise the runtime state containers."""
 
-        self._state = {zone: _default_zone_state() for zone in _ZONE_KEYS}
+        self._state = {zone: _default_zone_state() for zone in ZONE_KEYS}
 
     async def async_load(self) -> None:
         """Load persisted accumulator state if available."""
@@ -160,7 +160,7 @@ class EnergyAccumulator:
 
         stored = await self.store.async_load()
         if isinstance(stored, dict):
-            for zone in _ZONE_KEYS:
+            for zone in ZONE_KEYS:
                 zone_payload = stored.get(zone)
                 if not isinstance(zone_payload, dict):
                     continue
@@ -171,7 +171,7 @@ class EnergyAccumulator:
     async def async_add_day(self, zone: str, report_day: date, energy_kwh: float) -> bool:
         """Incorporate a daily energy total and maintain monotonic exposure."""
 
-        if zone not in _ZONE_KEYS:
+        if zone not in ZONE_KEYS:
             raise ValueError(f"Unsupported energy zone: {zone}")
 
         await self.async_load()
@@ -262,7 +262,7 @@ class EnergyAccumulator:
                     "series_start": None,
                     "offset_kwh": 0.0,
                 }
-                for zone in _ZONE_KEYS
+                for zone in ZONE_KEYS
             }
 
         state: dict[str, dict[str, Any]] = {}
@@ -284,7 +284,7 @@ class EnergyAccumulator:
     async def async_reset_zone(self, zone: str) -> None:
         """Clear the stored ledger for the requested zone."""
 
-        if zone not in _ZONE_KEYS:
+        if zone not in ZONE_KEYS:
             raise ValueError(f"Unsupported energy zone: {zone}")
 
         await self.async_load()
@@ -295,7 +295,7 @@ class EnergyAccumulator:
     def zone_total(self, zone: str) -> float:
         """Return the cumulative kWh total for the provided zone."""
 
-        if zone not in _ZONE_KEYS:
+        if zone not in ZONE_KEYS:
             raise ValueError(f"Unsupported energy zone: {zone}")
 
         if not self._loaded:
