@@ -51,9 +51,6 @@ class ZoneContext:
     energy_field: str
     runtime_field: str
     scheduled_field: str
-    energy_suffix: str
-    runtime_suffix: str
-    schedule_suffix: str
     fallback_anchor: time
     program: WeeklyProgram | None
     canonical: list[tuple[int, int]] | None
@@ -121,9 +118,6 @@ def _build_zone_contexts(
             energy_field=metadata.energy_field,
             runtime_field=metadata.runtime_field,
             scheduled_field=metadata.scheduled_field,
-            energy_suffix=metadata.energy_suffix,
-            runtime_suffix=metadata.runtime_suffix,
-            schedule_suffix=metadata.schedule_suffix,
             fallback_anchor=anchors[zone_key],
             program=programs.get(zone_key),
             canonical=canonicals.get(zone_key),
@@ -491,7 +485,7 @@ def _resolve_anchor(
         "Anchor for %s (%s) on %s: runtime=%.2f hours anchor=%s source=%s"
         " interval=%s fallback=%s",
         context.label,
-        context.runtime_suffix,
+        context.runtime_field,
         report_day.isoformat(),
         runtime_hours,
         anchor.isoformat(),

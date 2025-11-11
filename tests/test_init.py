@@ -1756,9 +1756,6 @@ async def test_process_zone_records_updates_accumulator() -> None:
             energy_field="primary_energy_kwh",
             runtime_field="primary_active_minutes",
             scheduled_field="primary_scheduled_minutes",
-            energy_suffix="energy",
-            runtime_suffix="runtime",
-            schedule_suffix="schedule",
             fallback_anchor=options.primary_anchor,
             program=None,
             canonical=None,
@@ -1882,9 +1879,6 @@ async def test_process_zone_samples_returns_result(
         energy_field: str
         runtime_field: str
         scheduled_field: str
-        energy_suffix: str
-        runtime_suffix: str
-        schedule_suffix: str
         fallback_anchor: time
         program: WeeklyProgram | None
         canonical: list[tuple[int, int]] | None
@@ -1930,9 +1924,6 @@ async def test_process_zone_samples_returns_result(
         assert context.energy_field == metadata.energy_field
         assert context.runtime_field == metadata.runtime_field
         assert context.scheduled_field == metadata.scheduled_field
-        assert context.energy_suffix == metadata.energy_suffix
-        assert context.runtime_suffix == metadata.runtime_suffix
-        assert context.schedule_suffix == metadata.schedule_suffix
         assert context.fallback_anchor == getattr(options, f"{zone_key}_anchor")
         assert context.program is None
         assert context.canonical is None
@@ -5143,9 +5134,6 @@ def test_resolve_anchor_prefers_schedule_on_time() -> None:
         energy_field="primary",
         runtime_field="primary_runtime",
         scheduled_field="primary_sched",
-        energy_suffix="primary",
-        runtime_suffix="runtime",
-        schedule_suffix="sched",
         fallback_anchor=time(7, 30),
         program=None,
         canonical=None,
@@ -5191,9 +5179,6 @@ def test_resolve_anchor_handles_runtime_exceeding_span() -> None:
         energy_field="primary",
         runtime_field="primary_runtime",
         scheduled_field="primary_sched",
-        energy_suffix="primary",
-        runtime_suffix="runtime",
-        schedule_suffix="sched",
         fallback_anchor=time(8, 0),
         program=None,
         canonical=None,
@@ -5247,9 +5232,6 @@ def test_resolve_anchor_prefers_clampable_interval_on_tie() -> None:
         energy_field="primary",
         runtime_field="primary_runtime",
         scheduled_field="primary_sched",
-        energy_suffix="primary",
-        runtime_suffix="runtime",
-        schedule_suffix="sched",
         fallback_anchor=time(8, 0),
         program=None,
         canonical=None,
@@ -5298,9 +5280,6 @@ def test_resolve_anchor_handles_missing_schedule() -> None:
         energy_field="boost",
         runtime_field="boost_runtime",
         scheduled_field="boost_sched",
-        energy_suffix="boost",
-        runtime_suffix="runtime",
-        schedule_suffix="sched",
         fallback_anchor=time(8, 45),
         program=None,
         canonical=None,
@@ -5342,9 +5321,6 @@ def test_resolve_anchor_skips_unused_earlier_slot() -> None:
         energy_field="primary_energy_kwh",
         runtime_field="primary_active_minutes",
         scheduled_field="primary_scheduled_minutes",
-        energy_suffix="primary_energy_kwh",
-        runtime_suffix="primary_runtime_h",
-        schedule_suffix="primary_sched_h",
         fallback_anchor=time(6, 0),
         program=weekly,
         canonical=canonical,
@@ -5393,9 +5369,6 @@ def test_resolve_anchor_skips_invalid_intervals() -> None:
         energy_field="primary",
         runtime_field="primary_runtime",
         scheduled_field="primary_sched",
-        energy_suffix="primary",
-        runtime_suffix="runtime",
-        schedule_suffix="sched",
         fallback_anchor=time(6, 0),
         program=None,
         canonical=None,
@@ -5433,9 +5406,6 @@ def test_resolve_anchor_tiebreaks_by_fallback_anchor() -> None:
         energy_field="primary",
         runtime_field="primary_runtime",
         scheduled_field="primary_sched",
-        energy_suffix="primary",
-        runtime_suffix="runtime",
-        schedule_suffix="sched",
         fallback_anchor=time(9, 0),
         program=None,
         canonical=None,
@@ -5477,9 +5447,6 @@ def test_resolve_anchor_clamps_configured_anchor(
         energy_field="primary",
         runtime_field="primary_runtime",
         scheduled_field="primary_sched",
-        energy_suffix="primary",
-        runtime_suffix="runtime",
-        schedule_suffix="sched",
         fallback_anchor=time(0, 0),
         program=None,
         canonical=None,
