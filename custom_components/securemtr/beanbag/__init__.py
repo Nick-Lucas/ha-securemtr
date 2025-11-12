@@ -1213,33 +1213,50 @@ class BeanbagBackend:
                 "Beanbag WebSocket transport is unavailable"
             ) from error
 
-        while True:
-            message = await websocket.receive_json()
-            if not isinstance(message, dict):
-                _LOGGER.debug("Ignoring non-object WebSocket frame: %s", type(message))
-                continue
+        try:
+            while True:
+                message = await websocket.receive_json()
+                if not isinstance(message, dict):
+                    _LOGGER.debug(
+                        "Ignoring non-object WebSocket frame: %s", type(message)
+                    )
+                    continue
 
-            message_id = message.get("I")
-            if message_id != correlation_id:
-                _LOGGER.debug(
-                    "Ignoring Beanbag WebSocket frame with correlation %s", message_id
+                message_id = message.get("I")
+                if message_id != correlation_id:
+                    _LOGGER.debug(
+                        "Ignoring Beanbag WebSocket frame with correlation %s",
+                        message_id,
+                    )
+                    continue
+
+                if "R" in message:
+                    _LOGGER.debug(
+                        "Beanbag WebSocket received reply for %s", correlation_id
+                    )
+                    return message["R"]
+
+                if message.get("M") == "Notify":
+                    _LOGGER.debug(
+                        "Beanbag WebSocket received notify for %s; waiting for reply",
+                        correlation_id,
+                    )
+                    continue
+
+                raise BeanbagWebSocketError(
+                    "Beanbag WebSocket response missing result payload"
                 )
-                continue
-
-            if "R" in message:
-                _LOGGER.debug("Beanbag WebSocket received reply for %s", correlation_id)
-                return message["R"]
-
-            if message.get("M") == "Notify":
-                _LOGGER.debug(
-                    "Beanbag WebSocket received notify for %s; waiting for reply",
-                    correlation_id,
-                )
-                continue
-
-            raise BeanbagWebSocketError(
-                "Beanbag WebSocket response missing result payload"
+        except (ClientConnectionError, TimeoutError) as error:
+            _LOGGER.warning(
+                "Beanbag WebSocket receive failed due to transport error: %s",
+                error,
             )
+            if not websocket.closed:
+                with suppress(Exception):
+                    await websocket.close()
+            raise BeanbagWebSocketError(
+                "Beanbag WebSocket transport is unavailable"
+            ) from error
 
 
 def _coerce_energy(value: Any) -> float:
