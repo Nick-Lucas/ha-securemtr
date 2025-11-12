@@ -2,6 +2,7 @@
   "title": "SecureMTR",
   "config": {
     "error": {
+      "password_required": "Enter your Secure Controls password.",
       "password_too_long": "The Secure Controls mobile app only accepts passwords up to 12 characters.",
       "invalid_email": "Enter a valid email address."
     },
