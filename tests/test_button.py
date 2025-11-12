@@ -335,9 +335,7 @@ async def test_boost_button_helper_failure(monkeypatch: pytest.MonkeyPatch) -> N
         await boost_button.async_press()
 
     assert recorded_method == ["start_timed_boost"]
-    assert (
-        recorded_kwargs["log_context"] == "Failed to start Secure Meters timed boost"
-    )
+    assert recorded_kwargs["log_context"] == "Failed to start Secure Meters timed boost"
     assert recorded_kwargs.get("write_state", False) is False
     assert backend.start_calls == []
 
@@ -725,7 +723,7 @@ async def test_cancel_button_backend_error(monkeypatch: pytest.MonkeyPatch) -> N
 
 @pytest.mark.asyncio
 async def test_button_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure setup raises when controller metadata is delayed."""
+    """Ensure setup skips button creation when controller metadata is delayed."""
 
     runtime, _backend = _create_runtime()
     runtime.controller_ready = asyncio.Event()
@@ -736,21 +734,27 @@ async def test_button_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         "custom_components.securemtr.entity._CONTROLLER_READY_TIMEOUT", 0.01
     )
 
-    with pytest.raises(HomeAssistantError):
-        await async_setup_entry(hass, entry, lambda entities: None)
+    entities: list[ButtonEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert entities == []
 
 
 @pytest.mark.asyncio
 async def test_button_setup_requires_controller() -> None:
-    """Ensure setup raises when the runtime lacks controller metadata."""
+    """Ensure setup skips button creation when controller metadata is missing."""
 
     runtime, _backend = _create_runtime()
     runtime.controller = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = create_config_entry(entry_id="entry")
 
-    with pytest.raises(HomeAssistantError):
-        await async_setup_entry(hass, entry, lambda entities: None)
+    entities: list[ButtonEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert entities == []
 
 
 @pytest.mark.asyncio

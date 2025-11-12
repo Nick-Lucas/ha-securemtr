@@ -13,6 +13,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData
@@ -32,7 +33,15 @@ async def async_setup_entry(
     entry_label = getattr(entry, "title", None) or getattr(entry, "entry_id", DOMAIN)
     _LOGGER.info("Starting SecureMTR sensor setup for %s", entry_label)
 
-    runtime, controller = await async_get_ready_controller(hass, entry)
+    try:
+        runtime, controller = await async_get_ready_controller(hass, entry)
+    except HomeAssistantError as error:
+        _LOGGER.warning(
+            "Skipping SecureMTR sensor setup for %s: %s",
+            entry_label,
+            error,
+        )
+        return
 
     _LOGGER.info(
         "Preparing SecureMTR sensor entities for %s using controller %s",

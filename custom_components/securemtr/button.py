@@ -15,6 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from . import (
+    DOMAIN,
     SecuremtrController,
     SecuremtrRuntimeData,
     async_execute_controller_command,
@@ -59,7 +60,17 @@ async def async_setup_entry(
 ) -> None:
     """Set up Secure Meters button entities for a config entry."""
 
-    runtime, controller = await async_get_ready_controller(hass, entry)
+    entry_label = getattr(entry, "title", None) or getattr(entry, "entry_id", DOMAIN)
+
+    try:
+        runtime, controller = await async_get_ready_controller(hass, entry)
+    except HomeAssistantError as error:
+        _LOGGER.warning(
+            "Skipping SecureMTR button setup for %s: %s",
+            entry_label,
+            error,
+        )
+        return
 
     async_add_entities(
         [

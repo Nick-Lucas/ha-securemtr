@@ -250,9 +250,8 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                     continue
                 seen_entries.add(legacy_entry.entry_id)
                 legacy_unique = getattr(legacy_entry, "unique_id", None)
-                if (
-                    legacy_entry.entry_id == entry_id
-                    and _helper_options_match(legacy_entry, source_entity, cycle)
+                if legacy_entry.entry_id == entry_id and _helper_options_match(
+                    legacy_entry, source_entity, cycle
                 ):
                     _prune_helper_candidates(
                         helpers_by_source, source_candidates, cycle, legacy_entry
@@ -332,7 +331,21 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
 
             try:
                 await config_entries_helper.async_add(helper_entry)
-            except Exception:  # pragma: no cover - defensive guard for helper writes
+            except (
+                Exception
+            ) as error:  # pragma: no cover - defensive guard for helper writes
+                if _handle_helper_add_error(
+                    error,
+                    entry_identifier=entry_identifier,
+                    zone_key=zone_key,
+                    cycle=cycle,
+                    entry_id=entry_id,
+                    unique_id=unique_id,
+                    existing_entries=existing_entries,
+                    existing_entry_ids=existing_entry_ids,
+                    helper_entry=helper_entry,
+                ):
+                    continue
                 _LOGGER.exception(
                     "Failed to create %s utility meter helper for %s zone %s",
                     cycle,
@@ -350,6 +363,41 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                 zone_key,
                 source_entity,
             )
+
+
+def _handle_helper_add_error(
+    error: Exception,
+    *,
+    entry_identifier: str,
+    zone_key: str,
+    cycle: str,
+    entry_id: str,
+    unique_id: str,
+    existing_entries: dict[str, ConfigEntry],
+    existing_entry_ids: dict[str, ConfigEntry],
+    helper_entry: ConfigEntry,
+) -> bool:
+    """Handle helper creation errors that can be safely ignored."""
+
+    if not isinstance(error, HomeAssistantError):
+        return False
+
+    existing_entry = existing_entry_ids.get(entry_id)
+    if existing_entry is not None or "already exists" in str(error):
+        _LOGGER.debug(
+            "Utility meter helper already exists for %s zone %s cycle %s",
+            entry_identifier,
+            zone_key,
+            cycle,
+        )
+        if existing_entry is not None:
+            existing_entries.setdefault(unique_id, existing_entry)
+        else:
+            existing_entry_ids.setdefault(entry_id, helper_entry)
+            existing_entries.setdefault(unique_id, helper_entry)
+        return True
+
+    return False
 
 
 def _collect_candidate_helpers(
@@ -377,9 +425,8 @@ def _helper_options_match(
 
     options = helper_entry.options
     meter_type = options.get(CONF_METER_TYPE)
-    return (
-        options.get(CONF_SOURCE_SENSOR) == source_entity
-        and (meter_type == cycle or meter_type is None)
+    return options.get(CONF_SOURCE_SENSOR) == source_entity and (
+        meter_type == cycle or meter_type is None
     )
 
 
@@ -465,7 +512,9 @@ def _utility_meter_identifier(hass: HomeAssistant, entry: ConfigEntry) -> str:
             serial_number = getattr(controller, "serial_number", None)
             if isinstance(serial_number, str) and serial_number.strip():
                 candidate = serial_number.strip()
-            elif isinstance(controller.identifier, str) and controller.identifier.strip():
+            elif (
+                isinstance(controller.identifier, str) and controller.identifier.strip()
+            ):
                 candidate = controller.identifier.strip()
 
     data = getattr(entry, "data", None)
@@ -489,7 +538,9 @@ def _utility_meter_identifier(hass: HomeAssistant, entry: ConfigEntry) -> str:
     return slug or DOMAIN
 
 
-def _invoke_refresh_callback(callback: Callable[[], None], entry_identifier: str) -> None:
+def _invoke_refresh_callback(
+    callback: Callable[[], None], entry_identifier: str
+) -> None:
     """Execute a refresh callback, logging any unexpected failures."""
 
     try:
@@ -500,9 +551,7 @@ def _invoke_refresh_callback(callback: Callable[[], None], entry_identifier: str
         )
 
 
-def _controller_slug(
-    entry: ConfigEntry, controller: SecuremtrController | None
-) -> str:
+def _controller_slug(entry: ConfigEntry, controller: SecuremtrController | None) -> str:
     """Return the identifier slug for a controller or entry metadata."""
 
     candidate: str | None = None
@@ -1346,9 +1395,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Refresh and persist seven-day consumption metrics for the controller."""
 
     entry_identifier = _entry_display_name(entry)
-    validation = await _validate_consumption_connection(
-        hass, entry, entry_identifier
-    )
+    validation = await _validate_consumption_connection(hass, entry, entry_identifier)
     if validation is None:
         return
 
@@ -1626,7 +1673,6 @@ async def _process_zone_samples(
     )
 
 
-
 def _submit_statistics(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -1659,7 +1705,9 @@ def _update_runtime_state(
 
     if result.energy_state_changed:
         runtime.energy_state = result.sensor_state
-        primary_total = float(result.sensor_state.get("primary", {}).get("energy_sum", 0.0))
+        primary_total = float(
+            result.sensor_state.get("primary", {}).get("energy_sum", 0.0)
+        )
         boost_total = float(result.sensor_state.get("boost", {}).get("energy_sum", 0.0))
         _LOGGER.info(
             "Updated cumulative energy state for %s: primary=%.3f kWh boost=%.3f kWh",

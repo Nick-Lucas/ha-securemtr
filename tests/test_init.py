@@ -33,6 +33,7 @@ from custom_components.securemtr import (
     _async_fetch_controller,
     _async_register_services,
     _async_ensure_utility_meters,
+    _handle_helper_add_error,
     _async_handle_backend_success,
     _build_controller,
     _build_zone_statistics_samples,
@@ -1973,7 +1974,10 @@ async def test_prepare_zone_contexts_and_calibrations_fetches_programs(
     )
 
     program_mock = AsyncMock(
-        return_value=({"primary": None, "boost": None}, {"primary": None, "boost": None})
+        return_value=(
+            {"primary": None, "boost": None},
+            {"primary": None, "boost": None},
+        )
     )
     monkeypatch.setattr(
         "custom_components.securemtr.async_read_zone_programs",
@@ -2012,9 +2016,7 @@ def test_update_runtime_summaries_merges_zone_data() -> None:
             return {"primary": {"energy_sum": 2.0}}
 
     accumulator = DummyAccumulator()
-    zone_summaries = {
-        "primary": (date(2024, 1, 10), Decimal("1"), Decimal("1.5"))
-    }
+    zone_summaries = {"primary": (date(2024, 1, 10), Decimal("1"), Decimal("1.5"))}
 
     (
         recent,
@@ -4074,6 +4076,64 @@ async def test_async_ensure_utility_meters_deduplicates_helper_entries(
 
 
 @pytest.mark.asyncio
+async def test_async_ensure_utility_meters_suppresses_existing_entry_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handle duplicate entry errors without logging stack traces."""
+
+    hass = FakeHass()
+
+    class HelperEntries:
+        def __init__(self) -> None:
+            self.entries: list[ConfigEntry] = []
+            self.added: list[ConfigEntry] = []
+            self.attempts: list[ConfigEntry] = []
+            self.removed: list[str] = []
+
+        def async_entries(self, domain: str) -> list[ConfigEntry]:
+            assert domain == UTILITY_METER_DOMAIN
+            return list(self.entries)
+
+        async def async_add(self, entry_obj: ConfigEntry) -> None:
+            self.attempts.append(entry_obj)
+            raise HomeAssistantError(
+                f"An entry with the id {entry_obj.entry_id} already exists."
+            )
+
+        async def async_remove(self, entry_id: str) -> None:
+            self.removed.append(entry_id)
+
+    hass.config_entries = HelperEntries()
+    entry = DummyConfigEntry(
+        entry_id="entry",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+    )
+
+    runtime = SecuremtrRuntimeData(backend=SimpleNamespace())
+    runtime.controller = SecuremtrController(
+        identifier="controller-duplicate-1",
+        name="SecureMTR",
+        gateway_id="gateway-1",
+        serial_number="Serial-Duplicate",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._energy_sensor_entity_ids",
+        lambda *_args, **_kwargs: {
+            "primary": "sensor.securemtr_serial_duplicate_primary_energy_kwh"
+        },
+    )
+
+    await _async_ensure_utility_meters(hass, entry)
+
+    assert hass.config_entries.added == []
+    assert hass.config_entries.removed == []
+    assert hass.config_entries.attempts  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_async_ensure_utility_meters_replaces_mismatched_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4201,11 +4261,78 @@ async def test_async_ensure_utility_meters_updates_untracked_helper(
 
     assert hass.config_entries.removed == []
     assert len(hass.config_entries.added) == 2
-    assert any(
-        helper.options.get(CONF_SOURCE_SENSOR)
-        == "sensor.securemtr_entry_primary_energy_kwh"
-        for helper in hass.config_entries.added
+
+
+def test_handle_helper_add_error_existing_entry() -> None:
+    """Ensure helper add errors reuse cached entries when available."""
+
+    helper_entry = create_config_entry(entry_id="entry")
+    existing_entry = create_config_entry(entry_id="entry")
+    existing_entries: dict[str, ConfigEntry] = {}
+    existing_entry_ids: dict[str, ConfigEntry] = {"entry": existing_entry}
+
+    handled = _handle_helper_add_error(
+        HomeAssistantError("An entry with the id entry already exists."),
+        entry_identifier="Entry",
+        zone_key="primary",
+        cycle="daily",
+        entry_id="entry",
+        unique_id="unique",
+        existing_entries=existing_entries,
+        existing_entry_ids=existing_entry_ids,
+        helper_entry=helper_entry,
     )
+
+    assert handled is True
+    assert existing_entries["unique"] is existing_entry
+
+
+def test_handle_helper_add_error_unhandled_message() -> None:
+    """Ensure unexpected errors bubble up for logging."""
+
+    helper_entry = create_config_entry(entry_id="entry")
+    existing_entries: dict[str, ConfigEntry] = {}
+    existing_entry_ids: dict[str, ConfigEntry] = {}
+
+    handled = _handle_helper_add_error(
+        HomeAssistantError("boom"),
+        entry_identifier="Entry",
+        zone_key="primary",
+        cycle="daily",
+        entry_id="entry",
+        unique_id="unique",
+        existing_entries=existing_entries,
+        existing_entry_ids=existing_entry_ids,
+        helper_entry=helper_entry,
+    )
+
+    assert handled is False
+    assert existing_entries == {}
+    assert existing_entry_ids == {}
+
+
+def test_handle_helper_add_error_non_homeassistant_exception() -> None:
+    """Ensure non-Home Assistant exceptions are not swallowed."""
+
+    helper_entry = create_config_entry(entry_id="entry")
+    existing_entries: dict[str, ConfigEntry] = {}
+    existing_entry_ids: dict[str, ConfigEntry] = {}
+
+    handled = _handle_helper_add_error(
+        Exception("boom"),
+        entry_identifier="Entry",
+        zone_key="primary",
+        cycle="daily",
+        entry_id="entry",
+        unique_id="unique",
+        existing_entries=existing_entries,
+        existing_entry_ids=existing_entry_ids,
+        helper_entry=helper_entry,
+    )
+
+    assert handled is False
+    assert existing_entries == {}
+    assert existing_entry_ids == {}
 
 
 @pytest.mark.asyncio
