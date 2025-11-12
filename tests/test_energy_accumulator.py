@@ -11,12 +11,18 @@ from custom_components.securemtr import energy as energy_module
 from custom_components.securemtr.energy import EnergyAccumulator
 
 
+def _set_today(monkeypatch: pytest.MonkeyPatch, target: date) -> None:
+    """Patch the accumulator helper to return a fixed date."""
+
+    monkeypatch.setattr(energy_module, "_today", lambda: target)
+
+
 @pytest.fixture(autouse=True)
 def _fixed_today(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure tests use a stable date for freeze calculations."""
 
     energy_module._today()
-    monkeypatch.setattr(energy_module, "_today", lambda: date(2024, 8, 20))
+    _set_today(monkeypatch, date(2024, 8, 20))
 
 
 class FakeStore:
@@ -239,7 +245,7 @@ async def test_accumulator_freeze_accepts_material_revision() -> None:
 async def test_accumulator_recent_revision_bypasses_freeze(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure near-term days always accept revisions above tolerance."""
 
-    monkeypatch.setattr(energy_module, "_today", lambda: date(2024, 8, 3))
+    _set_today(monkeypatch, date(2024, 8, 3))
 
     store = FakeStore()
     accumulator = EnergyAccumulator(store=cast(Any, store))

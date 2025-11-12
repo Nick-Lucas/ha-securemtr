@@ -9,6 +9,7 @@ import logging
 from typing import Any, TypedDict
 
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .zones import ZONE_KEYS
 
@@ -313,5 +314,5 @@ class EnergyAccumulator:
 def _today() -> date:
     """Return today's date for freeze horizon calculations."""
 
-    return date.today()
+    return dt_util.now().date()
 
