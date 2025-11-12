@@ -332,6 +332,27 @@ async def test_config_flow_creates_entry(hass_fixture: ConfigFlowHass) -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_flow_rejects_empty_email(
+    hass_fixture: ConfigFlowHass,
+) -> None:
+    """Ensure config flow rejects empty email addresses."""
+    flow = SecuremtrConfigFlow()
+    flow.hass = hass_fixture
+
+    flow.async_set_unique_id = AsyncMock()
+    flow._abort_if_unique_id_configured = Mock()
+
+    result = await flow.async_step_user(
+        {CONF_EMAIL: "   ", CONF_PASSWORD: "secret"}
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_EMAIL: "invalid_email"}
+    flow.async_set_unique_id.assert_not_called()
+    flow._abort_if_unique_id_configured.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_config_flow_rejects_long_password(
     hass_fixture: ConfigFlowHass,
 ) -> None:
