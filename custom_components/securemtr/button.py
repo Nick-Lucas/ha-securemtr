@@ -28,7 +28,7 @@ from .entity import (
     async_get_ready_controller,
     controller_display_label,
 )
-from .runtime_helpers import async_read_zone_program
+from .runtime_helpers import async_read_zone_programs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,42 +124,64 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
             session: BeanbagSession,
             websocket: ClientWebSocketResponse,
             controller: SecuremtrController,
-        ) -> tuple[WeeklyProgram | None, WeeklyProgram | None]:
+        ) -> tuple[
+            dict[str, WeeklyProgram | None], dict[str, list[tuple[int, int]] | None]
+        ]:
             controller_label = controller_display_label(controller)
-            primary = await async_read_zone_program(
+            return await async_read_zone_programs(
                 backend,
                 session,
                 websocket,
                 gateway_id=controller.gateway_id,
-                zone="primary",
                 entry_identifier=controller_label,
             )
-            boost = await async_read_zone_program(
-                backend,
-                session,
-                websocket,
-                gateway_id=controller.gateway_id,
-                zone="boost",
-                entry_identifier=controller_label,
-            )
-            return primary, boost
 
-        primary_program, boost_program = await async_execute_controller_command(
+        programs, canonicals = await async_execute_controller_command(
             runtime,
             entry,
             _read_programs,
             log_context="Failed to read Secure Meters weekly schedule",
         )
 
-        if primary_program is None or boost_program is None:
-            _LOGGER.error("Failed to read Secure Meters weekly schedule")
-            raise HomeAssistantError("Failed to read Secure Meters weekly schedule")
-
         controller = runtime.controller
         if controller is None:  # pragma: no cover - defensive guard
             raise HomeAssistantError("Secure Meters controller is not connected")
 
         controller_label = controller_display_label(controller)
+
+        primary_program = programs.get("primary")
+        boost_program = programs.get("boost")
+        missing_zones = [
+            zone_key
+            for zone_key, program in (
+                ("primary", primary_program),
+                ("boost", boost_program),
+            )
+            if program is None
+        ]
+        if missing_zones:
+            _LOGGER.error(
+                "Failed to read Secure Meters weekly schedule for %s: missing zones %s",
+                controller_label,
+                ", ".join(missing_zones),
+            )
+            raise HomeAssistantError("Failed to read Secure Meters weekly schedule")
+
+        assert primary_program is not None and boost_program is not None
+
+        primary_canonical = canonicals.get("primary") if canonicals else None
+        boost_canonical = canonicals.get("boost") if canonicals else None
+
+        _LOGGER.debug(
+            "Canonical weekly schedule for %s primary zone: %s",
+            controller_label,
+            primary_canonical,
+        )
+        _LOGGER.debug(
+            "Canonical weekly schedule for %s boost zone: %s",
+            controller_label,
+            boost_canonical,
+        )
 
         primary_summary = self._format_program_summary(primary_program)
         boost_summary = self._format_program_summary(boost_program)

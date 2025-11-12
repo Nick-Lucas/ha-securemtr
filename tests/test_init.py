@@ -106,13 +106,15 @@ from custom_components.securemtr.statistics import (
     _build_zone_calibrations as statistics_build_zone_calibrations,
     _build_zone_contexts as statistics_build_zone_contexts,
     _process_zone_records as statistics_process_zone_records,
-    _read_zone_programs as statistics_read_zone_programs,
     _submit_statistics_samples as statistics_submit_statistics_samples,
 )
 from custom_components.securemtr.utils import assign_report_day, EnergyCalibration
 from custom_components.securemtr.schedule import canonicalize_weekly, day_intervals
 from custom_components.securemtr.entity import slugify_identifier
-from custom_components.securemtr.runtime_helpers import async_read_zone_program
+from custom_components.securemtr.runtime_helpers import (
+    async_read_zone_program,
+    async_read_zone_programs,
+)
 from homeassistant.util import dt as dt_util
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from homeassistant.const import UnitOfEnergy
@@ -1622,15 +1624,15 @@ async def test_read_zone_programs_canonicalises(
         return None
 
     monkeypatch.setattr(
-        "custom_components.securemtr.statistics.runtime_helpers.async_read_zone_program",
+        "custom_components.securemtr.runtime_helpers.async_read_zone_program",
         fake_read,
     )
     monkeypatch.setattr(
-        "custom_components.securemtr.statistics.canonicalize_weekly",
+        "custom_components.securemtr.runtime_helpers.canonicalize_weekly",
         lambda program: [1] if program is not None else None,
     )
 
-    programs, canonicals = await statistics_read_zone_programs(
+    programs, canonicals = await async_read_zone_programs(
         AsyncMock(),
         AsyncMock(),
         AsyncMock(),
