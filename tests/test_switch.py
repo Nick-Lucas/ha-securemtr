@@ -288,9 +288,7 @@ async def test_power_switch_helper_failure(monkeypatch: pytest.MonkeyPatch) -> N
         await switch.async_turn_on()
 
     assert recorded_method == ["turn_controller_on"]
-    assert (
-        recorded_kwargs["log_context"] == "Failed to toggle Secure Meters controller"
-    )
+    assert recorded_kwargs["log_context"] == "Failed to toggle Secure Meters controller"
     assert recorded_kwargs.get("write_state") is True
 
 
@@ -360,7 +358,7 @@ def test_switch_device_info_without_serial() -> None:
 
 @pytest.mark.asyncio
 async def test_switch_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify the platform raises when metadata is not ready in time."""
+    """Verify the platform skips entity creation when metadata is delayed."""
 
     runtime, _backend = _create_runtime()
     runtime.controller_ready = asyncio.Event()
@@ -371,21 +369,27 @@ async def test_switch_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         "custom_components.securemtr.entity._CONTROLLER_READY_TIMEOUT", 0.01
     )
 
-    with pytest.raises(HomeAssistantError):
-        await async_setup_entry(hass, entry, lambda entities: None)
+    entities: list[SwitchEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert entities == []
 
 
 @pytest.mark.asyncio
 async def test_switch_setup_requires_controller() -> None:
-    """Ensure a missing controller raises an explicit error."""
+    """Ensure setup skips switch creation when controller metadata is missing."""
 
     runtime, _backend = _create_runtime()
     runtime.controller = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = create_config_entry(entry_id="entry")
 
-    with pytest.raises(HomeAssistantError):
-        await async_setup_entry(hass, entry, lambda entities: None)
+    entities: list[SwitchEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert entities == []
 
 
 @pytest.mark.asyncio

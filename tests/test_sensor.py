@@ -21,7 +21,6 @@ from custom_components.securemtr.zones import ZONE_METADATA, ZoneMetadata
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.exceptions import HomeAssistantError
 
 
 from tests.helpers import create_config_entry
@@ -229,15 +228,18 @@ async def test_sensor_reports_end_time() -> None:
 
 @pytest.mark.asyncio
 async def test_sensor_requires_controller() -> None:
-    """Ensure setup raises when controller metadata is missing."""
+    """Ensure setup skips entity creation when controller metadata is missing."""
 
     runtime = _create_runtime()
     runtime.controller = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = create_config_entry(entry_id="entry")
 
-    with pytest.raises(HomeAssistantError):
-        await async_setup_entry(hass, entry, lambda entities: None)
+    entities: list[SecuremtrSensorEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert entities == []
 
 
 @pytest.mark.asyncio
@@ -387,8 +389,7 @@ async def test_energy_sensors_report_totals() -> None:
         f"{SERIAL_SLUG}_{boost_metadata.sensor_suffixes['scheduled']}"
     ]
     assert (
-        boost_scheduled.translation_key
-        == boost_metadata.translation_keys["scheduled"]
+        boost_scheduled.translation_key == boost_metadata.translation_keys["scheduled"]
     )
 
     runtime.energy_state = {"boost": {"energy_sum": "invalid", "last_day": 123}}
@@ -409,7 +410,7 @@ async def test_energy_sensors_report_totals() -> None:
 
 @pytest.mark.asyncio
 async def test_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure setup raises when controller metadata is delayed."""
+    """Ensure setup skips sensor creation when controller metadata is delayed."""
 
     runtime = _create_runtime()
     runtime.controller_ready = asyncio.Event()
@@ -420,8 +421,11 @@ async def test_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         "custom_components.securemtr.entity._CONTROLLER_READY_TIMEOUT", 0.01
     )
 
-    with pytest.raises(HomeAssistantError):
-        await async_setup_entry(hass, entry, lambda entities: None)
+    entities: list[SecuremtrSensorEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert entities == []
 
 
 @pytest.mark.asyncio

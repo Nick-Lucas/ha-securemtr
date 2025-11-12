@@ -10,9 +10,10 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import SecuremtrController, SecuremtrRuntimeData
+from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData
 from .entity import SecuremtrRuntimeEntityMixin, async_get_ready_controller
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,7 +26,17 @@ async def async_setup_entry(
 ) -> None:
     """Set up the Secure Meters boost binary sensor."""
 
-    runtime, controller = await async_get_ready_controller(hass, entry)
+    entry_label = getattr(entry, "title", None) or getattr(entry, "entry_id", DOMAIN)
+
+    try:
+        runtime, controller = await async_get_ready_controller(hass, entry)
+    except HomeAssistantError as error:
+        _LOGGER.warning(
+            "Skipping SecureMTR binary sensor setup for %s: %s",
+            entry_label,
+            error,
+        )
+        return
 
     async_add_entities([SecuremtrBoostActiveBinarySensor(runtime, controller, entry)])
 

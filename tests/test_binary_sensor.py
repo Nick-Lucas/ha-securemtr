@@ -15,7 +15,6 @@ from custom_components.securemtr.binary_sensor import (
 )
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.exceptions import HomeAssistantError
 
 
 from tests.helpers import create_config_entry
@@ -111,20 +110,23 @@ async def test_binary_sensor_setup_and_state() -> None:
 
 @pytest.mark.asyncio
 async def test_binary_sensor_requires_controller() -> None:
-    """Ensure setup raises when controller metadata is missing."""
+    """Ensure setup skips binary sensor creation when controller metadata is missing."""
 
     runtime = _create_runtime()
     runtime.controller = None
     hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     entry = create_config_entry(entry_id="entry")
 
-    with pytest.raises(HomeAssistantError):
-        await async_setup_entry(hass, entry, lambda entities: None)
+    entities: list[SecuremtrBoostActiveBinarySensor] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert entities == []
 
 
 @pytest.mark.asyncio
 async def test_binary_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure setup raises when controller metadata is delayed."""
+    """Ensure setup skips binary sensor creation when controller metadata is delayed."""
 
     runtime = _create_runtime()
     runtime.controller_ready = asyncio.Event()
@@ -135,8 +137,11 @@ async def test_binary_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) ->
         "custom_components.securemtr.entity._CONTROLLER_READY_TIMEOUT", 0.01
     )
 
-    with pytest.raises(HomeAssistantError):
-        await async_setup_entry(hass, entry, lambda entities: None)
+    entities: list[SecuremtrBoostActiveBinarySensor] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert entities == []
 
 
 @pytest.mark.asyncio
