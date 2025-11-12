@@ -82,6 +82,14 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             email = user_input[CONF_EMAIL].strip()
             password = user_input[CONF_PASSWORD]
 
+            if not email:
+                _LOGGER.error("Secure Controls email is required")
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=STEP_USER_DATA_SCHEMA,
+                    errors={CONF_EMAIL: "invalid_email"},
+                )
+
             if len(password) > 12:
                 _LOGGER.error(
                     "Secure Controls password exceeds 12 character mobile app limit"
