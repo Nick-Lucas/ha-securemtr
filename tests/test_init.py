@@ -7,6 +7,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from itertools import accumulate
 from contextlib import suppress
 from typing import Any, Awaitable, Callable, Iterable, cast
@@ -68,8 +69,11 @@ from custom_components.securemtr import (
     consumption_metrics,
     _validate_consumption_connection,
     _prepare_consumption_samples,
+    _ensure_energy_accumulator,
+    _prepare_zone_contexts_and_calibrations,
     _process_zone_samples,
     _submit_statistics,
+    _update_runtime_summaries,
     _update_runtime_state,
     UTILITY_METER_CYCLES,
     UTILITY_METER_DOMAIN,
@@ -1884,6 +1888,174 @@ def test_submit_statistics_samples_emits_records(
 
 
 @pytest.mark.asyncio
+async def test_ensure_energy_accumulator_initialises_store(
+    monkeypatch: pytest.MonkeyPatch,
+    store_instances,
+) -> None:
+    """Ensure the accumulator helper provisions storage and reloads state."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry-accumulator",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
+    )
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    created: list[Any] = []
+
+    class RecordingAccumulator:
+        def __init__(self, store: Any) -> None:
+            self.store = store
+            self.load_calls = 0
+            created.append(self)
+
+        async def async_load(self) -> None:
+            self.load_calls += 1
+
+        def as_sensor_state(self) -> dict[str, Any]:
+            return {}
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.EnergyAccumulator",
+        RecordingAccumulator,
+    )
+
+    accumulator = await _ensure_energy_accumulator(hass, entry, runtime)
+
+    assert isinstance(accumulator, RecordingAccumulator)
+    assert accumulator.load_calls == 1
+    assert runtime.energy_store is not None
+    assert runtime.energy_accumulator is accumulator
+    assert len(store_instances) == 1
+
+    second = await _ensure_energy_accumulator(hass, entry, runtime)
+    assert second is accumulator
+    assert accumulator.load_calls == 2
+    assert created == [accumulator]
+
+
+@pytest.mark.asyncio
+async def test_prepare_zone_contexts_and_calibrations_fetches_programs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure zone preparation helper requests programs and builds contexts."""
+
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    gateway = BeanbagGateway(
+        gateway_id="gw-ctx",
+        serial_number=None,
+        host_name=None,
+        capabilities={},
+    )
+    session = BeanbagSession(1, "sess", "token", None, (gateway,))
+    websocket = AsyncMock()
+    controller = SecuremtrController(
+        identifier="controller",
+        name="Controller",
+        gateway_id="gw-ctx",
+    )
+    processed_rows = [
+        {
+            "report_day": date(2024, 1, 11),
+            "primary_energy_kwh": 1.5,
+            "primary_active_minutes": 60,
+            "primary_scheduled_minutes": 90,
+        }
+    ]
+    options = StatisticsOptions(
+        timezone=ZoneInfo("UTC"),
+        timezone_name="UTC",
+        primary_anchor=time(6, 0),
+        boost_anchor=time(7, 0),
+        fallback_power_kw=2.0,
+        prefer_device_energy=True,
+    )
+
+    program_mock = AsyncMock(
+        return_value=({"primary": None, "boost": None}, {"primary": None, "boost": None})
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_read_zone_programs",
+        program_mock,
+    )
+
+    contexts, calibrations = await _prepare_zone_contexts_and_calibrations(
+        runtime,
+        session,
+        websocket,
+        controller,
+        processed_rows,
+        options,
+        "entry-context",
+    )
+
+    assert program_mock.await_count == 1
+    assert set(contexts.keys()) == set(ZONE_METADATA.keys())
+    assert set(calibrations.keys()) == set(ZONE_METADATA.keys())
+
+
+def test_update_runtime_summaries_merges_zone_data() -> None:
+    """Verify runtime summary helper merges accumulator and zone details."""
+
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    runtime.statistics_recent = {
+        "existing": {"report_day": "2024-01-09", "energy_sum": 1.0}
+    }
+
+    class DummyAccumulator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def as_sensor_state(self) -> dict[str, dict[str, float]]:
+            self.calls += 1
+            return {"primary": {"energy_sum": 2.0}}
+
+    accumulator = DummyAccumulator()
+    zone_summaries = {
+        "primary": (date(2024, 1, 10), Decimal("1"), Decimal("1.5"))
+    }
+
+    (
+        recent,
+        sensor_state,
+        energy_state_changed,
+        dispatch_needed,
+    ) = _update_runtime_summaries(
+        runtime,
+        accumulator,
+        zone_summaries,
+        energy_changed=False,
+    )
+
+    assert recent["existing"]["report_day"] == "2024-01-09"
+    assert recent["primary"]["runtime_hours"] == pytest.approx(1.0)
+    assert recent["primary"]["scheduled_hours"] == pytest.approx(1.5)
+    assert recent["primary"]["energy_sum"] == pytest.approx(2.0)
+    assert sensor_state == {"primary": {"energy_sum": 2.0}}
+    assert energy_state_changed is True
+    assert dispatch_needed is True
+
+    runtime.energy_state = sensor_state
+    runtime.statistics_recent = {}
+    (
+        second_recent,
+        _,
+        second_energy_changed,
+        second_dispatch_needed,
+    ) = _update_runtime_summaries(
+        runtime,
+        accumulator,
+        zone_summaries,
+        energy_changed=False,
+    )
+
+    assert second_recent["primary"]["energy_sum"] == pytest.approx(2.0)
+    assert second_energy_changed is False
+    assert second_dispatch_needed is True
+
+
+@pytest.mark.asyncio
 async def test_process_zone_samples_returns_result(
     monkeypatch: pytest.MonkeyPatch,
     store_instances,
@@ -1930,6 +2102,7 @@ async def test_process_zone_samples_returns_result(
         fallback_power_kw=2.0,
         prefer_device_energy=True,
     )
+    prepared = PreparedSamples(rows=processed_rows, options=options)
 
     created_contexts: list[Any] = []
 
@@ -1967,8 +2140,7 @@ async def test_process_zone_samples_returns_result(
         runtime.session,
         runtime.websocket,
         controller,
-        processed_rows,
-        options,
+        prepared,
         "entry-process",
     )
 

@@ -30,7 +30,10 @@ custom_components.securemtr.statistics._build_zone_calibrations: Generate per-zo
 custom_components.securemtr.statistics._process_zone_records: Update accumulators and build statistic samples for each zone.
 custom_components.securemtr.__init__._validate_consumption_connection: Ensure the runtime, controller, and transport objects are available for consumption refreshes.
 custom_components.securemtr.__init__._prepare_consumption_samples: Fetch, trim, and normalise recent consumption samples.
+custom_components.securemtr.__init__._ensure_energy_accumulator: Return a loaded energy accumulator, creating backing storage on demand.
+custom_components.securemtr.__init__._prepare_zone_contexts_and_calibrations: Fetch zone programs and derive contexts plus calibrations.
 custom_components.securemtr.__init__._process_zone_samples: Apply per-zone calibrations, persistence, and statistic preparation.
+custom_components.securemtr.__init__._update_runtime_summaries: Integrate processed zone summaries into runtime tracking structures.
 custom_components.securemtr.__init__._submit_statistics: Record prepared statistic samples for each zone.
 custom_components.securemtr.statistics._submit_statistics_samples: Forward prepared statistic samples to the recorder.
 custom_components.securemtr.__init__._update_runtime_state: Persist runtime state derived from the latest consumption refresh.
