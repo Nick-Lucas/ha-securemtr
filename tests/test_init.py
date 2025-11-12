@@ -1600,6 +1600,62 @@ async def test_prepare_consumption_samples_normalizes(
 
 
 @pytest.mark.asyncio
+async def test_prepare_consumption_samples_uses_zone_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure sample rows include zone-specific fields from metadata."""
+
+    entry = DummyConfigEntry(
+        entry_id="entry-prepare",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
+    )
+    runtime = SecuremtrRuntimeData(backend=AsyncMock())
+    controller = SecuremtrController(
+        identifier="controller",
+        name="Controller",
+        gateway_id="gw-1",
+    )
+    sample = BeanbagEnergySample(
+        timestamp=int(datetime(2024, 1, 10, tzinfo=timezone.utc).timestamp()),
+        primary_energy_kwh=1.2,
+        boost_energy_kwh=0.5,
+        primary_scheduled_minutes=30,
+        primary_active_minutes=25,
+        boost_scheduled_minutes=20,
+        boost_active_minutes=15,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_fetch_energy_samples",
+        AsyncMock(return_value=[sample]),
+    )
+
+    prepared = await _prepare_consumption_samples(
+        entry, runtime, controller, "entry-prepare"
+    )
+
+    assert prepared is not None
+    row = prepared.rows[0]
+    for metadata in ZONE_METADATA.values():
+        assert row[metadata.energy_field] == getattr(sample, metadata.energy_field)
+        assert row[metadata.runtime_field] == getattr(sample, metadata.runtime_field)
+        assert row[metadata.scheduled_field] == getattr(
+            sample, metadata.scheduled_field
+        )
+
+    assert runtime.consumption_metrics_log
+    log_row = runtime.consumption_metrics_log[0]
+    for metadata in ZONE_METADATA.values():
+        assert log_row[metadata.energy_field] == getattr(sample, metadata.energy_field)
+        assert log_row[metadata.runtime_field] == getattr(
+            sample, metadata.runtime_field
+        )
+        assert log_row[metadata.scheduled_field] == getattr(
+            sample, metadata.scheduled_field
+        )
+    assert log_row["report_day"] == row["report_day"].isoformat()
+
+
+@pytest.mark.asyncio
 async def test_read_zone_programs_canonicalises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1732,7 +1788,9 @@ async def test_process_zone_records_updates_accumulator() -> None:
         def zone_total(self, zone: str) -> float:
             return self.totals.get(zone, 0.0)
 
-        async def async_add_day(self, zone: str, report_day: date, energy: float) -> bool:
+        async def async_add_day(
+            self, zone: str, report_day: date, energy: float
+        ) -> bool:
             key = (zone, report_day)
             previous = self.ledger.get(key)
             self.ledger[key] = energy
@@ -3001,7 +3059,9 @@ async def test_energy_dashboard_flow_validates_sensor_states(
         PRIMARY_ENERGY_ENTITY_ID.replace("sensor.", "sensor:"),
         BOOST_ENERGY_ENTITY_ID.replace("sensor.", "sensor:"),
     }
-    assert {metadata["statistic_id"] for metadata, _ in recorded_statistics} == expected_stat_ids
+    assert {
+        metadata["statistic_id"] for metadata, _ in recorded_statistics
+    } == expected_stat_ids
 
     for step, batch in enumerate(batches[1:], start=1):
         await consumption_metrics(hass, entry)
