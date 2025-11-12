@@ -91,16 +91,22 @@ custom_components.securemtr.beanbag.BeanbagBackend._send_request: Send a request
 custom_components.securemtr.beanbag.DailyProgram.__post_init__: Validate and normalise minute triplets.
 custom_components.securemtr.beanbag.DailyProgram._coerce_triplet: Normalise a 3-slot minute collection.
 custom_components.securemtr.switch.async_setup_entry: Set up Secure Meters switch entities for a config entry.
-custom_components.securemtr.switch.SecuremtrPowerSwitch.is_on: Return whether the controller reports the primary power as on.
-custom_components.securemtr.switch.SecuremtrPowerSwitch.async_turn_on: Send an on command to the Secure Meters controller.
-custom_components.securemtr.switch.SecuremtrPowerSwitch.async_turn_off: Send an off command to the Secure Meters controller.
-custom_components.securemtr.switch.SecuremtrPowerSwitch._async_set_power_state: Drive the backend to the requested primary power state.
-custom_components.securemtr.switch.SecuremtrPowerSwitch._apply_power_state: Update runtime state after toggling the controller power.
-custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.is_on: Return whether timed boost is currently enabled.
-custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_on: Enable the timed boost feature in the backend.
-custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.async_turn_off: Disable the timed boost feature in the backend.
-custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._async_set_timed_boost: Drive the backend to the requested timed boost state.
-custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._apply_timed_boost_state: Update runtime state after toggling timed boost.
+custom_components.securemtr.switch.SecuremtrToggleSwitch.__init__: Initialise the toggle switch with shared runtime context.
+custom_components.securemtr.switch.SecuremtrToggleSwitch.is_on: Return the current on/off state reported by the runtime.
+custom_components.securemtr.switch.SecuremtrToggleSwitch.async_turn_on: Request that the backend enable the associated feature.
+custom_components.securemtr.switch.SecuremtrToggleSwitch.async_turn_off: Request that the backend disable the associated feature.
+custom_components.securemtr.switch.SecuremtrToggleSwitch._async_toggle: Execute the configured backend command for the desired state.
+custom_components.securemtr.switch.SecuremtrToggleSwitch._current_state: Return the current toggle state from the runtime.
+custom_components.securemtr.switch.SecuremtrToggleSwitch._backend_command: Return the backend method and kwargs for the desired state.
+custom_components.securemtr.switch.SecuremtrToggleSwitch._apply_runtime_state: Mutate the runtime after a successful backend toggle.
+custom_components.securemtr.switch.SecuremtrPowerSwitch.__init__: Initialise the maintained power switch entity with runtime context.
+custom_components.securemtr.switch.SecuremtrPowerSwitch._current_state: Return whether the controller reports the primary power as on.
+custom_components.securemtr.switch.SecuremtrPowerSwitch._backend_command: Return the backend command to drive the requested power state.
+custom_components.securemtr.switch.SecuremtrPowerSwitch._apply_runtime_state: Update runtime state after toggling the controller power.
+custom_components.securemtr.switch.SecuremtrTimedBoostSwitch.__init__: Initialise the timed boost switch for the controller.
+custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._current_state: Return whether timed boost is currently enabled.
+custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._backend_command: Return the backend command to drive the requested timed boost state.
+custom_components.securemtr.switch.SecuremtrTimedBoostSwitch._apply_runtime_state: Update runtime state after toggling timed boost.
 custom_components.securemtr.button.SecuremtrTimedBoostButton.async_press: Send the timed boost start command for the configured duration.
 custom_components.securemtr.button.SecuremtrTimedBoostButton._apply_timed_boost_start: Update runtime state for a newly started timed boost.
 custom_components.securemtr.button.SecuremtrCancelBoostButton.available: Only expose the button while a timed boost is active.
