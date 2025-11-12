@@ -6,7 +6,8 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from importlib import import_module
 import logging
 from types import MappingProxyType
@@ -1366,8 +1367,7 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         session,
         websocket,
         controller,
-        prepared.rows,
-        prepared.options,
+        prepared,
         entry_identifier,
     )
 
@@ -1491,9 +1491,28 @@ async def _prepare_consumption_samples(
     return PreparedSamples(rows=processed_rows, options=options)
 
 
-async def _process_zone_samples(
+async def _ensure_energy_accumulator(
     hass: HomeAssistant,
     entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+) -> EnergyAccumulator:
+    """Return a loaded energy accumulator, creating backing storage on demand."""
+
+    store = runtime.energy_store
+    if store is None:
+        store = Store(hass, ENERGY_STORE_VERSION, _energy_store_key(entry))
+        runtime.energy_store = store
+
+    accumulator = runtime.energy_accumulator
+    if accumulator is None:
+        accumulator = EnergyAccumulator(store=store)
+        runtime.energy_accumulator = accumulator
+
+    await accumulator.async_load()
+    return accumulator
+
+
+async def _prepare_zone_contexts_and_calibrations(
     runtime: SecuremtrRuntimeData,
     session: BeanbagSession,
     websocket: ClientWebSocketResponse,
@@ -1501,8 +1520,8 @@ async def _process_zone_samples(
     processed_rows: list[dict[str, Any]],
     options: StatisticsOptions,
     entry_identifier: str,
-) -> ZoneProcessingResult:
-    """Apply per-zone calibrations, persistence, and statistic preparation."""
+) -> tuple[dict[str, ZoneContext], dict[str, EnergyCalibration]]:
+    """Fetch zone programs and derive contexts plus calibrations."""
 
     programs, canonicals = await async_read_zone_programs(
         runtime.backend,
@@ -1516,31 +1535,16 @@ async def _process_zone_samples(
     calibrations = _build_zone_calibrations(
         processed_rows, contexts, options, entry_identifier
     )
+    return contexts, calibrations
 
-    store = runtime.energy_store
-    if store is None:
-        store = Store(hass, ENERGY_STORE_VERSION, _energy_store_key(entry))
-        runtime.energy_store = store
 
-    accumulator = runtime.energy_accumulator
-    if accumulator is None:
-        accumulator = EnergyAccumulator(store=store)
-        runtime.energy_accumulator = accumulator
-
-    await accumulator.async_load()
-
-    (
-        statistics_samples,
-        zone_summaries,
-        energy_changed,
-    ) = await _process_zone_records(
-        accumulator,
-        processed_rows,
-        contexts,
-        calibrations,
-        options,
-        entry_identifier,
-    )
+def _update_runtime_summaries(
+    runtime: SecuremtrRuntimeData,
+    accumulator: EnergyAccumulator,
+    zone_summaries: Mapping[str, tuple[date, Decimal | None, Decimal | None]],
+    energy_changed: bool,
+) -> tuple[dict[str, Any], dict[str, Any], bool, bool]:
+    """Integrate processed zone summaries into runtime tracking structures."""
 
     recent_measurements: dict[str, Any] = dict(runtime.statistics_recent or {})
     sensor_state = accumulator.as_sensor_state()
@@ -1561,6 +1565,57 @@ async def _process_zone_samples(
         }
 
     dispatch_needed = energy_state_changed or bool(zone_summaries)
+    return recent_measurements, sensor_state, energy_state_changed, dispatch_needed
+
+
+async def _process_zone_samples(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    session: BeanbagSession,
+    websocket: ClientWebSocketResponse,
+    controller: SecuremtrController,
+    samples: PreparedSamples,
+    entry_identifier: str,
+) -> ZoneProcessingResult:
+    """Apply per-zone calibrations, persistence, and statistic preparation."""
+
+    contexts, calibrations = await _prepare_zone_contexts_and_calibrations(
+        runtime,
+        session,
+        websocket,
+        controller,
+        samples.rows,
+        samples.options,
+        entry_identifier,
+    )
+
+    accumulator = await _ensure_energy_accumulator(hass, entry, runtime)
+
+    (
+        statistics_samples,
+        zone_summaries,
+        energy_changed,
+    ) = await _process_zone_records(
+        accumulator,
+        samples.rows,
+        contexts,
+        calibrations,
+        samples.options,
+        entry_identifier,
+    )
+
+    (
+        recent_measurements,
+        sensor_state,
+        energy_state_changed,
+        dispatch_needed,
+    ) = _update_runtime_summaries(
+        runtime,
+        accumulator,
+        zone_summaries,
+        energy_changed,
+    )
 
     return ZoneProcessingResult(
         statistics_samples=statistics_samples,
