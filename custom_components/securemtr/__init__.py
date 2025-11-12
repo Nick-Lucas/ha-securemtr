@@ -46,6 +46,7 @@ from .beanbag import (
     BeanbagStateSnapshot,
 )
 from .energy import EnergyAccumulator
+from .runtime_helpers import async_read_zone_programs
 from .statistics import (
     PreparedSamples as PreparedSamples,
     StatisticsOptions as StatisticsOptions,
@@ -58,14 +59,13 @@ from .statistics import (
     _resolve_anchor as _resolve_anchor,
     _submit_statistics_samples as _submit_statistics_samples,
 )
-from .runtime_helpers import async_read_zone_programs
 from .utils import (
     EnergyCalibration as EnergyCalibration,
     assign_report_day,
     safe_anchor_datetime as safe_anchor_datetime,
     split_runtime_segments as split_runtime_segments,
 )
-from .zones import ZONE_KEYS
+from .zones import ZONE_KEYS, ZONE_METADATA
 
 DOMAIN = "securemtr"
 
@@ -1468,17 +1468,15 @@ async def _prepare_consumption_samples(
         sample_dt = dt_util.utc_from_timestamp(sample.timestamp)
         report_day = assign_report_day(sample_dt, options.timezone)
         iso_timestamp = sample_dt.isoformat()
-        row = {
+        row: dict[str, Any] = {
             "timestamp": iso_timestamp,
             "epoch_seconds": sample.timestamp,
             "report_day": report_day,
-            "primary_energy_kwh": sample.primary_energy_kwh,
-            "boost_energy_kwh": sample.boost_energy_kwh,
-            "primary_scheduled_minutes": sample.primary_scheduled_minutes,
-            "primary_active_minutes": sample.primary_active_minutes,
-            "boost_scheduled_minutes": sample.boost_scheduled_minutes,
-            "boost_active_minutes": sample.boost_active_minutes,
         }
+        for metadata in ZONE_METADATA.values():
+            row[metadata.energy_field] = getattr(sample, metadata.energy_field)
+            row[metadata.runtime_field] = getattr(sample, metadata.runtime_field)
+            row[metadata.scheduled_field] = getattr(sample, metadata.scheduled_field)
         processed_rows.append(row)
         log_rows.append({**row, "report_day": report_day.isoformat()})
         _LOGGER.info(
