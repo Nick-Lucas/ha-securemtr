@@ -838,13 +838,14 @@ async def _async_start_backend(
 ) -> None:
     """Authenticate with Beanbag and establish the WebSocket connection."""
 
+    runtime.controller_ready.clear()
+
     email: str = entry.data.get(CONF_EMAIL, "").strip()
     password_digest: str = entry.data.get(CONF_PASSWORD, "")
     entry_identifier = _entry_display_name(entry)
 
     if not email or not password_digest:
         _LOGGER.error("Missing credentials for securemtr entry %s", entry_identifier)
-        runtime.controller_ready.set()
         return
 
     _LOGGER.info("Starting Beanbag backend for %s", entry_identifier)
@@ -868,6 +869,7 @@ async def _async_start_backend(
 
         if outcome == "retry" and _LOGIN_RETRY_DELAY <= 0:
             for _ in range(_MAX_IMMEDIATE_STARTUP_RETRIES):
+                runtime.controller_ready.clear()
                 outcome = await _async_attempt_backend_startup(
                     entry,
                     runtime,
@@ -911,8 +913,6 @@ async def _async_start_backend(
     except asyncio.CancelledError:
         _LOGGER.info("Beanbag backend startup cancelled for %s", entry_identifier)
         raise
-    finally:
-        runtime.controller_ready.set()
 
 
 async def _async_attempt_backend_startup(
@@ -994,6 +994,8 @@ def _async_queue_backend_retry(
         )
         return
 
+    runtime.controller_ready.clear()
+
     async def _async_retry() -> None:
         """Retry backend initialisation until successful or cancelled."""
 
@@ -1066,6 +1068,7 @@ async def _async_handle_backend_success(
     _LOGGER.info("Beanbag backend connected for %s%s", entry_identifier, suffix)
     if refresh_callback is not None and runtime.consumption_refresh_pending:
         _invoke_refresh_callback(refresh_callback, entry_identifier)
+    runtime.controller_ready.set()
 
 
 async def _async_refresh_connection(
