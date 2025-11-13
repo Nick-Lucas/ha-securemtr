@@ -463,6 +463,7 @@ class SecuremtrRuntimeData:
     controller: SecuremtrController | None = None
     controller_ready: asyncio.Event = field(default_factory=asyncio.Event)
     command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    consumption_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     primary_power_on: bool | None = None
     timed_boost_enabled: bool | None = None
     timed_boost_active: bool | None = None
@@ -1398,45 +1399,59 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Refresh and persist seven-day consumption metrics for the controller."""
 
     entry_identifier = _entry_display_name(entry)
-    validation = await _validate_consumption_connection(hass, entry, entry_identifier)
-    if validation is None:
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime = domain_state.get(entry.entry_id)
+
+    if runtime is None:
+        _LOGGER.error(
+            "Runtime data unavailable while requesting consumption metrics for %s",
+            entry_identifier,
+        )
         return
 
-    runtime, controller, session, websocket = validation
+    async with runtime.consumption_lock:
+        validation = await _validate_consumption_connection(
+            hass, entry, entry_identifier, runtime
+        )
+        if validation is None:
+            return
 
-    prepared = await _prepare_consumption_samples(
-        entry, runtime, controller, entry_identifier
-    )
-    if prepared is None:
-        return
+        runtime, controller, session, websocket = validation
 
-    zone_result = await _process_zone_samples(
-        hass,
-        entry,
-        runtime,
-        session,
-        websocket,
-        controller,
-        prepared,
-        entry_identifier,
-    )
+        prepared = await _prepare_consumption_samples(
+            entry, runtime, controller, entry_identifier
+        )
+        if prepared is None:
+            return
 
-    _submit_statistics(hass, entry, controller, zone_result.statistics_samples)
+        zone_result = await _process_zone_samples(
+            hass,
+            entry,
+            runtime,
+            session,
+            websocket,
+            controller,
+            prepared,
+            entry_identifier,
+        )
 
-    _update_runtime_state(
-        hass,
-        entry,
-        runtime,
-        zone_result,
-        entry_identifier,
-        len(prepared.rows),
-    )
+        _submit_statistics(hass, entry, controller, zone_result.statistics_samples)
+
+        _update_runtime_state(
+            hass,
+            entry,
+            runtime,
+            zone_result,
+            entry_identifier,
+            len(prepared.rows),
+        )
 
 
 async def _validate_consumption_connection(
     hass: HomeAssistant,
     entry: ConfigEntry,
     entry_identifier: str,
+    runtime: SecuremtrRuntimeData | None = None,
 ) -> (
     tuple[
         SecuremtrRuntimeData,
@@ -1448,8 +1463,9 @@ async def _validate_consumption_connection(
 ):
     """Ensure the runtime, controller, and transport objects are available."""
 
-    domain_state = hass.data.get(DOMAIN, {})
-    runtime = domain_state.get(entry.entry_id)
+    if runtime is None:
+        domain_state = hass.data.get(DOMAIN, {})
+        runtime = domain_state.get(entry.entry_id)
 
     if runtime is None:
         _LOGGER.error(
