@@ -1547,6 +1547,23 @@ async def test_validate_consumption_connection_success(
 
 
 @pytest.mark.asyncio
+async def test_validate_consumption_connection_missing_runtime() -> None:
+    """Return None when runtime data is unavailable for validation."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="entry-missing",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
+    )
+
+    result = await _validate_consumption_connection(
+        hass, entry, "entry-missing"
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_consumption_samples_normalizes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2398,6 +2415,85 @@ async def test_consumption_metrics_refreshes_history(
     assert boost_recent["runtime_hours"] == pytest.approx(boost_runtime[-1])
     assert boost_recent["scheduled_hours"] == pytest.approx(boost_scheduled[-1])
     assert boost_recent["energy_sum"] == pytest.approx(boost_cumulative[-1])
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_serializes_concurrent_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    store_instances,
+) -> None:
+    """Ensure simultaneous refreshes do not trigger duplicate backend calls."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(
+        entry_id="metrics-lock",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+
+    backend = FakeBeanbagBackend(object())
+
+    start_event = asyncio.Event()
+    release_event = asyncio.Event()
+    call_count = 0
+
+    original_read = FakeBeanbagBackend.read_energy_history
+
+    async def blocking_read(
+        self,
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+        gateway_id: str,
+        *,
+        window_index: int = 1,
+    ) -> list[BeanbagEnergySample]:
+        nonlocal call_count
+        call_count += 1
+        start_event.set()
+        await release_event.wait()
+        return await original_read(
+            self,
+            session,
+            websocket,
+            gateway_id,
+            window_index=window_index,
+        )
+
+    monkeypatch.setattr(FakeBeanbagBackend, "read_energy_history", blocking_read)
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_add_external_statistics",
+        lambda _hass, _metadata, _samples: None,
+    )
+
+    session, websocket = await backend.login_and_connect(
+        entry.data["email"], entry.data["password"]
+    )
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = session
+    runtime.websocket = websocket
+    runtime.controller = await _async_fetch_controller(entry, runtime)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+    runtime.consumption_refresh_pending = True
+    assert isinstance(store_instances, list)
+
+    first_task = asyncio.create_task(consumption_metrics(hass, entry))
+    await asyncio.wait_for(start_event.wait(), timeout=1)
+
+    second_task = asyncio.create_task(consumption_metrics(hass, entry))
+    await asyncio.sleep(0)
+    assert call_count == 1
+
+    second_task.cancel()
+    release_event.set()
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+
+    await first_task
+    await hass.async_block_till_done()
+
+    assert call_count == 1
+    assert backend.energy_history_calls == [("gateway-1", 1)]
 
 
 @pytest.mark.asyncio
