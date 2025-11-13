@@ -9,7 +9,7 @@ import sys
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from aiohttp import ClientConnectionResetError, ClientError
+from aiohttp import ClientConnectionResetError, ClientError, ClientTimeout
 
 # Ensure the integration package can be imported without installation.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +25,7 @@ from custom_components.securemtr.beanbag import (
     BeanbagWebSocketClient,
     BeanbagWebSocketError,
     DailyProgram,
+    REQUEST_TIMEOUT_SECONDS,
     _coerce_energy,
     _coerce_minutes,
 )
@@ -120,6 +121,8 @@ async def test_login_success_parses_payload() -> None:
     _, kwargs = session.post.call_args
     assert kwargs["headers"] == {"Request-id": "1"}
     assert kwargs["json"]["ULC"]["UEI"] == "user@example.com"
+    assert isinstance(kwargs["timeout"], ClientTimeout)
+    assert kwargs["timeout"].total == REQUEST_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -521,7 +524,9 @@ async def test_backend_read_schedule_overview_requires_object(
     monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
 
     with pytest.raises(BeanbagWebSocketError):
-        await backend.read_schedule_overview(session_data, DummyWebSocket(), "gateway-1")
+        await backend.read_schedule_overview(
+            session_data, DummyWebSocket(), "gateway-1"
+        )
 
 
 @pytest.mark.asyncio
@@ -556,9 +561,7 @@ async def test_backend_read_schedule_overview_returns_payload(
     )
     monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
 
-    payload = await backend.read_schedule_overview(
-        session_data, websocket, "gateway-1"
-    )
+    payload = await backend.read_schedule_overview(session_data, websocket, "gateway-1")
 
     assert payload == {"V": [1, 2, 3]}
 
@@ -645,17 +648,10 @@ def test_backend_extract_primary_power_variants() -> None:
     assert backend._extract_primary_power({"V": ["not-dict"]}) is None
     assert backend._extract_primary_power({"V": [{"SI": 10}]}) is None
     assert backend._extract_primary_power({"V": [{"SI": 33, "V": "bad"}]}) is None
+    assert backend._extract_primary_power({"V": [{"SI": 33, "V": [{}]}]}) is None
+    assert backend._extract_primary_power({"V": [{"SI": 33, "V": [{"I": 99}]}]}) is None
     assert (
-        backend._extract_primary_power({"V": [{"SI": 33, "V": [{}]}]}) is None
-    )
-    assert (
-        backend._extract_primary_power({"V": [{"SI": 33, "V": [{"I": 99}]}]})
-        is None
-    )
-    assert (
-        backend._extract_primary_power(
-            {"V": [{"SI": 33, "V": [{"I": 6, "V": 2}]}]}
-        )
+        backend._extract_primary_power({"V": [{"SI": 33, "V": [{"I": 6, "V": 2}]}]})
         is True
     )
     assert (
@@ -1143,10 +1139,7 @@ def test_extract_timed_boost_flag_edge_cases() -> None:
     assert backend._extract_timed_boost_flag({}) is None
     assert backend._extract_timed_boost_flag({"V": ["invalid"]}) is None
     assert backend._extract_timed_boost_flag({"V": [{"SI": 16, "V": "oops"}]}) is None
-    assert (
-        backend._extract_timed_boost_flag({"V": [{"SI": 16, "V": ["nope"]}]})
-        is None
-    )
+    assert backend._extract_timed_boost_flag({"V": [{"SI": 16, "V": ["nope"]}]}) is None
     assert (
         backend._extract_timed_boost_flag({"V": [{"SI": 16, "V": [{"I": 1, "V": 0}]}]})
         is None
@@ -1513,6 +1506,7 @@ async def test_backend_write_weekly_program_ack_error(
             zone="primary",
         )
 
+
 @pytest.mark.asyncio
 async def test_backend_send_request_handles_informational_frames(
     monkeypatch: pytest.MonkeyPatch,
@@ -1802,18 +1796,19 @@ async def test_backend_send_request_with_args(monkeypatch: pytest.MonkeyPatch) -
     assert result == 0
     assert websocket.sent[0]["P"][1] == [1, {"I": 6, "V": 2}]
 
+
 def test_backend_parse_daily_program_invalid_structure() -> None:
     """Raise when daily entries lack integer minute fields."""
 
     with pytest.raises(BeanbagWebSocketError):
-        BeanbagBackend._parse_daily_program([{ "O": "bad", "T": 1 }])
+        BeanbagBackend._parse_daily_program([{"O": "bad", "T": 1}])
 
 
 def test_backend_parse_daily_program_minute_bounds() -> None:
     """Raise when daily entries specify out-of-range minutes."""
 
     with pytest.raises(BeanbagWebSocketError):
-        BeanbagBackend._parse_daily_program([{ "O": 2000, "T": 1 }])
+        BeanbagBackend._parse_daily_program([{"O": 2000, "T": 1}])
 
 
 def test_backend_parse_daily_program_excess_on_transitions() -> None:
@@ -1836,7 +1831,7 @@ def test_backend_parse_daily_program_unknown_state() -> None:
     """Raise when an unsupported transition type is observed."""
 
     with pytest.raises(BeanbagWebSocketError):
-        BeanbagBackend._parse_daily_program([{ "O": 45, "T": 3 }])
+        BeanbagBackend._parse_daily_program([{"O": 45, "T": 3}])
 
 
 def test_backend_parse_daily_program_ignores_noise() -> None:
@@ -1844,6 +1839,7 @@ def test_backend_parse_daily_program_ignores_noise() -> None:
 
     result = BeanbagBackend._parse_daily_program(["noise", {"O": 45, "T": 1}])
     assert result.on_minutes[0] == 45
+
 
 def test_backend_build_weekly_program_payload_requires_seven_days() -> None:
     """Ensure weekly program encoding enforces the seven-day structure."""
@@ -1857,7 +1853,11 @@ def test_backend_build_weekly_program_payload_validates_counts() -> None:
     """Reject daily schedules that exceed documented transition limits."""
 
     class FakeDay:
-        def __init__(self, on_minutes: tuple[int | None, ...], off_minutes: tuple[int | None, ...]) -> None:
+        def __init__(
+            self,
+            on_minutes: tuple[int | None, ...],
+            off_minutes: tuple[int | None, ...],
+        ) -> None:
             self.on_minutes = on_minutes
             self.off_minutes = off_minutes
 
@@ -1888,6 +1888,7 @@ def test_backend_build_weekly_program_payload_validates_counts() -> None:
     with pytest.raises(ValueError):
         BeanbagBackend._build_weekly_program_payload(program_bad_minute, 1)
 
+
 @pytest.mark.asyncio
 async def test_backend_write_weekly_program_boost_zone(
     monkeypatch: pytest.MonkeyPatch,
@@ -1917,6 +1918,7 @@ async def test_backend_write_weekly_program_boost_zone(
 
     args = send.await_args.kwargs["args"]
     assert args[0]["I"] == 2
+
 
 @pytest.mark.asyncio
 async def test_backend_read_weekly_program_payload_not_list(
