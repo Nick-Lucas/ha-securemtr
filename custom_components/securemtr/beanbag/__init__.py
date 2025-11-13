@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ LOGIN_PATH = "/api/UserRestAPI/LoginRequest"
 WS_PATH = "/api/TransactionRestAPI/ConnectWebSocket"
 REQUEST_ID = "1"
 SUBPROTOCOL = "BB-BO-01"
+
+WEBSOCKET_RESPONSE_TIMEOUT = 15
 
 MINUTES_PER_DAY = 24 * 60
 TRANSITIONS_PER_DAY = 6
@@ -1215,7 +1218,23 @@ class BeanbagBackend:
 
         try:
             while True:
-                message = await websocket.receive_json()
+                try:
+                    message = await asyncio.wait_for(
+                        websocket.receive_json(),
+                        timeout=WEBSOCKET_RESPONSE_TIMEOUT,
+                    )
+                except TimeoutError as error:
+                    _LOGGER.warning(
+                        "Beanbag WebSocket receive timed out after %s seconds",
+                        WEBSOCKET_RESPONSE_TIMEOUT,
+                    )
+                    if not getattr(websocket, "closed", True):
+                        with suppress(Exception):
+                            await websocket.close()
+                    raise BeanbagWebSocketError(
+                        "Beanbag WebSocket receive timed out"
+                    ) from error
+
                 if not isinstance(message, dict):
                     _LOGGER.debug(
                         "Ignoring non-object WebSocket frame: %s", type(message)
@@ -1246,12 +1265,12 @@ class BeanbagBackend:
                 raise BeanbagWebSocketError(
                     "Beanbag WebSocket response missing result payload"
                 )
-        except (ClientConnectionError, TimeoutError) as error:
+        except ClientConnectionError as error:
             _LOGGER.warning(
                 "Beanbag WebSocket receive failed due to transport error: %s",
                 error,
             )
-            if not websocket.closed:
+            if not getattr(websocket, "closed", True):
                 with suppress(Exception):
                     await websocket.close()
             raise BeanbagWebSocketError(

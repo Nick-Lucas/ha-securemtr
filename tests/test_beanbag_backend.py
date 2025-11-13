@@ -1708,6 +1708,59 @@ async def test_backend_send_request_closes_on_receive_timeout(
 
 
 @pytest.mark.asyncio
+async def test_backend_send_request_times_out_on_delayed_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convert delayed responses into Beanbag timeout errors."""
+
+    session_data = BeanbagSession(
+        user_id=1,
+        session_id="abc",
+        token="jwt",
+        token_timestamp=None,
+        gateways=(),
+    )
+
+    class SlowWebSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.close_calls = 0
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            return None
+
+        async def receive_json(self) -> dict[str, Any]:
+            await asyncio.sleep(0.1)
+            return {"I": "abc-00000001", "R": {}}
+
+        async def close(self) -> None:
+            self.closed = True
+            self.close_calls += 1
+
+    websocket = SlowWebSocket()
+    backend = BeanbagBackend(Mock())
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.secrets.randbits", lambda bits: 1
+    )
+    monkeypatch.setattr("custom_components.securemtr.beanbag.time.time", lambda: 1000)
+    monkeypatch.setattr(
+        "custom_components.securemtr.beanbag.WEBSOCKET_RESPONSE_TIMEOUT", 0.01
+    )
+
+    with pytest.raises(BeanbagWebSocketError):
+        await backend._send_request(  # type: ignore[attr-defined]
+            session_data,
+            websocket,  # type: ignore[arg-type]
+            "gateway-1",
+            header_hi=1,
+            header_si=2,
+        )
+
+    assert websocket.closed is True
+    assert websocket.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_backend_send_request_with_args(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure argument lists are included in the transmitted payload."""
 
