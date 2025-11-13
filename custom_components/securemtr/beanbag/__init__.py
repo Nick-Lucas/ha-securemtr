@@ -15,6 +15,7 @@ from aiohttp import (
     ClientConnectionError,
     ClientError,
     ClientSession,
+    ClientTimeout,
     ClientWebSocketResponse,
     ContentTypeError,
 )
@@ -35,6 +36,7 @@ REQUEST_ID = "1"
 SUBPROTOCOL = "BB-BO-01"
 
 WEBSOCKET_RESPONSE_TIMEOUT = 15
+REQUEST_TIMEOUT_SECONDS = 10
 
 MINUTES_PER_DAY = 24 * 60
 TRANSITIONS_PER_DAY = 6
@@ -206,7 +208,10 @@ class BeanbagHttpClient:
 
         try:
             async with self._session.post(
-                url, json=payload, headers=headers
+                url,
+                json=payload,
+                headers=headers,
+                timeout=ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
             ) as response:
                 status = response.status
                 try:
@@ -463,9 +468,7 @@ class BeanbagBackend:
         )
 
         if not isinstance(response, list):
-            raise BeanbagWebSocketError(
-                "Beanbag zones payload did not contain a list"
-            )
+            raise BeanbagWebSocketError("Beanbag zones payload did not contain a list")
 
         zones: list[dict[str, Any]] = []
         for entry in response:
@@ -728,7 +731,8 @@ class BeanbagBackend:
 
         program = self._parse_weekly_program(response)
         _LOGGER.debug(
-            "Beanbag weekly program retrieved for zone %s", zone,
+            "Beanbag weekly program retrieved for zone %s",
+            zone,
         )
         return program
 
@@ -858,9 +862,7 @@ class BeanbagBackend:
         return None
 
     @staticmethod
-    def _extract_timed_boost_end_minute(
-        state_payload: dict[str, Any]
-    ) -> int | None:
+    def _extract_timed_boost_end_minute(state_payload: dict[str, Any]) -> int | None:
         """Return the minute-of-day value for the boost end time."""
 
         items = BeanbagBackend._extract_boost_items(state_payload)
@@ -879,7 +881,7 @@ class BeanbagBackend:
 
     @staticmethod
     def _extract_boost_items(
-        state_payload: dict[str, Any]
+        state_payload: dict[str, Any],
     ) -> list[dict[str, Any]] | None:
         """Extract the boost block item list from a live state payload."""
 
@@ -1062,9 +1064,7 @@ class BeanbagBackend:
 
             transitions = [
                 (minute, 1) for minute in on_minutes if isinstance(minute, int)
-            ] + [
-                (minute, 0) for minute in off_minutes if isinstance(minute, int)
-            ]
+            ] + [(minute, 0) for minute in off_minutes if isinstance(minute, int)]
 
             for minute, _ in transitions:
                 if minute < 0 or minute >= MINUTES_PER_DAY:
@@ -1118,9 +1118,7 @@ class BeanbagBackend:
 
             entries = block.get("D")
             if not isinstance(entries, list):
-                _LOGGER.debug(
-                    "Ignoring Beanbag energy block without entry list"
-                )
+                _LOGGER.debug("Ignoring Beanbag energy block without entry list")
                 continue
 
             for entry in entries:
