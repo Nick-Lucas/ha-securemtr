@@ -1410,30 +1410,31 @@ async def consumption_metrics(hass: HomeAssistant, entry: ConfigEntry) -> None:
         return
 
     async with runtime.consumption_lock:
-        validation = await _validate_consumption_connection(
-            hass, entry, entry_identifier, runtime
-        )
-        if validation is None:
-            return
+        async with runtime.command_lock:
+            validation = await _validate_consumption_connection(
+                hass, entry, entry_identifier, runtime
+            )
+            if validation is None:
+                return
 
-        runtime, controller, session, websocket = validation
+            runtime, controller, session, websocket = validation
 
-        prepared = await _prepare_consumption_samples(
-            entry, runtime, controller, entry_identifier
-        )
-        if prepared is None:
-            return
+            prepared = await _prepare_consumption_samples(
+                entry, runtime, controller, entry_identifier
+            )
+            if prepared is None:
+                return
 
-        zone_result = await _process_zone_samples(
-            hass,
-            entry,
-            runtime,
-            session,
-            websocket,
-            controller,
-            prepared,
-            entry_identifier,
-        )
+            zone_result = await _process_zone_samples(
+                hass,
+                entry,
+                runtime,
+                session,
+                websocket,
+                controller,
+                prepared,
+                entry_identifier,
+            )
 
         _submit_statistics(hass, entry, controller, zone_result.statistics_samples)
 

@@ -15,6 +15,7 @@ import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import (
     DEFAULT_DEVICE_LABEL,
     DOMAIN,
+    consumption_metrics,
     SecuremtrController,
     SecuremtrRuntimeData,
     coerce_end_time,
@@ -832,3 +833,132 @@ async def test_consumption_button_triggers_refresh(
     button.hass = None
     with pytest.raises(HomeAssistantError):
         await button.async_press()
+
+
+@pytest.mark.asyncio
+async def test_consumption_refresh_serializes_with_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure consumption refresh defers backend work until commands finish."""
+
+    runtime, backend = _create_runtime()
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = create_config_entry(entry_id="entry")
+
+    dispatcher_calls: list[tuple[object, str]] = []
+    monkeypatch.setattr(
+        "custom_components.securemtr.runtime_helpers.async_dispatch_runtime_update",
+        lambda hass_obj, entry_id: dispatcher_calls.append((hass_obj, entry_id)),
+    )
+
+    command_button = SecuremtrTimedBoostButton(runtime, runtime.controller, entry, 30)
+    command_button.hass = SimpleNamespace()
+
+    command_started = asyncio.Event()
+    release_command = asyncio.Event()
+
+    async def _blocking_start(
+        session: object,
+        websocket: object,
+        gateway_id: str,
+        *,
+        duration_minutes: int,
+    ) -> None:
+        command_started.set()
+        await release_command.wait()
+        backend.start_calls.append((session, websocket, gateway_id, duration_minutes))
+
+    backend.start_timed_boost = _blocking_start  # type: ignore[assignment]
+
+    prepared_called = asyncio.Event()
+    process_called = asyncio.Event()
+
+    async def _fake_validate(
+        hass_obj: object,
+        entry_obj: ConfigEntry,
+        entry_identifier: str,
+        runtime_obj: SecuremtrRuntimeData | None = None,
+    ) -> tuple[SecuremtrRuntimeData, SecuremtrController, object, object]:
+        return runtime, runtime.controller, runtime.session, runtime.websocket
+
+    async def _fake_prepare(
+        entry_obj: ConfigEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        controller_obj: SecuremtrController,
+        entry_identifier: str,
+    ) -> SimpleNamespace | None:
+        if not release_command.is_set():
+            raise AssertionError("Consumption refresh ran before command completed")
+        prepared_called.set()
+        return SimpleNamespace(rows=[{}], options=SimpleNamespace())
+
+    async def _fake_process(
+        hass_obj: object,
+        entry_obj: ConfigEntry,
+        runtime_obj: SecuremtrRuntimeData,
+        session: object,
+        websocket: object,
+        controller_obj: SecuremtrController,
+        prepared: SimpleNamespace,
+        entry_identifier: str,
+    ) -> SimpleNamespace:
+        if not release_command.is_set():
+            raise AssertionError("Zone processing ran before command completed")
+        process_called.set()
+        return SimpleNamespace(
+            statistics_samples={},
+            sensor_state={},
+            recent_measurements={},
+            energy_state_changed=False,
+            dispatch_needed=False,
+        )
+
+    submit_calls: list[tuple] = []
+    update_calls: list[tuple] = []
+
+    def _fake_submit(*args: object) -> None:
+        submit_calls.append(args)
+
+    def _fake_update(*args: object) -> None:
+        update_calls.append(args)
+
+    monkeypatch.setattr(
+        "custom_components.securemtr._validate_consumption_connection",
+        _fake_validate,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._prepare_consumption_samples",
+        _fake_prepare,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._process_zone_samples",
+        _fake_process,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._submit_statistics",
+        _fake_submit,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._update_runtime_state",
+        _fake_update,
+    )
+
+    command_task = asyncio.create_task(command_button.async_press())
+    await asyncio.wait_for(command_started.wait(), timeout=1)
+
+    refresh_task = asyncio.create_task(consumption_metrics(hass, entry))
+
+    await asyncio.sleep(0)
+    assert prepared_called.is_set() is False
+    assert process_called.is_set() is False
+
+    release_command.set()
+
+    await asyncio.wait_for(command_task, timeout=1)
+    await asyncio.wait_for(refresh_task, timeout=1)
+
+    assert prepared_called.is_set()
+    assert process_called.is_set()
+    assert submit_calls
+    assert update_calls
+    assert dispatcher_calls
