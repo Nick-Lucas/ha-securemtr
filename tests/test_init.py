@@ -1121,7 +1121,7 @@ async def test_async_setup_entry_handles_missing_gateways(
 
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.controller is None
-    assert runtime.controller_ready.is_set()
+    assert not runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -1209,7 +1209,7 @@ async def test_async_setup_entry_logs_metadata_failure(
 
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.controller is None
-    assert runtime.controller_ready.is_set()
+    assert not runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -1251,7 +1251,7 @@ async def test_async_setup_entry_handles_unexpected_metadata_error(
 
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.controller is None
-    assert runtime.controller_ready.is_set()
+    assert not runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -1292,7 +1292,7 @@ async def test_async_setup_entry_handles_backend_error(
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.session is None
     assert runtime.websocket is None
-    assert runtime.controller_ready.is_set()
+    assert not runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -1417,7 +1417,7 @@ async def test_async_setup_entry_missing_credentials(
     assert runtime.session is None
     assert runtime.websocket is None
     assert backend.login_calls == []
-    assert runtime.controller_ready.is_set()
+    assert not runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -4425,18 +4425,21 @@ async def test_async_start_backend_uses_success_helper(
         "custom_components.securemtr._async_attempt_backend_startup",
         attempt,
     )
-    helper = AsyncMock()
-    monkeypatch.setattr(
-        "custom_components.securemtr._async_handle_backend_success",
-        helper,
-    )
+    original_helper = securemtr_module._async_handle_backend_success
+    helper_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def _helper(*args: Any, **kwargs: Any) -> None:
+        helper_calls.append((args, kwargs))
+        await original_helper(*args, **kwargs)
+
+    monkeypatch.setattr(securemtr_module, "_async_handle_backend_success", _helper)
 
     await _async_start_backend(hass, entry, runtime)
 
-    assert helper.await_count == 1
-    call_args = helper.await_args_list[0]
-    assert call_args.args[:3] == (hass, entry, runtime)
-    assert call_args.args[3] is runtime.consumption_refresh_callback
+    assert len(helper_calls) == 1
+    helper_args, helper_kwargs = helper_calls[0]
+    assert helper_args[:3] == (hass, entry, runtime)
+    assert helper_args[3] is runtime.consumption_refresh_callback
     assert runtime.controller_ready.is_set()
 
 
@@ -4462,8 +4465,10 @@ async def test_async_start_backend_retry_then_success(
     runtime.consumption_refresh_callback = _callback
 
     results = iter(["retry", "success"])
+    readiness_states: list[bool] = []
 
     async def _attempt(*_args: Any, **_kwargs: Any) -> str:
+        readiness_states.append(runtime.controller_ready.is_set())
         return next(results)
 
     monkeypatch.setattr(
@@ -4481,6 +4486,7 @@ async def test_async_start_backend_retry_then_success(
 
     assert callback_calls == ["called"]
     assert ensure_helpers.await_count == 1
+    assert readiness_states == [False, False]
     assert runtime.controller_ready.is_set()
 
 
@@ -4517,18 +4523,38 @@ async def test_async_start_backend_abort_logs_error(
         AsyncMock(),
     )
 
+    runtime.controller_ready.set()
+
     caplog.set_level(logging.ERROR)
     await _async_start_backend(hass, entry, runtime)
 
     assert "Aborting Beanbag backend startup" in caplog.text
-    assert runtime.controller_ready.is_set()
+    assert not runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
-async def test_async_start_backend_cancelled_sets_event(
+async def test_async_start_backend_missing_credentials_leaves_event_unset(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log credential issues without marking the controller ready."""
+
+    hass = FakeHass()
+    entry = DummyConfigEntry(entry_id="entry", data={})
+    runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.controller_ready.set()
+
+    caplog.set_level(logging.ERROR)
+    await _async_start_backend(hass, entry, runtime)
+
+    assert "Missing credentials" in caplog.text
+    assert not runtime.controller_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_async_start_backend_cancelled_leaves_event_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Propagate cancellation errors while marking the runtime ready."""
+    """Propagate cancellation errors without signalling readiness."""
 
     hass = FakeHass()
     entry = DummyConfigEntry(
@@ -4540,6 +4566,8 @@ async def test_async_start_backend_cancelled_sets_event(
     async def _cancelled(*_args: Any, **_kwargs: Any) -> str:
         raise asyncio.CancelledError
 
+    runtime.controller_ready.set()
+
     monkeypatch.setattr(
         "custom_components.securemtr._async_attempt_backend_startup",
         _cancelled,
@@ -4548,7 +4576,7 @@ async def test_async_start_backend_cancelled_sets_event(
     with pytest.raises(asyncio.CancelledError):
         await _async_start_backend(hass, entry, runtime)
 
-    assert runtime.controller_ready.is_set()
+    assert not runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -4796,6 +4824,7 @@ async def test_async_queue_backend_retry_missing_credentials(
     hass = FakeHass()
     entry = DummyConfigEntry(entry_id="entry", data={})
     runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.controller_ready.set()
 
     async def fast_sleep(_delay: float) -> None:
         return None
@@ -4821,6 +4850,7 @@ async def test_async_queue_backend_retry_missing_credentials(
 
     assert runtime.retry_task is None
     assert any("Missing credentials" in record.message for record in caplog.records)
+    assert not runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -4848,10 +4878,18 @@ async def test_async_queue_backend_retry_success_invokes_callback(
     async def fast_sleep(_delay: float) -> None:
         return None
 
-    attempt = AsyncMock(side_effect=["retry", "success"])
+    runtime.controller_ready.set()
+
+    outcomes = iter(["retry", "success"])
+    readiness_states: list[bool] = []
+
+    async def _attempt(*_args: Any, **_kwargs: Any) -> str:
+        readiness_states.append(runtime.controller_ready.is_set())
+        return next(outcomes)
+
     monkeypatch.setattr(
         "custom_components.securemtr._async_attempt_backend_startup",
-        attempt,
+        _attempt,
     )
     monkeypatch.setattr(
         "custom_components.securemtr._async_ensure_utility_meters",
@@ -4877,11 +4915,12 @@ async def test_async_queue_backend_retry_success_invokes_callback(
     await asyncio.wait_for(task, 0.1)
 
     assert callback_calls == ["called"]
-    assert attempt.await_count >= 2
+    assert readiness_states == [False, False]
     assert runtime.retry_task is None
     assert any(
         "Retrying Beanbag backend startup" in rec.message for rec in caplog.records
     )
+    assert runtime.controller_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -4949,6 +4988,7 @@ async def test_async_queue_backend_retry_abort_logs_error(
         data={"email": "user@example.com", "password": "digest"},
     )
     runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
+    runtime.controller_ready.set()
 
     async def fast_sleep(_delay: float) -> None:
         return None
@@ -4979,6 +5019,7 @@ async def test_async_queue_backend_retry_abort_logs_error(
         for record in caplog.records
     )
     assert runtime.retry_task is None
+    assert not runtime.controller_ready.is_set()
 
 
 def test_runtime_update_signal_helper() -> None:
