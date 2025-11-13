@@ -4826,6 +4826,16 @@ async def test_async_queue_backend_retry_missing_credentials(
     runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
     runtime.controller_ready.set()
 
+    created_tasks: list[asyncio.Task[Any]] = []
+    original_create_task = hass.async_create_task
+
+    def _capture_task(coro: Awaitable[Any]) -> asyncio.Task[Any]:
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(hass, "async_create_task", _capture_task)
+
     async def fast_sleep(_delay: float) -> None:
         return None
 
@@ -4874,6 +4884,16 @@ async def test_async_queue_backend_retry_success_invokes_callback(
         callback_calls.append("called")
 
     runtime.consumption_refresh_callback = _callback
+
+    created_tasks: list[asyncio.Task[Any]] = []
+    original_create_task = hass.async_create_task
+
+    def _capture_task(coro: Awaitable[Any]) -> asyncio.Task[Any]:
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(hass, "async_create_task", _capture_task)
 
     async def fast_sleep(_delay: float) -> None:
         return None
@@ -4936,6 +4956,16 @@ async def test_async_queue_backend_retry_uses_success_helper(
     )
     runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
 
+    created_tasks: list[asyncio.Task[Any]] = []
+    original_create_task = hass.async_create_task
+
+    def _capture_task(coro: Awaitable[Any]) -> asyncio.Task[Any]:
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(hass, "async_create_task", _capture_task)
+
     async def fast_sleep(_delay: float) -> None:
         return None
 
@@ -4989,6 +5019,16 @@ async def test_async_queue_backend_retry_abort_logs_error(
     )
     runtime = SecuremtrRuntimeData(backend=FakeBeanbagBackend(object()))
     runtime.controller_ready.set()
+
+    created_tasks: list[asyncio.Task[Any]] = []
+    original_create_task = hass.async_create_task
+
+    def _capture_task(coro: Awaitable[Any]) -> asyncio.Task[Any]:
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(hass, "async_create_task", _capture_task)
 
     async def fast_sleep(_delay: float) -> None:
         return None

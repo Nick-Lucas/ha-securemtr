@@ -1049,7 +1049,7 @@ def _async_queue_backend_retry(
         finally:
             runtime.retry_task = None
 
-    runtime.retry_task = asyncio.create_task(_async_retry())
+    runtime.retry_task = hass.async_create_task(_async_retry())
 
 
 async def _async_handle_backend_success(
