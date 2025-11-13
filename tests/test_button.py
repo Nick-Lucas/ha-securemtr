@@ -31,7 +31,7 @@ from custom_components.securemtr.button import (
 from custom_components.securemtr.entity import controller_display_label
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 
 from tests.helpers import create_config_entry
 
@@ -723,7 +723,9 @@ async def test_cancel_button_backend_error(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_button_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_button_setup_times_out(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """Ensure setup skips button creation when controller metadata is delayed."""
 
     runtime, _backend = _create_runtime()
@@ -737,9 +739,12 @@ async def test_button_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
     entities: list[ButtonEntity] = []
 
-    await async_setup_entry(hass, entry, entities.extend)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ConfigEntryNotReady, match="not ready"):
+            await async_setup_entry(hass, entry, entities.extend)
 
     assert entities == []
+    assert "Skipping SecureMTR button setup" in caplog.text
 
 
 @pytest.mark.asyncio

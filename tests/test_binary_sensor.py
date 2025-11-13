@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +16,7 @@ from custom_components.securemtr.binary_sensor import (
 )
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import ConfigEntryNotReady
 
 
 from tests.helpers import create_config_entry
@@ -125,7 +127,9 @@ async def test_binary_sensor_requires_controller() -> None:
 
 
 @pytest.mark.asyncio
-async def test_binary_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_binary_sensor_setup_times_out(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """Ensure setup skips binary sensor creation when controller metadata is delayed."""
 
     runtime = _create_runtime()
@@ -139,9 +143,12 @@ async def test_binary_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) ->
 
     entities: list[SecuremtrBoostActiveBinarySensor] = []
 
-    await async_setup_entry(hass, entry, entities.extend)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ConfigEntryNotReady, match="not ready"):
+            await async_setup_entry(hass, entry, entities.extend)
 
     assert entities == []
+    assert "Skipping SecureMTR binary sensor setup" in caplog.text
 
 
 @pytest.mark.asyncio
