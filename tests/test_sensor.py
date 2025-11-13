@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +22,7 @@ from custom_components.securemtr.zones import ZONE_METADATA, ZoneMetadata
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import ConfigEntryNotReady
 
 
 from tests.helpers import create_config_entry
@@ -409,7 +411,9 @@ async def test_energy_sensors_report_totals() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sensor_setup_times_out(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """Ensure setup skips sensor creation when controller metadata is delayed."""
 
     runtime = _create_runtime()
@@ -423,9 +427,12 @@ async def test_sensor_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
     entities: list[SecuremtrSensorEntity] = []
 
-    await async_setup_entry(hass, entry, entities.extend)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ConfigEntryNotReady, match="not ready"):
+            await async_setup_entry(hass, entry, entities.extend)
 
     assert entities == []
+    assert "Skipping SecureMTR sensor setup" in caplog.text
 
 
 @pytest.mark.asyncio

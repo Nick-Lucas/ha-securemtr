@@ -13,7 +13,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfTime
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SecuremtrController, SecuremtrRuntimeData
@@ -41,6 +41,10 @@ async def async_setup_entry(
             entry_label,
             error,
         )
+        if isinstance(error.__cause__, TimeoutError):
+            raise ConfigEntryNotReady(
+                f"SecureMTR controller for {entry_label} is not ready"
+            ) from error
         return
 
     _LOGGER.info(

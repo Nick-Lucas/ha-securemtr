@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, cast
 
@@ -24,7 +25,7 @@ from custom_components.securemtr.switch import (
 )
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 
 
 from tests.helpers import create_config_entry
@@ -357,7 +358,9 @@ def test_switch_device_info_without_serial() -> None:
 
 
 @pytest.mark.asyncio
-async def test_switch_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_switch_setup_times_out(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """Verify the platform skips entity creation when metadata is delayed."""
 
     runtime, _backend = _create_runtime()
@@ -371,9 +374,12 @@ async def test_switch_setup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
     entities: list[SwitchEntity] = []
 
-    await async_setup_entry(hass, entry, entities.extend)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ConfigEntryNotReady, match="not ready"):
+            await async_setup_entry(hass, entry, entities.extend)
 
     assert entities == []
+    assert "Skipping SecureMTR switch setup" in caplog.text
 
 
 @pytest.mark.asyncio
