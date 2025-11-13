@@ -789,26 +789,23 @@ def entity_registry_stub(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def track_time_spy(monkeypatch: pytest.MonkeyPatch):
-    """Provide a helper to stub async_track_time_change and capture callbacks."""
+    """Stub async_track_point_in_time and collect scheduled callbacks."""
 
-    def installer(hass: FakeHass) -> list[tuple]:
-        callbacks: list[tuple] = []
+    def installer(hass: FakeHass) -> list[tuple[Callable[[datetime], None], datetime]]:
+        callbacks: list[tuple[Callable[[datetime], None], datetime]] = []
 
-        def fake_track_time_change(
+        def fake_track_point_in_time(
             hass_obj: FakeHass,
-            action,
-            *,
-            hour: int | None = None,
-            minute: int | None = None,
-            second: int | None = None,
-        ):
+            action: Callable[[datetime], None],
+            when: datetime,
+        ) -> Callable[[], None]:
             assert hass_obj is hass
-            callbacks.append((action, hour, minute, second))
+            callbacks.append((action, when))
             return lambda: None
 
         monkeypatch.setattr(
-            "custom_components.securemtr.async_track_time_change",
-            fake_track_time_change,
+            "custom_components.securemtr.async_track_point_in_time",
+            fake_track_point_in_time,
         )
         return callbacks
 
@@ -833,6 +830,13 @@ async def test_async_setup_entry_starts_backend(
         unique_id="user@example.com",
         data={"email": "user@example.com", "password": "digest"},
         title="SecureMTR",
+        options={CONF_TIME_ZONE: "UTC"},
+    )
+
+    monkeypatch.setattr(
+        dt_util,
+        "utcnow",
+        lambda: datetime(2024, 8, 20, 0, 30, tzinfo=timezone.utc),
     )
 
     fake_session = object()
@@ -890,20 +894,32 @@ async def test_async_setup_entry_starts_backend(
         ("button", "binary_sensor", "sensor"),
     ]
     assert callbacks
-    assert [callback_info[1:] for callback_info in callbacks] == [
-        (1, 0, 0),
-    ]
+    scheduled_action, scheduled_time = callbacks[0]
+    assert scheduled_time == datetime(2024, 8, 20, 1, 0, tzinfo=timezone.utc)
     assert fake_metrics.await_args_list == [call(hass, entry)]
 
-    callback = callbacks[0][0]
-    callback(datetime.now(timezone.utc))
+    scheduled_action(scheduled_time)
     await hass.async_block_till_done()
     assert fake_metrics.await_args_list == [call(hass, entry), call(hass, entry)]
 
-    next_day = datetime.now(timezone.utc) + timedelta(days=1)
-    callbacks[0][0](next_day)
+    assert len(callbacks) >= 2
+    next_action, next_time = callbacks[1]
+    assert next_time == datetime(2024, 8, 21, 1, 0, tzinfo=timezone.utc)
+    next_action(next_time)
     await hass.async_block_till_done()
     assert fake_metrics.await_args_list == [
+        call(hass, entry),
+        call(hass, entry),
+        call(hass, entry),
+    ]
+
+    assert len(callbacks) >= 3
+    third_action, third_time = callbacks[2]
+    assert third_time == datetime(2024, 8, 22, 1, 0, tzinfo=timezone.utc)
+    third_action(third_time)
+    await hass.async_block_till_done()
+    assert fake_metrics.await_args_list == [
+        call(hass, entry),
         call(hass, entry),
         call(hass, entry),
         call(hass, entry),
@@ -945,6 +961,7 @@ async def test_consumption_scheduler_fires_with_frozen_clock(
         entry_id="scheduler",
         data={"email": "user@example.com", "password": "digest"},
         unique_id="user@example.com",
+        options={CONF_TIME_ZONE: "UTC"},
     )
 
     fake_metrics = AsyncMock()
@@ -965,28 +982,38 @@ async def test_consumption_scheduler_fires_with_frozen_clock(
         "custom_components.securemtr._async_ensure_utility_meters",
         AsyncMock(),
     )
+    monkeypatch.setattr(
+        dt_util,
+        "utcnow",
+        lambda: datetime(2024, 8, 19, 23, 30, tzinfo=timezone.utc),
+    )
     assert await async_setup_entry(hass, entry)
     await hass.async_block_till_done()
 
     assert fake_metrics.await_args_list == [call(hass, entry)]
     assert start_backend.await_count == 1
     assert len(callbacks) == 1
-    assert [callback_info[1:] for callback_info in callbacks] == [
-        (1, 0, 0),
-    ]
 
-    morning = datetime(2024, 8, 20, 1, 0, tzinfo=timezone.utc)
-    await asyncio.to_thread(callbacks[0][0], morning)
+    first_action, first_time = callbacks[0]
+    assert first_time == datetime(2024, 8, 20, 1, 0, tzinfo=timezone.utc)
+
+    await asyncio.to_thread(first_action, first_time)
     await hass.async_block_till_done()
 
-    next_day = datetime(2024, 8, 21, 1, 0, tzinfo=timezone.utc)
-    callbacks[0][0](next_day)
+    assert len(callbacks) >= 2
+    second_action, second_time = callbacks[1]
+    assert second_time == datetime(2024, 8, 21, 1, 0, tzinfo=timezone.utc)
+    second_action(second_time)
     await hass.async_block_till_done()
+
+    assert len(callbacks) >= 3
+    third_action, third_time = callbacks[2]
+    assert third_time == datetime(2024, 8, 22, 1, 0, tzinfo=timezone.utc)
 
     original_loop = hass.loop
     hass.loop = None
     try:
-        callbacks[0][0](next_day)
+        third_action(third_time.replace(tzinfo=None))
         await hass.async_block_till_done()
     finally:
         hass.loop = original_loop
@@ -1029,6 +1056,7 @@ async def test_consumption_scheduler_handles_dst_transitions(
         entry_id=f"scheduler_dst_{scenario}",
         data={"email": "user@example.com", "password": "digest"},
         unique_id="user@example.com",
+        options={CONF_TIME_ZONE: "Europe/London"},
     )
 
     fake_metrics = AsyncMock()
@@ -1049,28 +1077,115 @@ async def test_consumption_scheduler_handles_dst_transitions(
         "custom_components.securemtr._async_ensure_utility_meters",
         AsyncMock(),
     )
+    if scenario == "spring_morning":
+        now_utc = datetime(2024, 3, 30, 23, 30, tzinfo=timezone.utc)
+    elif scenario == "autumn_first_morning":
+        now_utc = datetime(2024, 10, 26, 23, 30, tzinfo=timezone.utc)
+    elif scenario == "autumn_second_morning":
+        now_utc = datetime(2024, 10, 27, 0, 30, tzinfo=timezone.utc)
+    else:
+        raise AssertionError(f"unexpected scenario: {scenario}")
+
+    monkeypatch.setattr(dt_util, "utcnow", lambda: now_utc)
+
     assert await async_setup_entry(hass, entry)
     await hass.async_block_till_done()
 
     assert len(callbacks) == 1
-    callback = callbacks[0]
-    assert callback[1:] == (1, 0, 0)
+    first_action, first_time = callbacks[0]
+
+    def _expected_local(reference: datetime) -> datetime:
+        local_reference = reference.astimezone(london)
+        candidate = local_reference.replace(hour=1, minute=0, second=0, microsecond=0)
+        if local_reference >= candidate:
+            next_day = local_reference.date() + timedelta(days=1)
+            candidate = datetime.combine(
+                next_day,
+                time(1, 0, tzinfo=london),
+            )
+        return candidate.astimezone(timezone.utc).astimezone(london)
+
+    assert first_time.astimezone(london) == _expected_local(now_utc)
 
     assert fake_metrics.await_args_list == [call(hass, entry)]
 
-    if scenario == "spring_morning":
-        event = datetime(2024, 3, 31, 1, 0, tzinfo=london)
-    elif scenario == "autumn_first_morning":
-        event = datetime(2024, 10, 27, 1, 0, tzinfo=london, fold=0)
-    elif scenario == "autumn_second_morning":
-        event = datetime(2024, 10, 27, 1, 0, tzinfo=london, fold=1)
-    else:
-        raise AssertionError(f"unexpected scenario: {scenario}")
-
-    callback[0](event)
+    first_action(first_time)
     await hass.async_block_till_done()
 
     assert fake_metrics.await_args_list == [call(hass, entry), call(hass, entry)]
+
+    assert len(callbacks) >= 2
+    next_action, next_time = callbacks[1]
+    assert next_time.astimezone(london) == _expected_local(first_time + timedelta(seconds=1))
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    assert runtime.consumption_schedule_unsub is not None
+    runtime.consumption_schedule_unsub()
+
+
+@pytest.mark.asyncio
+async def test_consumption_scheduler_respects_controller_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    store_instances,
+) -> None:
+    """Ensure the scheduler honours the configured controller timezone."""
+
+    hass = FakeHass()
+    callbacks = track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="scheduler_timezone",
+        data={"email": "user@example.com", "password": "digest"},
+        unique_id="user@example.com",
+        options={CONF_TIME_ZONE: "Asia/Kolkata"},
+    )
+
+    fake_metrics = AsyncMock()
+    monkeypatch.setattr("custom_components.securemtr.consumption_metrics", fake_metrics)
+    monkeypatch.setattr(
+        "custom_components.securemtr.async_get_clientsession",
+        lambda hass_obj: object(),
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.BeanbagBackend",
+        lambda session: SimpleNamespace(),
+    )
+    start_backend = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_start_backend", start_backend
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_ensure_utility_meters",
+        AsyncMock(),
+    )
+
+    monkeypatch.setattr(
+        dt_util,
+        "utcnow",
+        lambda: datetime(2024, 8, 19, 18, 15, tzinfo=timezone.utc),
+    )
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    assert fake_metrics.await_args_list == [call(hass, entry)]
+    assert start_backend.await_count == 1
+    assert len(callbacks) == 1
+
+    scheduled_action, scheduled_time = callbacks[0]
+    assert scheduled_time == datetime(2024, 8, 19, 19, 30, tzinfo=timezone.utc)
+
+    scheduled_action(scheduled_time)
+    await hass.async_block_till_done()
+
+    assert fake_metrics.await_args_list == [call(hass, entry), call(hass, entry)]
+
+    assert len(callbacks) >= 2
+    next_action, next_time = callbacks[1]
+    assert next_time == datetime(2024, 8, 20, 19, 30, tzinfo=timezone.utc)
+
+    next_action(next_time)
+    await hass.async_block_till_done()
 
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.consumption_schedule_unsub is not None

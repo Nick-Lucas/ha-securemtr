@@ -33,7 +33,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
@@ -689,6 +689,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime.config_entry = entry
     hass.data[DOMAIN][entry.entry_id] = runtime
 
+    if not hasattr(entry, "options"):
+        setattr(entry, "options", {})
+
+    statistics_options = _load_statistics_options(entry)
+    schedule_timezone = statistics_options.timezone
+    schedule_timezone_name = statistics_options.timezone_name
+
     runtime.energy_store = Store(
         hass,
         ENERGY_STORE_VERSION,
@@ -720,6 +727,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             loop.call_soon_threadsafe(_schedule)
 
+    def _next_consumption_refresh(reference: datetime | None = None) -> datetime:
+        """Return the next 01:00 UTC instant for the configured timezone."""
+
+        base = reference or dt_util.utcnow()
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=dt_util.UTC)
+        base_utc = dt_util.as_utc(base)
+        local_now = base_utc.astimezone(schedule_timezone)
+        target_local = local_now.replace(hour=1, minute=0, second=0, microsecond=0)
+        if local_now >= target_local:
+            next_day = local_now.date() + timedelta(days=1)
+            target_local = datetime.combine(
+                next_day,
+                time(1, 0, tzinfo=schedule_timezone),
+            )
+        return target_local.astimezone(dt_util.UTC)
+
+    schedule_unsub: Callable[[], None] | None = None
+
+    def _schedule_next_refresh(reference: datetime | None = None) -> None:
+        """Install a one-shot timer for the next consumption refresh."""
+
+        nonlocal schedule_unsub
+
+        if schedule_unsub is not None:
+            with suppress(Exception):
+                schedule_unsub()
+            schedule_unsub = None
+
+        next_refresh = _next_consumption_refresh(reference)
+        _LOGGER.debug(
+            "Scheduling consumption metrics refresh for %s at %s (%s)",
+            entry_identifier,
+            next_refresh.isoformat(),
+            schedule_timezone_name,
+        )
+        schedule_unsub = async_track_point_in_time(
+            hass,
+            _scheduled_consumption_refresh,
+            next_refresh,
+        )
+
     def _scheduled_consumption_refresh(now: datetime) -> None:
         """Trigger the scheduled consumption metrics task."""
 
@@ -727,24 +776,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "Scheduled consumption metrics refresh triggered for %s", entry_identifier
         )
         _queue_consumption_refresh()
+        _schedule_next_refresh(now + timedelta(seconds=1))
 
-    schedule_unsubs: list[Callable[[], None]] = [
-        async_track_time_change(
-            hass,
-            _scheduled_consumption_refresh,
-            hour=1,
-            minute=0,
-            second=0,
-        )
-    ]
+    _schedule_next_refresh()
 
     def _unsubscribe_schedules() -> None:
         """Cancel every scheduled consumption metrics callback."""
 
-        for unsubscribe in schedule_unsubs:
+        nonlocal schedule_unsub
+
+        if schedule_unsub is not None:
             with suppress(Exception):
-                unsubscribe()
-        schedule_unsubs.clear()
+                schedule_unsub()
+            schedule_unsub = None
 
     runtime.consumption_schedule_unsub = _unsubscribe_schedules
     runtime.consumption_refresh_callback = _queue_consumption_refresh
