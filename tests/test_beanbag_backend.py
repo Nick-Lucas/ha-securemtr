@@ -237,6 +237,8 @@ async def test_websocket_connect_uses_expected_headers() -> None:
         "Request-id": "1",
     }
     assert kwargs["protocols"] == ["BB-BO-01"]
+    assert isinstance(kwargs["timeout"], ClientTimeout)
+    assert kwargs["timeout"].total == REQUEST_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio

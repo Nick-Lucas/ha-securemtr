@@ -358,10 +358,12 @@ class BeanbagWebSocketClient:
         )
 
         try:
+            timeout = ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
             websocket = await self._session.ws_connect(
                 self._ws_url,
                 headers=headers,
                 protocols=[SUBPROTOCOL],
+                timeout=timeout,
             )
         except ClientError as error:
             _LOGGER.error(
