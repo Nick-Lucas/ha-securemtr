@@ -106,7 +106,7 @@ from custom_components.securemtr.sensor import (
     SecuremtrEnergyTotalSensor,
     async_setup_entry as sensor_async_setup_entry,
 )
-from homeassistant.components.sensor import SensorDeviceClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from custom_components.securemtr.statistics import (
     _build_zone_calibrations as statistics_build_zone_calibrations,
     _build_zone_contexts as statistics_build_zone_contexts,
@@ -127,7 +127,6 @@ from homeassistant.components.recorder.statistics import (
     StatisticData,
     StatisticMeanType,
     StatisticMetaData,
-    split_statistic_id,
 )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_registry import RegistryEntryDisabler
@@ -203,21 +202,42 @@ def store_instances(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 
 @pytest.fixture(autouse=True)
-def stub_external_statistics(monkeypatch: pytest.MonkeyPatch) -> None:
+def stub_recorder_import(monkeypatch: pytest.MonkeyPatch) -> "RecorderStub":
     """Prevent recorder statistics writes during tests."""
 
-    def _assert_metadata(
-        _hass: HomeAssistant,
-        metadata: StatisticMetaData,
-        _statistics: Iterable[StatisticData],
-    ) -> None:
-        domain = split_statistic_id(metadata["statistic_id"])[0]
-        assert metadata["source"] == domain
+    class RecorderStub:
+        """Collect recorder statistics imports for assertions."""
+
+        def __init__(self) -> None:
+            self.recorded: list[tuple[StatisticMetaData, list[StatisticData]]] = []
+
+        async def async_import_statistics(
+            self,
+            metadata: StatisticMetaData,
+            statistics: Iterable[StatisticData],
+        ) -> None:
+            if not hasattr(metadata, "source"):
+                metadata = SimpleNamespace(**metadata)
+
+            assert metadata.source == "securemtr"
+
+            stat_list: list[StatisticData | SimpleNamespace] = []
+            for stat in statistics:
+                if hasattr(stat, "sum"):
+                    stat_list.append(stat)
+                else:
+                    stat_list.append(SimpleNamespace(**stat))
+
+            self.recorded.append((metadata, stat_list))
+
+    recorder_stub = RecorderStub()
 
     monkeypatch.setattr(
-        "custom_components.securemtr.async_add_external_statistics",
-        _assert_metadata,
+        "custom_components.securemtr.recorder.get_instance",
+        lambda _hass: recorder_stub,
     )
+
+    return recorder_stub
 
 
 @pytest.mark.asyncio
@@ -1992,17 +2012,17 @@ def test_submit_statistics_samples_emits_records(
     """Validate helper emits statistics for valid entities."""
 
     hass = FakeHass()
-    sample = StatisticData(
-        start=datetime(2024, 1, 10, tzinfo=timezone.utc),
-        sum=1.0,
-        state=1.0,
-    )
-    recorded: list[tuple[StatisticMetaData, list[StatisticData]]] = []
+    sample = {
+        "start": datetime(2024, 1, 10, tzinfo=timezone.utc),
+        "sum": 1.0,
+        "state": 1.0,
+    }
+    recorded: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
 
     def capture(
         _hass: HomeAssistant,
-        metadata: StatisticMetaData,
-        statistics: Iterable[StatisticData],
+        metadata: dict[str, Any],
+        statistics: Iterable[dict[str, Any]],
     ) -> None:
         recorded.append((metadata, list(statistics)))
 
@@ -2017,7 +2037,37 @@ def test_submit_statistics_samples_emits_records(
     assert recorded
     metadata, stats = recorded[0]
     assert metadata["statistic_id"].endswith("primary_energy_kwh")
+    assert metadata["zone_key"] == "primary"
     assert stats[0]["sum"] == sample["sum"]
+
+
+def test_submit_statistics_samples_logs_errors(caplog: pytest.LogCaptureFixture) -> None:
+    """Ensure recorder failures are logged for debugging."""
+
+    hass = FakeHass()
+    sample = {
+        "start": datetime(2024, 1, 10, tzinfo=timezone.utc),
+        "sum": 1.0,
+        "state": 1.0,
+    }
+
+    def failing_writer(
+        _hass: HomeAssistant,
+        _metadata: dict[str, Any],
+        _statistics: Iterable[dict[str, Any]],
+    ) -> None:
+        raise HomeAssistantError("writer failed")
+
+    with caplog.at_level(logging.ERROR):
+        statistics_submit_statistics_samples(
+            hass,
+            {"primary": [sample]},
+            {"primary": "sensor.securemtr_controller_primary_energy_kwh"},
+            statistic_writer=failing_writer,
+            mean_type=StatisticMeanType.NONE,
+        )
+
+    assert "Failed to add statistics for primary" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2296,7 +2346,11 @@ async def test_process_zone_samples_returns_result(
     assert program_mock.await_count == 2
 
 
-def test_submit_statistics_writes_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_submit_statistics_writes_samples(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_recorder_import,
+) -> None:
     """Validate statistics submission forwards prepared samples."""
 
     hass = FakeHass()
@@ -2315,34 +2369,23 @@ def test_submit_statistics_writes_samples(monkeypatch: pytest.MonkeyPatch) -> No
         gateway_id="gw-1",
     )
 
-    sample = StatisticData(
-        start=datetime(2024, 1, 10, tzinfo=timezone.utc),
-        sum=1.0,
-        state=1.0,
-    )
-    recorded: list[tuple[StatisticMetaData, list[StatisticData]]] = []
-
-    def capture(
-        _hass: HomeAssistant,
-        metadata: StatisticMetaData,
-        statistics: Iterable[StatisticData],
-    ) -> None:
-        recorded.append((metadata, list(statistics)))
-
-    monkeypatch.setattr(
-        "custom_components.securemtr.async_add_external_statistics",
-        capture,
-    )
+    sample = {
+        "start": datetime(2024, 1, 10, tzinfo=timezone.utc),
+        "sum": 1.0,
+        "state": 1.0,
+    }
 
     _submit_statistics(hass, entry, controller, {"primary": []})
-    assert not recorded
+    await hass.async_block_till_done()
+    assert not stub_recorder_import.recorded
 
     _submit_statistics(hass, entry, controller, {"primary": [sample]})
+    await hass.async_block_till_done()
 
-    assert recorded
-    metadata, stats = recorded[0]
-    assert metadata["statistic_id"].endswith("primary_energy_kwh")
-    assert stats[0]["sum"] == sample["sum"]
+    assert stub_recorder_import.recorded
+    metadata, stats = stub_recorder_import.recorded[0]
+    assert metadata.statistic_id.endswith("primary_energy_kwh")
+    assert stats[0].sum == sample["sum"]
 
 
 def test_update_runtime_state_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2438,6 +2481,9 @@ async def test_consumption_metrics_refreshes_history(
     initial_dispatch_count = len(dispatch_calls)
 
     await consumption_metrics(hass, entry)
+    await hass.async_block_till_done()
+    await hass.async_block_till_done()
+    await hass.async_block_till_done()
 
     assert len(backend.login_calls) == initial_logins + 1
     assert backend.energy_history_calls[initial_history_count:] == [("gateway-1", 1)]
@@ -2576,11 +2622,6 @@ async def test_consumption_metrics_serializes_concurrent_requests(
         )
 
     monkeypatch.setattr(FakeBeanbagBackend, "read_energy_history", blocking_read)
-    monkeypatch.setattr(
-        "custom_components.securemtr.async_add_external_statistics",
-        lambda _hass, _metadata, _samples: None,
-    )
-
     session, websocket = await backend.login_and_connect(
         entry.data["email"], entry.data["password"]
     )
@@ -2688,6 +2729,7 @@ async def test_consumption_metrics_retries_closed_websocket(
     initial_dispatches = len(dispatch_calls)
 
     await consumption_metrics(hass, entry)
+    await hass.async_block_till_done()
 
     assert backend._history_attempts >= 2
     assert backend.energy_history_calls[-1] == ("gateway-1", 1)
@@ -2839,6 +2881,7 @@ async def test_consumption_metrics_processes_only_new_days(
 
     with caplog.at_level(logging.INFO):
         await consumption_metrics(hass, entry)
+        await hass.async_block_till_done()
 
     assert store_instances[0].saved
     saved_state = store_instances[0].saved[-1]
@@ -2869,6 +2912,7 @@ async def test_consumption_metrics_processes_only_new_days(
 async def test_consumption_metrics_emits_hourly_statistics(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
+    stub_recorder_import,
 ) -> None:
     """Split runtime energy into hour-aligned statistics samples."""
 
@@ -2933,21 +2977,115 @@ async def test_consumption_metrics_emits_hourly_statistics(
     )
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
-    captured: list[tuple[StatisticMetaData, list[StatisticData]]] = []
-
-    def capture_statistics(
-        _hass: HomeAssistant,
-        metadata: StatisticMetaData,
-        statistics: Iterable[StatisticData],
-    ) -> None:
-        domain = split_statistic_id(metadata["statistic_id"])[0]
-        assert metadata["source"] == domain
-        captured.append((metadata, list(statistics)))
-
-    monkeypatch.setattr(
-        "custom_components.securemtr.async_add_external_statistics",
-        capture_statistics,
+    hass.entity_registry = FakeEntityRegistry(
+        [
+            FakeRegistryEntry(
+                entity_id="sensor.securemtr_custom_primary_energy",
+                unique_id=f"{IDENTIFIER_SLUG}_primary_energy_kwh",
+                config_entry_id=entry.entry_id,
+                platform=DOMAIN,
+            )
+        ]
     )
+
+    await consumption_metrics(hass, entry)
+    await hass.async_block_till_done()
+
+    assert len(stub_recorder_import.recorded) == 1
+    metadata, samples = stub_recorder_import.recorded[0]
+    assert metadata.statistic_id == "sensor.securemtr_custom_primary_energy"
+    assert metadata.source == "securemtr"
+    assert metadata.unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
+    assert metadata.has_sum is True
+    assert metadata.mean_type is StatisticMeanType.NONE
+
+    assert len(samples) == 3
+    starts = [sample.start for sample in samples]
+    assert [start.hour for start in starts] == [5, 6, 7]
+    assert all(start.tzinfo == timezone.utc for start in starts)
+
+    sums = [sample.sum for sample in samples]
+    assert sums == pytest.approx([2.85, 5.7, 6.175])
+    deltas = [
+        samples[0].sum,
+        samples[1].sum - samples[0].sum,
+        samples[2].sum - samples[1].sum,
+    ]
+    assert deltas == pytest.approx([2.85, 2.85, 0.475])
+    states = [sample.state for sample in samples]
+    assert states == pytest.approx(sums)
+
+
+@pytest.mark.asyncio
+async def test_consumption_metrics_aligns_bst_hours_with_foreign_hass_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+    track_time_spy,
+    stub_recorder_import,
+) -> None:
+    """Ensure BST samples align to UTC hours even when HA uses another timezone."""
+
+    hass = FakeHass()
+    hass.config.time_zone = "Europe/Athens"
+    track_time_spy(hass)
+    entry = DummyConfigEntry(
+        entry_id="metrics-bst-hours",
+        unique_id="user@example.com",
+        data={"email": "user@example.com", "password": "digest"},
+        title="SecureMTR",
+    )
+    entry.hass = hass
+    entry.options = {
+        CONF_TIME_ZONE: "Europe/London",
+        CONF_PRIMARY_ANCHOR: "05:00:00",
+        CONF_BOOST_ANCHOR: "05:00:00",
+        CONF_PREFER_DEVICE_ENERGY: False,
+        CONF_ELEMENT_POWER_KW: 2.85,
+    }
+
+    class BstBackend(FakeBeanbagBackend):
+        async def read_energy_history(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            window_index: int = 1,
+        ) -> list[BeanbagEnergySample]:
+            self.energy_history_calls.append((gateway_id, window_index))
+            sample_day = datetime(2024, 7, 5, tzinfo=timezone.utc)
+            return [
+                BeanbagEnergySample(
+                    timestamp=int(sample_day.timestamp()),
+                    primary_energy_kwh=0.0,
+                    boost_energy_kwh=0.0,
+                    primary_scheduled_minutes=132,
+                    primary_active_minutes=132,
+                    boost_scheduled_minutes=0,
+                    boost_active_minutes=0,
+                )
+            ]
+
+        async def read_weekly_program(
+            self,
+            session: BeanbagSession,
+            websocket: FakeWebSocket,
+            gateway_id: str,
+            *,
+            zone: str,
+        ) -> WeeklyProgram | None:
+            self.program_calls.append((zone, gateway_id))
+            return None
+
+    backend = BstBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+",
+        gateway_id="gateway-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
     hass.entity_registry = FakeEntityRegistry(
         [
@@ -2961,30 +3099,19 @@ async def test_consumption_metrics_emits_hourly_statistics(
     )
 
     await consumption_metrics(hass, entry)
+    await hass.async_block_till_done()
 
-    assert len(captured) == 1
-    metadata, samples = captured[0]
-    assert metadata["statistic_id"] == "sensor:securemtr_custom_primary_energy"
-    assert metadata["source"] == "sensor"
-    assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
-    assert metadata["has_sum"] is True
-    assert metadata["mean_type"] is StatisticMeanType.NONE
+    assert len(stub_recorder_import.recorded) == 1
+    metadata, samples = stub_recorder_import.recorded[0]
+    assert metadata.statistic_id == "sensor.securemtr_custom_primary_energy"
 
-    assert len(samples) == 3
-    starts = [sample["start"] for sample in samples]
-    assert [start.hour for start in starts] == [5, 6, 7]
+    starts = [sample.start for sample in samples]
+    assert [start.hour for start in starts] == [4, 5, 6]
     assert all(start.tzinfo == timezone.utc for start in starts)
 
-    sums = [sample["sum"] for sample in samples]
-    assert sums == pytest.approx([2.85, 5.7, 6.175])
-    deltas = [
-        samples[0]["sum"],
-        samples[1]["sum"] - samples[0]["sum"],
-        samples[2]["sum"] - samples[1]["sum"],
-    ]
-    assert deltas == pytest.approx([2.85, 2.85, 0.475])
-    states = [sample["state"] for sample in samples]
-    assert states == pytest.approx(sums)
+    sums = [sample.sum for sample in samples]
+    assert sums == pytest.approx([2.85, 5.7, 6.27])
+    assert [sample.state for sample in samples] == pytest.approx(sums)
 
 
 @pytest.mark.asyncio
@@ -2992,6 +3119,7 @@ async def test_consumption_metrics_logs_statistics_error(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
     caplog: pytest.LogCaptureFixture,
+    stub_recorder_import,
 ) -> None:
     """Log errors raised while writing external statistics."""
 
@@ -3060,20 +3188,22 @@ async def test_consumption_metrics_logs_statistics_error(
         ]
     )
 
-    def _raise_error(
-        _hass: HomeAssistant,
+    async def _raise_error(
+        self,
         _metadata: StatisticMetaData,
         _samples: Iterable[StatisticData],
     ) -> None:
         raise HomeAssistantError("failure")
 
     monkeypatch.setattr(
-        "custom_components.securemtr.async_add_external_statistics",
+        stub_recorder_import.__class__,
+        "async_import_statistics",
         _raise_error,
     )
 
     caplog.set_level(logging.ERROR)
     await consumption_metrics(hass, entry)
+    await hass.async_block_till_done()
 
     assert "Failed to add statistics" in caplog.text
 
@@ -3082,6 +3212,7 @@ async def test_consumption_metrics_logs_statistics_error(
 async def test_consumption_metrics_skips_statistics_without_entity(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
+    stub_recorder_import,
 ) -> None:
     """Skip statistic publishing when no entity ID can be resolved."""
 
@@ -3139,20 +3270,6 @@ async def test_consumption_metrics_skips_statistics_without_entity(
     )
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
-    captured: list[tuple[StatisticMetaData, list[StatisticData]]] = []
-
-    def capture_statistics(
-        _hass: HomeAssistant,
-        metadata: StatisticMetaData,
-        statistics: Iterable[StatisticData],
-    ) -> None:
-        captured.append((metadata, list(statistics)))
-
-    monkeypatch.setattr(
-        "custom_components.securemtr.async_add_external_statistics",
-        capture_statistics,
-    )
-
     monkeypatch.setattr(
         "custom_components.securemtr._energy_sensor_entity_ids",
         lambda *args, **kwargs: {
@@ -3162,11 +3279,12 @@ async def test_consumption_metrics_skips_statistics_without_entity(
     )
 
     await consumption_metrics(hass, entry)
+    await hass.async_block_till_done()
 
-    assert len(captured) == 1
-    metadata, samples = captured[0]
-    assert metadata["statistic_id"] == "sensor:securemtr_primary_custom"
-    assert all(sample["sum"] >= 0 for sample in samples)
+    assert len(stub_recorder_import.recorded) == 1
+    metadata, samples = stub_recorder_import.recorded[0]
+    assert metadata.statistic_id == "sensor.securemtr_primary_custom"
+    assert all(sample.sum >= 0 for sample in samples)
 
 
 @pytest.mark.asyncio
@@ -3174,6 +3292,7 @@ async def test_consumption_metrics_skips_statistics_with_invalid_entity(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
     caplog: pytest.LogCaptureFixture,
+    stub_recorder_import,
 ) -> None:
     """Skip statistic publishing when the resolved entity ID is invalid."""
 
@@ -3226,20 +3345,6 @@ async def test_consumption_metrics_skips_statistics_with_invalid_entity(
     )
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
-    statistics_calls: list[tuple[StatisticMetaData, list[StatisticData]]] = []
-
-    def capture_statistics(
-        _hass: HomeAssistant,
-        metadata: StatisticMetaData,
-        statistics: Iterable[StatisticData],
-    ) -> None:
-        statistics_calls.append((metadata, list(statistics)))
-
-    monkeypatch.setattr(
-        "custom_components.securemtr.async_add_external_statistics",
-        capture_statistics,
-    )
-
     monkeypatch.setattr(
         "custom_components.securemtr._energy_sensor_entity_ids",
         lambda *args, **kwargs: {"primary": "securemtr_invalid"},
@@ -3247,8 +3352,9 @@ async def test_consumption_metrics_skips_statistics_with_invalid_entity(
 
     caplog.set_level(logging.ERROR)
     await consumption_metrics(hass, entry)
+    await hass.async_block_till_done()
 
-    assert not statistics_calls
+    assert not stub_recorder_import.recorded
     assert (
         "Skipping statistics for primary because entity_id securemtr_invalid is invalid"
         in caplog.text
@@ -3260,6 +3366,7 @@ async def test_energy_dashboard_flow_validates_sensor_states(
     monkeypatch: pytest.MonkeyPatch,
     track_time_spy,
     store_instances,
+    stub_recorder_import,
 ) -> None:
     """Simulate the QA energy workflow and confirm Energy Dashboard readiness."""
 
@@ -3320,27 +3427,7 @@ async def test_energy_dashboard_flow_validates_sensor_states(
 
     backend = BatchedBackend(fake_session, batches)
 
-    recorded_statistics: list[tuple[StatisticMetaData, list[StatisticData]]] = []
-
-    def _capture_statistics(
-        _hass: HomeAssistant,
-        metadata: StatisticMetaData,
-        statistics: Iterable[StatisticData],
-    ) -> None:
-        recorded_statistics.append((metadata, list(statistics)))
-
-    monkeypatch.setattr(
-        "custom_components.securemtr.async_add_external_statistics",
-        _capture_statistics,
-    )
-
-    def _fail_import(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("unexpected recorder statistics writer invoked")
-
-    monkeypatch.setattr(
-        "homeassistant.components.recorder.statistics.async_import_statistics",
-        _fail_import,
-    )
+    recorded_statistics = stub_recorder_import.recorded
 
     monkeypatch.setattr(
         "custom_components.securemtr.async_get_clientsession",
@@ -3375,6 +3462,7 @@ async def test_energy_dashboard_flow_validates_sensor_states(
     sensor_entry.hass = hass
     hass.data[DOMAIN][sensor_entry.entry_id] = runtime
     await sensor_async_setup_entry(hass, sensor_entry, sensors.extend)
+    await hass.async_block_till_done()
 
     energy_entities = {
         entity.entity_id: entity
@@ -3389,7 +3477,7 @@ async def test_energy_dashboard_flow_validates_sensor_states(
 
     assert primary_sensor.device_class is SensorDeviceClass.ENERGY
     assert primary_sensor.device_class == "energy"
-    assert primary_sensor.state_class is None
+    assert primary_sensor.state_class is SensorStateClass.TOTAL_INCREASING
     assert primary_sensor.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
     assert boost_sensor.device_class is SensorDeviceClass.ENERGY
     assert boost_sensor.device_class == "energy"
@@ -3440,16 +3528,12 @@ async def test_energy_dashboard_flow_validates_sensor_states(
     initial_dispatch_count = len(dispatch_calls)
     initial_history_count = len(backend.energy_history_calls)
     assert recorded_statistics
-    expected_stat_ids = {
-        PRIMARY_ENERGY_ENTITY_ID.replace("sensor.", "sensor:"),
-        BOOST_ENERGY_ENTITY_ID.replace("sensor.", "sensor:"),
-    }
-    assert {
-        metadata["statistic_id"] for metadata, _ in recorded_statistics
-    } == expected_stat_ids
+    expected_stat_ids = {PRIMARY_ENERGY_ENTITY_ID, BOOST_ENERGY_ENTITY_ID}
+    assert {metadata.statistic_id for metadata, _ in recorded_statistics} == expected_stat_ids
 
     for step, batch in enumerate(batches[1:], start=1):
         await consumption_metrics(hass, entry)
+        await hass.async_block_till_done()
 
         energy_state = runtime.energy_state
         assert isinstance(energy_state, dict)
@@ -5865,7 +5949,44 @@ def test_resolve_anchor_handles_runtime_exceeding_span() -> None:
     )
 
     assert samples
-    assert samples[0]["start"] == dt_util.as_utc(anchor)
+    assert samples[0]["start"] == anchor
+
+
+def test_build_zone_statistics_samples_handles_bst_start_gap() -> None:
+    """Ensure BST spring forward keeps monotonic local hour starts."""
+
+    tz = ZoneInfo("Europe/London")
+    anchor = datetime(2024, 3, 31, 0, 30, tzinfo=tz)
+    samples = _build_zone_statistics_samples(anchor, 3.0, 3.0, 0.0)
+
+    # There is no local 01:00 hour on spring-forward day in Europe/London.
+    assert [record["start"].isoformat() for record in samples] == [
+        "2024-03-31T00:00:00+00:00",
+        "2024-03-31T02:00:00+01:00",
+        "2024-03-31T03:00:00+01:00",
+    ]
+
+
+def test_build_zone_statistics_samples_handles_gmt_fall_back() -> None:
+    """Ensure BST fall back repeats the folded hour with correct offsets."""
+
+    tz = ZoneInfo("Europe/London")
+    anchor = datetime(2024, 10, 27, 0, 30, tzinfo=tz)
+    samples = _build_zone_statistics_samples(anchor, 3.0, 3.0, 0.0)
+
+    assert [record["start"].isoformat() for record in samples] == [
+        "2024-10-27T00:00:00+01:00",
+        "2024-10-27T01:00:00+01:00",
+        "2024-10-27T01:00:00+00:00",
+        "2024-10-27T02:00:00+00:00",
+    ]
+
+
+def test_build_zone_statistics_samples_requires_timezone() -> None:
+    """Require timezone-aware anchors for statistic sample construction."""
+
+    with pytest.raises(ValueError):
+        _build_zone_statistics_samples(datetime(2024, 6, 1, 0, 0), 1.0, 1.0, 0.0)
 
 
 def test_resolve_anchor_prefers_clampable_interval_on_tie() -> None:
