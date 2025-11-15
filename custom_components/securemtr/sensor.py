@@ -197,7 +197,7 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
     """Expose the cumulative energy total for a controller zone."""
 
     _attr_device_class = SensorDeviceClass.ENERGY
-    _attr_state_class: SensorStateClass | None = None
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
 
     def __init__(
@@ -247,11 +247,9 @@ class SecuremtrEnergyTotalSensor(SecuremtrSensorEntity):
             return float(energy_raw)
         return None
 
-    @property
-    def state_class(self) -> SensorStateClass | None:
-        """Return None because recorder statistics are provided externally."""
-
-        return None
+    # Statistics are imported directly into the recorder so the Energy dashboard
+    # derives deltas from hourly sums. We still present TOTAL_INCREASING to make
+    # the sensor selectable in the Energy UI.
 
     @property
     def extra_state_attributes(self) -> dict[str, object] | None:

@@ -301,7 +301,7 @@ async def test_energy_sensors_report_totals() -> None:
     assert primary_energy.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
     assert primary_energy.device_class is SensorDeviceClass.ENERGY
     assert primary_energy.device_class == "energy"
-    assert primary_energy.state_class is None
+    assert primary_energy.state_class is SensorStateClass.TOTAL_INCREASING
     assert primary_energy.extra_state_attributes == {
         "last_report_day": "2024-03-01",
         "series_start_day": "2024-02-20",

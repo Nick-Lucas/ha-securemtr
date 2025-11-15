@@ -16,11 +16,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientSession, ClientWebSocketResponse
 from homeassistant import config_entries as hass_config_entries
-from homeassistant.components.recorder.statistics import (
-    StatisticData,
-    StatisticMeanType,
-    async_add_external_statistics as async_add_external_statistics,
-)
+from homeassistant.components import recorder
+from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+from homeassistant.components.recorder.statistics import StatisticMeanType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_EMAIL,
@@ -1741,16 +1739,64 @@ def _submit_statistics(
     hass: HomeAssistant,
     entry: ConfigEntry,
     controller: SecuremtrController,
-    statistics_samples: Mapping[str, list[StatisticData]],
+    statistics_samples: Mapping[str, list[dict[str, Any]]],
 ) -> None:
     """Record prepared statistic samples for each zone."""
 
     energy_entity_ids = _energy_sensor_entity_ids(hass, entry, controller)
+
+    def _entity_stat_import_writer(
+        hass: HomeAssistant, meta_dict: dict[str, Any], samples: Iterable[dict[str, Any]]
+    ) -> None:
+        """Import entity-bound statistics using recorder.async_import_statistics."""
+
+        instance = recorder.get_instance(hass)
+        zone_key = meta_dict.get("zone_key")
+        metadata = StatisticMetaData(
+            source=meta_dict.get("source") or DOMAIN,
+            statistic_id=meta_dict["statistic_id"],
+            unit_of_measurement=meta_dict["unit_of_measurement"],
+            has_sum=True,
+            has_mean=False,
+            mean_type=StatisticMeanType.NONE,
+            unit_class="energy",
+            name=None,
+        )
+        statistic_rows: list[StatisticData] = []
+        for sample in samples:
+            start: datetime = sample["start"]
+            aligned_start = dt_util.as_utc(start).replace(
+                minute=0, second=0, microsecond=0
+            )
+            statistic_rows.append(
+                StatisticData(
+                    start=aligned_start,
+                    state=float(sample["state"]),
+                    sum=float(sample["sum"]),
+                )
+            )
+        async def _async_import() -> None:
+            try:
+                await instance.async_import_statistics(metadata, statistic_rows)
+            except HomeAssistantError:
+                statistic_id = (
+                    metadata.statistic_id
+                    if hasattr(metadata, "statistic_id")
+                    else metadata["statistic_id"]
+                )
+                _LOGGER.exception(
+                    "Failed to add statistics for %s (statistic_id=%s)",
+                    zone_key or statistic_id,
+                    statistic_id,
+                )
+
+        hass.async_create_task(_async_import())
+
     _submit_statistics_samples(
         hass,
         statistics_samples,
         energy_entity_ids,
-        statistic_writer=async_add_external_statistics,
+        statistic_writer=_entity_stat_import_writer,
         mean_type=StatisticMeanType.NONE,
     )
 

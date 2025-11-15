@@ -9,14 +9,12 @@ import logging
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from aiohttp import ClientWebSocketResponse
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
-from . import runtime_helpers
-from .beanbag import BeanbagBackend, BeanbagSession, WeeklyProgram
+from .beanbag import WeeklyProgram
 from .energy import EnergyAccumulator
 from .schedule import day_intervals
 from .utils import (
@@ -302,16 +300,16 @@ def _submit_statistics_samples(
                 entity_id,
             )
             continue
-        statistic_domain, object_id = entity_id.split(".", 1)
-        statistic_id = f"{statistic_domain}:{object_id}"
+        statistic_id = entity_id
         metadata = {
             "has_sum": True,
             "mean_type": mean_type,
             "name": None,
-            "source": statistic_domain,
+            "source": "securemtr",
             "statistic_id": statistic_id,
             "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
             "unit_class": "energy",
+            "zone_key": zone_key,
         }
         try:
             first_sample = samples[0]
@@ -353,6 +351,9 @@ def _build_zone_statistics_samples(
     if runtime_hours <= 0 or segment_energy <= 0:
         return []
 
+    if anchor.tzinfo is None or anchor.utcoffset() is None:
+        raise ValueError("anchor must be timezone-aware for statistic samples")
+
     segments = split_runtime_segments(anchor, runtime_hours, segment_energy)
     cumulative = before_total
     records: list[dict[str, Any]] = []
@@ -360,6 +361,8 @@ def _build_zone_statistics_samples(
     interval_end: datetime | None = None
     if interval is not None:
         interval_start, interval_end = interval
+
+    tz = anchor.tzinfo
 
     for slot_start, _slot_hours, slot_energy in segments:
         if slot_energy <= 0:
@@ -369,10 +372,41 @@ def _build_zone_statistics_samples(
             record_start = max(record_start, interval_start)
             if record_start >= interval_end:
                 continue
+
+        slot_start_utc = dt_util.as_utc(record_start)
+        local_slot_start = record_start.astimezone(tz)
+        previous_local = (record_start - timedelta(seconds=1)).astimezone(tz)
+        if (
+            previous_local.utcoffset() is not None
+            and local_slot_start.utcoffset() is not None
+            and local_slot_start.utcoffset() < previous_local.utcoffset()
+        ):
+            slot_start_utc -= timedelta(seconds=1)
+
+        aligned_utc = slot_start_utc.replace(minute=0, second=0, microsecond=0)
+        local_hour_start = tz.fromutc(aligned_utc.replace(tzinfo=tz))
+
         cumulative += slot_energy
+        if records:
+            previous_start = records[-1]["start"]
+            if isinstance(previous_start, datetime):
+                if (
+                    dt_util.as_utc(local_hour_start)
+                    == dt_util.as_utc(previous_start)
+                ):
+                    records[-1]["sum"] = cumulative
+                    records[-1]["state"] = cumulative
+                    continue
+                expected_next = previous_start + timedelta(hours=1)
+                if (
+                    local_hour_start > expected_next
+                    and previous_start.utcoffset() == local_hour_start.utcoffset()
+                ):
+                    local_hour_start = expected_next
+
         records.append(
             {
-                "start": dt_util.as_utc(record_start),
+                "start": local_hour_start,
                 "sum": cumulative,
                 "state": cumulative,
             }
