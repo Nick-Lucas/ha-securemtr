@@ -2036,8 +2036,9 @@ def test_submit_statistics_samples_emits_records(
 
     assert recorded
     metadata, stats = recorded[0]
-    assert metadata["statistic_id"].endswith("primary_energy_kwh")
-    assert metadata["zone_key"] == "primary"
+    metadata_ns = SimpleNamespace(**metadata)
+    assert metadata_ns.statistic_id.endswith("primary_energy_kwh")
+    assert metadata_ns.zone_key == "primary"
     assert stats[0]["sum"] == sample["sum"]
 
 
