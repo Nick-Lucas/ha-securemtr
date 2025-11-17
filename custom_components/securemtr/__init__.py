@@ -18,6 +18,16 @@ from aiohttp import ClientSession, ClientWebSocketResponse
 from homeassistant import config_entries as hass_config_entries
 from homeassistant.components import recorder
 from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+
+try:  # pragma: no cover - HA 2025.10+ provides StatisticsTable
+    from homeassistant.components.recorder.models import StatisticsTable
+except ImportError:  # pragma: no cover - fallback for test environment
+    from enum import StrEnum
+
+    class StatisticsTable(StrEnum):
+        """Fallback enum mirroring recorder.StatisticsTable."""
+
+        STATISTICS = "statistics"
 from homeassistant.components.recorder.statistics import StatisticMeanType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -1765,19 +1775,35 @@ def _submit_statistics(
         statistic_rows: list[StatisticData] = []
         for sample in samples:
             start: datetime = sample["start"]
-            aligned_start = dt_util.as_utc(start).replace(
-                minute=0, second=0, microsecond=0
-            )
+            # Samples are pre-aligned in the controller's timezone; only convert.
+            start_utc = dt_util.as_utc(start)
             statistic_rows.append(
                 StatisticData(
-                    start=aligned_start,
+                    start=start_utc,
                     state=float(sample["state"]),
                     sum=float(sample["sum"]),
                 )
             )
         async def _async_import() -> None:
             try:
-                await instance.async_import_statistics(metadata, statistic_rows)
+                await instance.async_import_statistics(
+                    metadata, statistic_rows, StatisticsTable.STATISTICS
+                )
+                statistic_id = (
+                    metadata.statistic_id
+                    if hasattr(metadata, "statistic_id")
+                    else metadata["statistic_id"]
+                )
+                if statistic_rows:
+                    first_start = statistic_rows[0]["start"]
+                    last_start = statistic_rows[-1]["start"]
+                    _LOGGER.debug(
+                        "Imported %d rows for %s (first=%s UTC, last=%s UTC)",
+                        len(statistic_rows),
+                        statistic_id,
+                        first_start.isoformat(),
+                        last_start.isoformat(),
+                    )
             except HomeAssistantError:
                 statistic_id = (
                     metadata.statistic_id

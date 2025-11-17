@@ -12,6 +12,16 @@ from itertools import accumulate
 from contextlib import suppress
 from typing import Any, Awaitable, Callable, Iterable, cast
 from types import MappingProxyType, ModuleType, SimpleNamespace
+
+try:  # pragma: no cover - fallback for test runtime
+    from homeassistant.components.recorder.models import StatisticsTable
+except ImportError:  # pragma: no cover - fallback
+    from enum import StrEnum
+
+    class StatisticsTable(StrEnum):
+        """Fallback enum mirroring recorder.StatisticsTable."""
+
+        STATISTICS = "statistics"
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -215,11 +225,13 @@ def stub_recorder_import(monkeypatch: pytest.MonkeyPatch) -> "RecorderStub":
             self,
             metadata: StatisticMetaData,
             statistics: Iterable[StatisticData],
+            table,
         ) -> None:
             if not hasattr(metadata, "source"):
                 metadata = SimpleNamespace(**metadata)
 
             assert metadata.source == "securemtr"
+            assert table == StatisticsTable.STATISTICS
 
             stat_list: list[StatisticData | SimpleNamespace] = []
             for stat in statistics:
@@ -3193,6 +3205,7 @@ async def test_consumption_metrics_logs_statistics_error(
         self,
         _metadata: StatisticMetaData,
         _samples: Iterable[StatisticData],
+        _table,
     ) -> None:
         raise HomeAssistantError("failure")
 
