@@ -7,10 +7,15 @@
       "invalid_email": "Enter a valid email address.",
       "invalid_serial": "Enter an 8-character controller serial number.",
       "invalid_mac": "Enter a valid MAC address (12 hex characters, with or without colons).",
-      "invalid_device_type": "Only E7+ is currently supported for local BLE setup."
+      "invalid_device_type": "Only E7+ is currently supported for local BLE setup.",
+      "commissioning_not_started": "Tick the commissioning checkbox after putting the controller into pairing mode.",
+      "commissioning_failed": "Could not complete local BLE commissioning. Confirm the controller is in commissioning mode and retry.",
+      "commissioning_invalid_result": "Commissioning completed but did not return a usable BLE key."
     },
     "abort": {
-      "already_configured": "SecureMTR is already configured."
+      "already_configured": "SecureMTR is already configured.",
+      "reconfigure_successful": "SecureMTR settings were updated.",
+      "reconfigure_failed": "SecureMTR could not load pending reconfigure data."
     },
     "step": {
       "user": {
@@ -35,6 +40,44 @@
           "serial_number": "Serial number",
           "mac_address": "MAC address",
           "device_type": "Device type"
+        }
+      },
+      "local_ble_commissioning": {
+        "title": "Start controller commissioning",
+        "description": "Put the E7+ controller into commissioning mode now, then tick the checkbox to start BLE commissioning for serial {serial_number} ({mac_address}).",
+        "data": {
+          "start_commissioning": "Controller is in commissioning mode"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure connection",
+        "description": "Choose how this SecureMTR entry should connect.",
+        "data": {
+          "connection_mode": "Connection mode"
+        }
+      },
+      "reconfigure_cloud": {
+        "title": "Update Secure Controls account",
+        "description": "Enter the cloud account credentials for this existing entry.",
+        "data": {
+          "email": "Email address (username)",
+          "password": "Password"
+        }
+      },
+      "reconfigure_local_ble": {
+        "title": "Update local BLE details",
+        "description": "Enter the E7+ serial number and MAC address for this entry.",
+        "data": {
+          "serial_number": "Serial number",
+          "mac_address": "MAC address",
+          "device_type": "Device type"
+        }
+      },
+      "reconfigure_local_ble_commissioning": {
+        "title": "Recommission local BLE",
+        "description": "Put the E7+ controller into commissioning mode now, then tick the checkbox to recommission serial {serial_number} ({mac_address}).",
+        "data": {
+          "start_commissioning": "Controller is in commissioning mode"
         }
       }
     }

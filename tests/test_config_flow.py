@@ -39,10 +39,13 @@ from custom_components.securemtr.config_flow import (
     CONF_BOOST_ANCHOR,
     CONF_DEVICE_TYPE,
     CONF_ELEMENT_POWER_KW,
+    CONF_LOCAL_BLE_KEY,
+    CONF_LOCAL_OWNER_TOKEN,
     CONF_MAC_ADDRESS,
     CONF_PREFER_DEVICE_ENERGY,
     CONF_PRIMARY_ANCHOR,
     CONF_SERIAL_NUMBER,
+    CONF_START_COMMISSIONING,
     CONNECTION_MODE_CLOUD,
     CONNECTION_MODE_LOCAL_BLE,
     DEFAULT_TIMEZONE,
@@ -56,6 +59,9 @@ from custom_components.securemtr.config_flow import (
     _local_unique_id,
     _normalize_mac,
     _serialize_anchor,
+)
+from custom_components.securemtr.local_ble_commissioning import (
+    LocalBleCommissioningError,
 )
 
 
@@ -467,6 +473,133 @@ async def test_config_flow_mode_selection_routes_to_local_ble_step(
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_mode_selection_routes_to_cloud_step(
+    hass_fixture: ConfigFlowHass,
+) -> None:
+    """Ensure reconfigure mode selection can route to cloud credential step."""
+
+    flow = SecuremtrConfigFlow()
+    flow.hass = hass_fixture
+    flow._get_reconfigure_entry = Mock(
+        return_value=SimpleNamespace(
+            entry_id="entry-1",
+            unique_id="local_ble:AABBCCDDEEFF",
+            data={CONF_CONNECTION_MODE: CONNECTION_MODE_LOCAL_BLE},
+        )
+    )
+
+    result = await flow.async_step_reconfigure(
+        {CONF_CONNECTION_MODE: CONNECTION_MODE_CLOUD}
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_cloud"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_cloud_updates_entry_data(
+    hass_fixture: ConfigFlowHass,
+) -> None:
+    """Ensure cloud reconfigure writes updated data and reloads the entry."""
+
+    flow = SecuremtrConfigFlow()
+    flow.hass = hass_fixture
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        unique_id="local_ble:AABBCCDDEEFF",
+        data={CONF_CONNECTION_MODE: CONNECTION_MODE_LOCAL_BLE},
+    )
+    flow._get_reconfigure_entry = Mock(return_value=entry)
+    flow._async_current_entries = Mock(return_value=[entry])
+
+    hass_fixture.config_entries.async_update_entry = Mock()
+    hass_fixture.config_entries.async_reload = AsyncMock()
+
+    result = await flow.async_step_reconfigure_cloud(
+        {
+            CONF_EMAIL: " User@Example.com ",
+            CONF_PASSWORD: "secret",
+        }
+    )
+
+    expected_hash = hashlib.md5("secret".encode("utf-8")).hexdigest()
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    hass_fixture.config_entries.async_update_entry.assert_called_once_with(
+        entry,
+        data={
+            CONF_CONNECTION_MODE: CONNECTION_MODE_CLOUD,
+            CONF_EMAIL: "User@Example.com",
+            CONF_PASSWORD: expected_hash,
+        },
+        title="SecureMTR",
+        unique_id="user@example.com",
+    )
+    hass_fixture.config_entries.async_reload.assert_awaited_once_with("entry-1")
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_local_ble_updates_entry_data(
+    hass_fixture: ConfigFlowHass,
+) -> None:
+    """Ensure local BLE reconfigure writes updated data and reloads entry."""
+
+    flow = SecuremtrConfigFlow()
+    flow.hass = hass_fixture
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        unique_id="user@example.com",
+        data={CONF_CONNECTION_MODE: CONNECTION_MODE_CLOUD},
+    )
+    flow._get_reconfigure_entry = Mock(return_value=entry)
+    flow._async_current_entries = Mock(return_value=[entry])
+
+    hass_fixture.config_entries.async_update_entry = Mock()
+    hass_fixture.config_entries.async_reload = AsyncMock()
+    flow._async_commission_local_ble = AsyncMock(
+        return_value={
+            CONF_LOCAL_BLE_KEY: "00112233445566778899AABBCCDDEEFF",
+            CONF_LOCAL_OWNER_TOKEN: "owner-token",
+        }
+    )
+
+    result = await flow.async_step_reconfigure_local_ble(
+        {
+            CONF_SERIAL_NUMBER: "A1B2C3D4",
+            CONF_MAC_ADDRESS: "aa:bb:cc:dd:ee:ff",
+            CONF_DEVICE_TYPE: DEVICE_TYPE_E7_PLUS,
+        }
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_local_ble_commissioning"
+
+    result = await flow.async_step_reconfigure_local_ble_commissioning(
+        {CONF_START_COMMISSIONING: True}
+    )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    hass_fixture.config_entries.async_update_entry.assert_called_once_with(
+        entry,
+        data={
+            CONF_CONNECTION_MODE: CONNECTION_MODE_LOCAL_BLE,
+            CONF_SERIAL_NUMBER: "A1B2C3D4",
+            CONF_MAC_ADDRESS: "AABBCCDDEEFF",
+            CONF_DEVICE_TYPE: DEVICE_TYPE_E7_PLUS,
+            CONF_LOCAL_BLE_KEY: "00112233445566778899AABBCCDDEEFF",
+            CONF_LOCAL_OWNER_TOKEN: "owner-token",
+        },
+        title="SecureMTR A1B2C3D4",
+        unique_id="local_ble:AABBCCDDEEFF",
+    )
+    hass_fixture.config_entries.async_reload.assert_awaited_once_with("entry-1")
+
+
+@pytest.mark.asyncio
 async def test_config_flow_local_ble_creates_entry(
     hass_fixture: ConfigFlowHass,
 ) -> None:
@@ -477,6 +610,12 @@ async def test_config_flow_local_ble_creates_entry(
 
     flow.async_set_unique_id = AsyncMock()
     flow._abort_if_unique_id_configured = Mock()
+    flow._async_commission_local_ble = AsyncMock(
+        return_value={
+            CONF_LOCAL_BLE_KEY: "00112233445566778899AABBCCDDEEFF",
+            CONF_LOCAL_OWNER_TOKEN: "owner-token",
+        }
+    )
 
     result = await flow.async_step_local_ble(
         {
@@ -486,15 +625,75 @@ async def test_config_flow_local_ble_creates_entry(
         }
     )
 
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "local_ble_commissioning"
+
+    result = await flow.async_step_local_ble_commissioning(
+        {CONF_START_COMMISSIONING: True}
+    )
+
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"] == {
         CONF_CONNECTION_MODE: CONNECTION_MODE_LOCAL_BLE,
         CONF_SERIAL_NUMBER: "A1B2C3D4",
         CONF_MAC_ADDRESS: "AABBCCDDEEFF",
         CONF_DEVICE_TYPE: DEVICE_TYPE_E7_PLUS,
+        CONF_LOCAL_BLE_KEY: "00112233445566778899AABBCCDDEEFF",
+        CONF_LOCAL_OWNER_TOKEN: "owner-token",
     }
     flow.async_set_unique_id.assert_awaited_once_with(_local_unique_id("AABBCCDDEEFF"))
     flow._abort_if_unique_id_configured.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_flow_local_ble_requires_commissioning_checkbox(
+    hass_fixture: ConfigFlowHass,
+) -> None:
+    """Ensure local BLE commissioning does not start until checkbox is set."""
+
+    flow = SecuremtrConfigFlow()
+    flow.hass = hass_fixture
+    flow._pending_local_ble = {
+        CONF_SERIAL_NUMBER: "A1B2C3D4",
+        CONF_MAC_ADDRESS: "AABBCCDDEEFF",
+        CONF_DEVICE_TYPE: DEVICE_TYPE_E7_PLUS,
+    }
+    flow._async_commission_local_ble = AsyncMock()
+
+    result = await flow.async_step_local_ble_commissioning(
+        {CONF_START_COMMISSIONING: False}
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "local_ble_commissioning"
+    assert result["errors"] == {"base": "commissioning_not_started"}
+    flow._async_commission_local_ble.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_config_flow_local_ble_handles_commissioning_failure(
+    hass_fixture: ConfigFlowHass,
+) -> None:
+    """Ensure local BLE commissioning failures keep the flow on-screen."""
+
+    flow = SecuremtrConfigFlow()
+    flow.hass = hass_fixture
+    flow._pending_local_ble = {
+        CONF_SERIAL_NUMBER: "A1B2C3D4",
+        CONF_MAC_ADDRESS: "AABBCCDDEEFF",
+        CONF_DEVICE_TYPE: DEVICE_TYPE_E7_PLUS,
+    }
+    flow._async_commission_local_ble = AsyncMock(
+        side_effect=LocalBleCommissioningError("boom")
+    )
+
+    result = await flow.async_step_local_ble_commissioning(
+        {CONF_START_COMMISSIONING: True}
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "local_ble_commissioning"
+    assert result["errors"] == {"base": "commissioning_failed"}
 
 
 @pytest.mark.asyncio
