@@ -28,6 +28,8 @@ except ImportError:  # pragma: no cover - fallback for test environment
         """Fallback enum mirroring recorder.StatisticsTable."""
 
         STATISTICS = "statistics"
+
+
 from homeassistant.components.recorder.statistics import StatisticMeanType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -77,6 +79,14 @@ from .utils import (
 from .zones import ZONE_KEYS, ZONE_METADATA
 
 DOMAIN = "securemtr"
+
+CONF_CONNECTION_MODE = "connection_mode"
+CONF_DEVICE_TYPE = "device_type"
+CONF_MAC_ADDRESS = "mac_address"
+CONF_SERIAL_NUMBER = "serial_number"
+
+CONNECTION_MODE_CLOUD = "cloud"
+CONNECTION_MODE_LOCAL_BLE = "local_ble"
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -462,6 +472,7 @@ class SecuremtrRuntimeData:
     """Track runtime Beanbag backend state for a config entry."""
 
     backend: BeanbagBackend
+    connection_mode: str = CONNECTION_MODE_CLOUD
     config_entry: ConfigEntry | None = None
     http_session: ClientSession | None = None
     session: BeanbagSession | None = None
@@ -505,6 +516,39 @@ def _entry_display_name(entry: ConfigEntry) -> str:
         return entry_id
 
     return DOMAIN
+
+
+def _entry_connection_mode(entry: ConfigEntry) -> str:
+    """Return the configured connection mode for an entry."""
+
+    mode = entry.data.get(CONF_CONNECTION_MODE)
+    if isinstance(mode, str) and mode.strip():
+        return mode.strip().lower()
+    return CONNECTION_MODE_CLOUD
+
+
+def _build_local_controller(entry: ConfigEntry) -> SecuremtrController:
+    """Build a placeholder controller model for local BLE entries."""
+
+    serial_raw = entry.data.get(CONF_SERIAL_NUMBER)
+    serial_number = serial_raw.strip() if isinstance(serial_raw, str) else None
+    if serial_number == "":
+        serial_number = None
+
+    mac_raw = entry.data.get(CONF_MAC_ADDRESS)
+    mac_address = mac_raw.strip().upper() if isinstance(mac_raw, str) else ""
+
+    identifier = serial_number or mac_address or entry.entry_id
+    device_type = entry.data.get(CONF_DEVICE_TYPE)
+    model = str(device_type).strip().upper() if isinstance(device_type, str) else "E7+"
+
+    return SecuremtrController(
+        identifier=identifier,
+        name=DEFAULT_DEVICE_LABEL,
+        gateway_id=mac_address or identifier,
+        serial_number=serial_number,
+        model=model,
+    )
 
 
 def _utility_meter_identifier(hass: HomeAssistant, entry: ConfigEntry) -> str:
@@ -694,15 +738,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime = SecuremtrRuntimeData(
         backend=BeanbagBackend(session), http_session=session
     )
+    runtime.connection_mode = _entry_connection_mode(entry)
     runtime.config_entry = entry
     hass.data[DOMAIN][entry.entry_id] = runtime
 
     if not hasattr(entry, "options"):
         setattr(entry, "options", {})
-
-    statistics_options = _load_statistics_options(entry)
-    schedule_timezone = statistics_options.timezone
-    schedule_timezone_name = statistics_options.timezone_name
 
     runtime.energy_store = Store(
         hass,
@@ -710,101 +751,115 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _energy_store_key(entry),
     )
 
-    runtime.startup_task = hass.async_create_task(
-        _async_start_backend(hass, entry, runtime)
-    )
-
-    def _queue_consumption_refresh() -> None:
-        """Schedule the asynchronous consumption metrics task safely."""
-
-        def _schedule() -> None:
-            hass.async_create_task(consumption_metrics(hass, entry))
-
-        loop = getattr(hass, "loop", None)
-        if loop is None:
-            hass.async_create_task(consumption_metrics(hass, entry))
-            return
-
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-
-        if running_loop is loop:
-            _schedule()
-        else:
-            loop.call_soon_threadsafe(_schedule)
-
-    def _next_consumption_refresh(reference: datetime | None = None) -> datetime:
-        """Return the next 01:00 UTC instant for the configured timezone."""
-
-        base = reference or dt_util.utcnow()
-        if base.tzinfo is None:
-            base = base.replace(tzinfo=dt_util.UTC)
-        base_utc = dt_util.as_utc(base)
-        local_now = base_utc.astimezone(schedule_timezone)
-        target_local = local_now.replace(hour=1, minute=0, second=0, microsecond=0)
-        if local_now >= target_local:
-            next_day = local_now.date() + timedelta(days=1)
-            target_local = datetime.combine(
-                next_day,
-                time(1, 0, tzinfo=schedule_timezone),
-            )
-        return target_local.astimezone(dt_util.UTC)
-
-    schedule_unsub: Callable[[], None] | None = None
-
-    def _schedule_next_refresh(reference: datetime | None = None) -> None:
-        """Install a one-shot timer for the next consumption refresh."""
-
-        nonlocal schedule_unsub
-
-        if schedule_unsub is not None:
-            with suppress(Exception):
-                schedule_unsub()
-            schedule_unsub = None
-
-        next_refresh = _next_consumption_refresh(reference)
-        _LOGGER.debug(
-            "Scheduling consumption metrics refresh for %s at %s (%s)",
+    if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+        runtime.controller = _build_local_controller(entry)
+        runtime.controller_ready.set()
+        _LOGGER.info(
+            "Configured local BLE mode for %s (serial=%s)",
             entry_identifier,
-            next_refresh.isoformat(),
-            schedule_timezone_name,
+            runtime.controller.serial_number,
         )
-        schedule_unsub = async_track_point_in_time(
-            hass,
-            _scheduled_consumption_refresh,
-            next_refresh,
+    else:
+        statistics_options = _load_statistics_options(entry)
+        schedule_timezone = statistics_options.timezone
+        schedule_timezone_name = statistics_options.timezone_name
+
+        runtime.startup_task = hass.async_create_task(
+            _async_start_backend(hass, entry, runtime)
         )
 
-    def _scheduled_consumption_refresh(now: datetime) -> None:
-        """Trigger the scheduled consumption metrics task."""
+        def _queue_consumption_refresh() -> None:
+            """Schedule the asynchronous consumption metrics task safely."""
+
+            def _schedule() -> None:
+                hass.async_create_task(consumption_metrics(hass, entry))
+
+            loop = getattr(hass, "loop", None)
+            if loop is None:
+                hass.async_create_task(consumption_metrics(hass, entry))
+                return
+
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is loop:
+                _schedule()
+            else:
+                loop.call_soon_threadsafe(_schedule)
+
+        def _next_consumption_refresh(reference: datetime | None = None) -> datetime:
+            """Return the next 01:00 UTC instant for the configured timezone."""
+
+            base = reference or dt_util.utcnow()
+            if base.tzinfo is None:
+                base = base.replace(tzinfo=dt_util.UTC)
+            base_utc = dt_util.as_utc(base)
+            local_now = base_utc.astimezone(schedule_timezone)
+            target_local = local_now.replace(hour=1, minute=0, second=0, microsecond=0)
+            if local_now >= target_local:
+                next_day = local_now.date() + timedelta(days=1)
+                target_local = datetime.combine(
+                    next_day,
+                    time(1, 0, tzinfo=schedule_timezone),
+                )
+            return target_local.astimezone(dt_util.UTC)
+
+        schedule_unsub: Callable[[], None] | None = None
+
+        def _schedule_next_refresh(reference: datetime | None = None) -> None:
+            """Install a one-shot timer for the next consumption refresh."""
+
+            nonlocal schedule_unsub
+
+            if schedule_unsub is not None:
+                with suppress(Exception):
+                    schedule_unsub()
+                schedule_unsub = None
+
+            next_refresh = _next_consumption_refresh(reference)
+            _LOGGER.debug(
+                "Scheduling consumption metrics refresh for %s at %s (%s)",
+                entry_identifier,
+                next_refresh.isoformat(),
+                schedule_timezone_name,
+            )
+            schedule_unsub = async_track_point_in_time(
+                hass,
+                _scheduled_consumption_refresh,
+                next_refresh,
+            )
+
+        def _scheduled_consumption_refresh(now: datetime) -> None:
+            """Trigger the scheduled consumption metrics task."""
+
+            _LOGGER.debug(
+                "Scheduled consumption metrics refresh triggered for %s",
+                entry_identifier,
+            )
+            _queue_consumption_refresh()
+            _schedule_next_refresh(now + timedelta(seconds=1))
+
+        _schedule_next_refresh()
+
+        def _unsubscribe_schedules() -> None:
+            """Cancel every scheduled consumption metrics callback."""
+
+            nonlocal schedule_unsub
+
+            if schedule_unsub is not None:
+                with suppress(Exception):
+                    schedule_unsub()
+                schedule_unsub = None
+
+        runtime.consumption_schedule_unsub = _unsubscribe_schedules
+        runtime.consumption_refresh_callback = _queue_consumption_refresh
 
         _LOGGER.debug(
-            "Scheduled consumption metrics refresh triggered for %s", entry_identifier
+            "Queuing immediate consumption metrics refresh for %s", entry_identifier
         )
         _queue_consumption_refresh()
-        _schedule_next_refresh(now + timedelta(seconds=1))
-
-    _schedule_next_refresh()
-
-    def _unsubscribe_schedules() -> None:
-        """Cancel every scheduled consumption metrics callback."""
-
-        nonlocal schedule_unsub
-
-        if schedule_unsub is not None:
-            with suppress(Exception):
-                schedule_unsub()
-            schedule_unsub = None
-
-    runtime.consumption_schedule_unsub = _unsubscribe_schedules
-    runtime.consumption_refresh_callback = _queue_consumption_refresh
-
-    _LOGGER.debug(
-        "Queuing immediate consumption metrics refresh for %s", entry_identifier
-    )
-    _queue_consumption_refresh()
 
     config_entries_helper = getattr(hass, "config_entries", None)
     if config_entries_helper is not None:
@@ -1756,7 +1811,9 @@ def _submit_statistics(
     energy_entity_ids = _energy_sensor_entity_ids(hass, entry, controller)
 
     def _entity_stat_import_writer(
-        hass: HomeAssistant, meta_dict: dict[str, Any], samples: Iterable[dict[str, Any]]
+        hass: HomeAssistant,
+        meta_dict: dict[str, Any],
+        samples: Iterable[dict[str, Any]],
     ) -> None:
         """Import entity-bound statistics using recorder.async_import_statistics."""
 
@@ -1784,6 +1841,7 @@ def _submit_statistics(
                     sum=float(sample["sum"]),
                 )
             )
+
         async def _async_import() -> None:
             try:
                 await instance.async_import_statistics(

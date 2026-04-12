@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import time
 import hashlib
 import logging
+import string
 from typing import Any
 
 from homeassistant import config_entries
@@ -16,6 +17,16 @@ from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from . import DOMAIN
+
+CONF_CONNECTION_MODE = "connection_mode"
+CONF_DEVICE_TYPE = "device_type"
+CONF_MAC_ADDRESS = "mac_address"
+CONF_SERIAL_NUMBER = "serial_number"
+
+CONNECTION_MODE_CLOUD = "cloud"
+CONNECTION_MODE_LOCAL_BLE = "local_ble"
+
+DEVICE_TYPE_E7_PLUS = "e7plus"
 
 CONF_PRIMARY_ANCHOR = "primary_anchor"
 CONF_BOOST_ANCHOR = "boost_anchor"
@@ -61,10 +72,46 @@ def _serialize_anchor(value: time) -> str:
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
+        vol.Required(
+            CONF_CONNECTION_MODE,
+            default=CONNECTION_MODE_CLOUD,
+        ): vol.In((CONNECTION_MODE_CLOUD, CONNECTION_MODE_LOCAL_BLE)),
+    }
+)
+
+STEP_CLOUD_DATA_SCHEMA = vol.Schema(
+    {
         vol.Required(CONF_EMAIL): str,
         vol.Required(CONF_PASSWORD): str,
     }
 )
+
+STEP_LOCAL_BLE_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_SERIAL_NUMBER): str,
+        vol.Required(CONF_MAC_ADDRESS): str,
+        vol.Required(CONF_DEVICE_TYPE, default=DEVICE_TYPE_E7_PLUS): vol.In(
+            (DEVICE_TYPE_E7_PLUS,)
+        ),
+    }
+)
+
+
+def _normalize_mac(value: str) -> str | None:
+    """Normalize a MAC string to 12 uppercase hexadecimal characters."""
+
+    compact = value.strip().replace(":", "").replace("-", "")
+    if len(compact) != 12:
+        return None
+    if any(char not in string.hexdigits for char in compact):
+        return None
+    return compact.upper()
+
+
+def _local_unique_id(mac_address: str) -> str:
+    """Build a unique ID for local BLE entries."""
+
+    return f"{CONNECTION_MODE_LOCAL_BLE}:{mac_address}"
 
 
 class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -79,54 +126,127 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         _LOGGER.info("Starting SecureMTR user configuration step")
 
         if user_input is not None:
-            email = user_input[CONF_EMAIL].strip()
-            password = user_input[CONF_PASSWORD]
+            if CONF_CONNECTION_MODE in user_input:
+                connection_mode = user_input[CONF_CONNECTION_MODE]
+                if connection_mode == CONNECTION_MODE_LOCAL_BLE:
+                    return await self.async_step_local_ble()
+                return await self.async_step_cloud()
 
-            if not email:
-                _LOGGER.error("Secure Controls email is required")
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=STEP_USER_DATA_SCHEMA,
-                    errors={CONF_EMAIL: "invalid_email"},
-                )
+            if CONF_EMAIL in user_input and CONF_PASSWORD in user_input:
+                return await self._async_handle_cloud_credentials(user_input)
 
-            if not password:
-                _LOGGER.error("Secure Controls password is required")
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=STEP_USER_DATA_SCHEMA,
-                    errors={CONF_PASSWORD: "password_required"},
-                )
+        _LOGGER.info("Displaying SecureMTR connection mode selection form")
+        return self.async_show_form(
+            step_id="user",
+            data_schema=STEP_USER_DATA_SCHEMA,
+        )
 
-            if len(password) > 12:
-                _LOGGER.error(
-                    "Secure Controls password exceeds 12 character mobile app limit"
-                )
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=STEP_USER_DATA_SCHEMA,
-                    errors={CONF_PASSWORD: "password_too_long"},
-                )
+    async def async_step_cloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle the cloud credential step."""
 
-            normalized_email = email.lower()
-
-            await self.async_set_unique_id(normalized_email)
-            self._abort_if_unique_id_configured()
-
-            hashed_password = hashlib.md5(password.encode("utf-8")).hexdigest()
-
-            _LOGGER.info("Secure Controls app credentials accepted")
-            return self.async_create_entry(
-                title="SecureMTR",
-                data={CONF_EMAIL: email, CONF_PASSWORD: hashed_password},
-            )
+        if user_input is not None:
+            return await self._async_handle_cloud_credentials(user_input)
 
         _LOGGER.info(
             "Displaying SecureMTR configuration form for Secure Controls credentials"
         )
         return self.async_show_form(
-            step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            step_id="cloud",
+            data_schema=STEP_CLOUD_DATA_SCHEMA,
+        )
+
+    async def _async_handle_cloud_credentials(
+        self, user_input: dict[str, Any]
+    ) -> FlowResult:
+        """Validate cloud credentials and create a cloud config entry."""
+
+        email = user_input[CONF_EMAIL].strip()
+        password = user_input[CONF_PASSWORD]
+
+        if not email:
+            _LOGGER.error("Secure Controls email is required")
+            return self.async_show_form(
+                step_id="cloud",
+                data_schema=STEP_CLOUD_DATA_SCHEMA,
+                errors={CONF_EMAIL: "invalid_email"},
+            )
+
+        if not password:
+            _LOGGER.error("Secure Controls password is required")
+            return self.async_show_form(
+                step_id="cloud",
+                data_schema=STEP_CLOUD_DATA_SCHEMA,
+                errors={CONF_PASSWORD: "password_required"},
+            )
+
+        if len(password) > 12:
+            _LOGGER.error(
+                "Secure Controls password exceeds 12 character mobile app limit"
+            )
+            return self.async_show_form(
+                step_id="cloud",
+                data_schema=STEP_CLOUD_DATA_SCHEMA,
+                errors={CONF_PASSWORD: "password_too_long"},
+            )
+
+        normalized_email = email.lower()
+
+        await self.async_set_unique_id(normalized_email)
+        self._abort_if_unique_id_configured()
+
+        hashed_password = hashlib.md5(password.encode("utf-8")).hexdigest()
+
+        _LOGGER.info("Secure Controls app credentials accepted")
+        return self.async_create_entry(
+            title="SecureMTR",
+            data={
+                CONF_CONNECTION_MODE: CONNECTION_MODE_CLOUD,
+                CONF_EMAIL: email,
+                CONF_PASSWORD: hashed_password,
+            },
+        )
+
+    async def async_step_local_ble(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle local BLE onboarding details."""
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            serial_number = user_input[CONF_SERIAL_NUMBER].strip()
+            mac_address = _normalize_mac(user_input[CONF_MAC_ADDRESS])
+            device_type = user_input[CONF_DEVICE_TYPE].strip().lower()
+
+            if len(serial_number) != 8:
+                errors[CONF_SERIAL_NUMBER] = "invalid_serial"
+
+            if mac_address is None:
+                errors[CONF_MAC_ADDRESS] = "invalid_mac"
+
+            if device_type != DEVICE_TYPE_E7_PLUS:
+                errors[CONF_DEVICE_TYPE] = "invalid_device_type"
+
+            if not errors and mac_address is not None:
+                await self.async_set_unique_id(_local_unique_id(mac_address))
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=f"SecureMTR {serial_number}",
+                    data={
+                        CONF_CONNECTION_MODE: CONNECTION_MODE_LOCAL_BLE,
+                        CONF_SERIAL_NUMBER: serial_number,
+                        CONF_MAC_ADDRESS: mac_address,
+                        CONF_DEVICE_TYPE: DEVICE_TYPE_E7_PLUS,
+                    },
+                )
+
+        _LOGGER.info("Displaying SecureMTR local BLE onboarding form")
+        return self.async_show_form(
+            step_id="local_ble",
+            data_schema=STEP_LOCAL_BLE_DATA_SCHEMA,
+            errors=errors,
         )
 
     @staticmethod
