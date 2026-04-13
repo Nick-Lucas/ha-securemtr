@@ -67,6 +67,8 @@ E7_PLUS_CHANNEL_COUNT = 2
 DEFAULT_TIMEZONE_ID = 2
 SET_OWNER_TIMEOUT_ERROR = 20001
 SET_OWNER_RETRY_LIMIT = 5
+BLE_COMMAND_RETRY_LIMIT = 2
+BLE_COMMAND_RETRY_DELAY_SECONDS = 2.0
 
 BLE_ACK_SUCCESS = 0
 BLE_ACK_INVALID_MESSAGE = 1
@@ -152,17 +154,55 @@ class _BleUartRpcClient:
         if args is not None:
             request_payload["P"].append(args)
 
-        response = await self._async_exchange_json(request_payload, timeout=timeout)
-        if response.get("I") != request_id:
-            raise LocalBleCommissioningError("RPC response ID mismatch")
+        await self._async_send_payload(
+            json.dumps(request_payload, separators=(",", ":")).encode("utf-8"),
+            use_java_utf8_length=True,
+        )
+
+        deadline = self._loop.time() + timeout
+        while True:
+            remaining = deadline - self._loop.time()
+            if remaining <= 0:
+                raise LocalBleCommissioningError(
+                    f"RPC response ID mismatch (expected {request_id})"
+                )
+
+            response_body = await self._async_wait_for_response_payload(
+                timeout=remaining,
+            )
+            try:
+                response = json.loads(response_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise LocalBleCommissioningError(
+                    "Failed to parse BLE JSON response"
+                ) from error
+
+            if not isinstance(response, dict):
+                raise LocalBleCommissioningError("BLE JSON response is not an object")
+
+            response_id = response.get("I")
+            if response_id != request_id:
+                _LOGGER.debug(
+                    "Ignoring BLE response with mismatched id (expected=%s, got=%s)",
+                    request_id,
+                    response_id,
+                )
+                self._reset_response_state()
+                continue
+            break
 
         error_data = response.get("E")
         if isinstance(error_data, dict):
             error_code = error_data.get("C")
             error_message = error_data.get("M")
+            parsed_error_code: int | None = None
+            if isinstance(error_code, int):
+                parsed_error_code = error_code
+            elif isinstance(error_code, str) and error_code.isdigit():
+                parsed_error_code = int(error_code)
             raise LocalBleCommissioningError(
                 f"Gateway returned RPC error {error_code}: {error_message}",
-                error_code=error_code if isinstance(error_code, int) else None,
+                error_code=parsed_error_code,
             )
 
         if "R" not in response:
@@ -236,8 +276,21 @@ class _BleUartRpcClient:
     ) -> bytes:
         """Write packetized bytes and wait for a packetized byte response."""
 
-        self._response_packets.clear()
-        self._response_event.clear()
+        await self._async_send_payload(
+            request_payload,
+            use_java_utf8_length=use_java_utf8_length,
+        )
+        return await self._async_wait_for_response_payload(timeout=timeout)
+
+    async def _async_send_payload(
+        self,
+        request_payload: bytes,
+        *,
+        use_java_utf8_length: bool,
+    ) -> None:
+        """Frame and transmit one BLE payload."""
+
+        self._reset_response_state()
 
         payload_length = (
             _java_utf8_character_length(request_payload)
@@ -250,6 +303,15 @@ class _BleUartRpcClient:
 
         for packet in _packetize_payload(framed_request):
             await self._client.write_gatt_char(UART_RX_UUID, packet, response=True)
+
+    def _reset_response_state(self) -> None:
+        """Clear staged response packets and readiness state."""
+
+        self._response_packets.clear()
+        self._response_event.clear()
+
+    async def _async_wait_for_response_payload(self, *, timeout: float) -> bytes:
+        """Wait for one BLE response payload and decode transport framing."""
 
         try:
             await asyncio.wait_for(self._response_event.wait(), timeout=timeout)
@@ -406,7 +468,136 @@ def _format_mac_address(mac_address: str) -> str:
     )
 
 
-async def _async_resolve_connectable_device(hass: HomeAssistant, address: str) -> Any:
+def _service_uuid_matches(service_info: Any) -> bool | None:
+    """Return True/False if UUID match is known, or None when unavailable."""
+
+    service_uuids = getattr(service_info, "service_uuids", None)
+    if not isinstance(service_uuids, list):
+        return None
+    if not service_uuids:
+        return None
+    expected = str(UART_SERVICE_UUID)
+    return any(str(uuid).lower() == expected for uuid in service_uuids)
+
+
+def _advertised_serial(service_info: Any) -> str | None:
+    """Extract the advertised serial/name from Home Assistant service info."""
+
+    name = getattr(service_info, "name", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+
+    device = getattr(service_info, "device", None)
+    device_name = getattr(device, "name", None)
+    if isinstance(device_name, str) and device_name.strip():
+        return device_name.strip()
+    return None
+
+
+def _extract_raw_scan_record(service_info: Any) -> bytes | None:
+    """Best-effort extraction of raw scan-record bytes from service metadata."""
+
+    advertisement = getattr(service_info, "advertisement", None)
+    if advertisement is not None:
+        for attribute in ("bytes", "raw_data", "data"):
+            value = getattr(advertisement, attribute, None)
+            if isinstance(value, (bytes, bytearray)):
+                return bytes(value)
+        platform_data = getattr(advertisement, "platform_data", None)
+        candidate = _extract_first_bytes(platform_data)
+        if candidate is not None:
+            return candidate
+
+    device = getattr(service_info, "device", None)
+    details = getattr(device, "details", None)
+    candidate = _extract_first_bytes(details)
+    if candidate is not None:
+        return candidate
+
+    manufacturer_data = getattr(service_info, "manufacturer_data", None)
+    if isinstance(manufacturer_data, dict):
+        candidate = _extract_first_bytes(tuple(manufacturer_data.values()))
+        if candidate is not None:
+            return candidate
+
+    return None
+
+
+def _extract_first_bytes(value: Any) -> bytes | None:
+    """Recursively return the first bytes-like payload found in nested objects."""
+
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, dict):
+        for nested in value.values():
+            candidate = _extract_first_bytes(nested)
+            if candidate is not None:
+                return candidate
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            candidate = _extract_first_bytes(nested)
+            if candidate is not None:
+                return candidate
+        return None
+    return None
+
+
+def _validate_advertisement_identity(
+    service_info: Any,
+    *,
+    expected_address: str,
+    expected_serial: str | None,
+) -> None:
+    """Validate discovered advertisement identity before BLE connection."""
+
+    address = getattr(service_info, "address", None)
+    if not isinstance(address, str) or address.upper() != expected_address.upper():
+        raise LocalBleCommissioningError(
+            f"Advertisement address mismatch: expected {expected_address}, got {address}"
+        )
+
+    uuid_match = _service_uuid_matches(service_info)
+    if uuid_match is False:
+        raise LocalBleCommissioningError(
+            "Advertisement did not include SecureMTR UART service UUID"
+        )
+    if uuid_match is None:
+        _LOGGER.debug(
+            "Advertisement service UUID list unavailable for %s", expected_address
+        )
+
+    if expected_serial is not None:
+        serial = _advertised_serial(service_info)
+        if serial is None or serial.upper() != expected_serial.upper():
+            raise LocalBleCommissioningError(
+                f"Advertisement serial mismatch: expected {expected_serial}, got {serial}"
+            )
+
+    raw_scan_record = _extract_raw_scan_record(service_info)
+    if raw_scan_record is None:
+        _LOGGER.debug("Raw advertisement bytes unavailable for %s", expected_address)
+        return
+
+    if len(raw_scan_record) <= 30:
+        _LOGGER.debug(
+            "Raw advertisement bytes shorter than expected for protocol validation"
+        )
+        return
+
+    hardware_type = raw_scan_record[21]
+    if hardware_type != E7_PLUS_HARDWARE_TYPE:
+        raise LocalBleCommissioningError(
+            f"Advertisement hardware type mismatch: expected {E7_PLUS_HARDWARE_TYPE}, got {hardware_type}"
+        )
+
+
+async def _async_resolve_connectable_device(
+    hass: HomeAssistant,
+    address: str,
+    *,
+    expected_serial: str | None = None,
+) -> Any:
     """Resolve a connectable BLEDevice via Home Assistant's shared scanner."""
 
     from homeassistant.components import bluetooth  # noqa: PLC0415
@@ -415,6 +606,18 @@ async def _async_resolve_connectable_device(hass: HomeAssistant, address: str) -
     if scanner_count <= 0:
         raise LocalBleCommissioningError(
             "No connectable Bluetooth adapters are available in Home Assistant"
+        )
+
+    last_service_info = bluetooth.async_last_service_info(
+        hass,
+        address,
+        connectable=True,
+    )
+    if last_service_info is not None:
+        _validate_advertisement_identity(
+            last_service_info,
+            expected_address=address,
+            expected_serial=expected_serial,
         )
 
     ble_device = bluetooth.async_ble_device_from_address(
@@ -426,7 +629,17 @@ async def _async_resolve_connectable_device(hass: HomeAssistant, address: str) -
     _LOGGER.info("Waiting for BLE advertisement from %s", address)
 
     def _process_advertisement(service_info: Any) -> bool:
-        return service_info.address.upper() == address.upper()
+        if service_info.address.upper() != address.upper():
+            return False
+        try:
+            _validate_advertisement_identity(
+                service_info,
+                expected_address=address,
+                expected_serial=expected_serial,
+            )
+        except LocalBleCommissioningError:
+            return False
+        return True
 
     try:
         await bluetooth.async_process_advertisements(
@@ -506,10 +719,108 @@ async def _async_commission_over_rpc(
     rpc_client: _BleUartRpcClient,
     *,
     gateway_mac_id: str,
-    serial_number: str,
+    timezone_id: int,
     owner_email: str,
+    receiver_name: str,
+    include_wifi_step: bool = False,
 ) -> dict[str, str | None]:
-    """Run the owner/key commissioning RPC sequence over BLE."""
+    """Commission over BLE, trying the already-commissioned path first.
+
+    Matches the app behavior: SystemAlreadyCommissionedActivity tries
+    SetOwner -> GetBLEKey without touching timezone/time/device details.
+    Only falls back to the full first-time sequence if the simple path
+    fails with a transport-level error.
+    """
+
+    try:
+        return await _async_commission_already_paired(
+            rpc_client,
+            gateway_mac_id=gateway_mac_id,
+            owner_email=owner_email,
+            receiver_name=receiver_name,
+        )
+    except LocalBleCommissioningError as error:
+        _LOGGER.info(
+            "Already-commissioned path failed (%s), trying full commissioning",
+            error,
+        )
+
+    await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_SET_TIMEZONE_ID,
+        service_id=SERVICE_ID_TIME_MANAGEMENT,
+        args=[timezone_id],
+    )
+    await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_SET_TIME,
+        service_id=SERVICE_ID_TIME_MANAGEMENT,
+        args=[int(time.time())],
+    )
+    await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_UPDATE_PHYSICAL_DEVICE_DETAILS,
+        service_id=SERVICE_ID_HAN_MANAGEMENT,
+        args=[
+            {
+                "P": 1,
+                "N": receiver_name,
+                "L": "",
+                "LO": "",
+                "FT": 0,
+            }
+        ],
+    )
+
+    owner_result = await _async_set_owner_with_retry(
+        rpc_client,
+        gateway_mac_id=gateway_mac_id,
+        owner_email=owner_email,
+        receiver_name=receiver_name,
+    )
+
+    ble_key_result = await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_GET_BLE_KEY,
+        service_id=SERVICE_ID_HAN_MANAGEMENT,
+        args=None,
+    )
+    ble_key = ble_key_result if isinstance(ble_key_result, str) else None
+    if not ble_key:
+        raise LocalBleCommissioningError("Gateway did not return a BLE key")
+
+    if include_wifi_step:
+        raise LocalBleCommissioningError(
+            "SetWifiCredential commissioning step is not implemented yet"
+        )
+
+    await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_ADD_HAN_DEVICES,
+        service_id=SERVICE_ID_HAN_MANAGEMENT,
+        args=_default_han_device_details(),
+    )
+
+    owner_token = owner_result if isinstance(owner_result, str) else None
+    return {
+        "local_ble_key": ble_key,
+        "local_owner_token": owner_token,
+    }
+
+
+async def _async_commission_already_paired(
+    rpc_client: _BleUartRpcClient,
+    *,
+    gateway_mac_id: str,
+    owner_email: str,
+    receiver_name: str,
+) -> dict[str, str | None]:
+    """Retrieve credentials from an already-commissioned device.
+
+    Tries GetBLEKey first — if the device already has a key it is returned
+    without touching ownership.  Only calls SetOwner when the device does
+    not yet have a key assigned.
+    """
 
     ble_key_result = await rpc_client.async_rpc_request(
         gateway_mac_id=gateway_mac_id,
@@ -524,31 +835,20 @@ async def _async_commission_over_rpc(
             "local_owner_token": None,
         }
 
-    owner_result = await rpc_client.async_rpc_request(
+    owner_result = await _async_set_owner_with_retry(
+        rpc_client,
         gateway_mac_id=gateway_mac_id,
-        handler_id=HANDLER_SET_OWNER_IN_RECEIVER,
-        service_id=SERVICE_ID_COMMS_MANAGER,
-        args=[
-            {
-                "UEA": owner_email,
-                "SN": f"SecureMTR {serial_number}",
-                "MN": None,
-            }
-        ],
+        owner_email=owner_email,
+        receiver_name=receiver_name,
     )
 
-    ble_key_after_owner_result = await rpc_client.async_rpc_request(
+    ble_key_result = await rpc_client.async_rpc_request(
         gateway_mac_id=gateway_mac_id,
         handler_id=HANDLER_GET_BLE_KEY,
         service_id=SERVICE_ID_HAN_MANAGEMENT,
         args=None,
     )
-
-    ble_key = (
-        ble_key_after_owner_result
-        if isinstance(ble_key_after_owner_result, str)
-        else None
-    )
+    ble_key = ble_key_result if isinstance(ble_key_result, str) else None
     if not ble_key:
         raise LocalBleCommissioningError("Gateway did not return a BLE key")
 
@@ -559,9 +859,83 @@ async def _async_commission_over_rpc(
     }
 
 
+async def _async_set_owner_with_retry(
+    rpc_client: _BleUartRpcClient,
+    *,
+    gateway_mac_id: str,
+    owner_email: str,
+    receiver_name: str,
+) -> Any:
+    """Set receiver owner with app-equivalent retries for timeout error 20001."""
+
+    for attempt in range(SET_OWNER_RETRY_LIMIT + 1):
+        try:
+            return await rpc_client.async_rpc_request(
+                gateway_mac_id=gateway_mac_id,
+                handler_id=HANDLER_SET_OWNER_IN_RECEIVER,
+                service_id=SERVICE_ID_COMMS_MANAGER,
+                args=[{"UEA": owner_email, "SN": receiver_name, "MN": None}],
+                timeout=BLE_REQUEST_TIMEOUT_SECONDS,
+            )
+        except LocalBleCommissioningError as error:
+            if error.error_code != SET_OWNER_TIMEOUT_ERROR:
+                raise
+            if attempt >= SET_OWNER_RETRY_LIMIT:
+                raise
+            _LOGGER.warning(
+                "SetOwnerInReceiver timed out with %s (attempt %s/%s), retrying",
+                SET_OWNER_TIMEOUT_ERROR,
+                attempt + 1,
+                SET_OWNER_RETRY_LIMIT + 1,
+            )
+
+    raise LocalBleCommissioningError("SetOwnerInReceiver retries exhausted")
+
+
+def _default_han_device_details() -> list[dict[str, Any]]:
+    """Build a default two-channel HAN device list for E7+ commissioning."""
+
+    return [
+        {
+            "ZT": 1,
+            "CN": 1,
+            "DT": 0,
+            "ZN": 0,
+            "MC": 0,
+            "SN": "",
+            "ZNM": "Hot Water",
+            "RHT": E7_PLUS_HARDWARE_TYPE,
+            "CT": 0,
+        },
+        {
+            "ZT": 2,
+            "CN": 2,
+            "DT": 0,
+            "ZN": 0,
+            "MC": 0,
+            "SN": "",
+            "ZNM": "Timer",
+            "RHT": E7_PLUS_HARDWARE_TYPE,
+            "CT": 0,
+        },
+    ]
+
+
+def _resolve_timezone_id(hass: HomeAssistant) -> int:
+    """Resolve the gateway timezone ID with conservative fallback to app default."""
+
+    timezone_name = getattr(getattr(hass, "config", None), "time_zone", "")
+    if isinstance(timezone_name, str) and timezone_name.strip() == "UTC":
+        return 1
+    return DEFAULT_TIMEZONE_ID
+
+
 def _command_to_rpc_payload(
     method_name: str,
     operation_kwargs: dict[str, Any],
+    *,
+    mode_boi: int,
+    hot_water_boi: int,
 ) -> tuple[int, int, list[Any] | None]:
     """Translate a local command method name to RPC header and arguments."""
 
@@ -572,14 +946,14 @@ def _command_to_rpc_payload(
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_HOT_WATER,
-            [2, {"D": duration, "I": 4, "OT": 2, "V": 0}],
+            [hot_water_boi, {"D": duration, "I": 4, "OT": 2, "V": 0}],
         )
 
     if method_name == "stop_timed_boost":
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_HOT_WATER,
-            [2, {"D": 0, "I": 4, "OT": 2, "V": 0}],
+            [hot_water_boi, {"D": 0, "I": 4, "OT": 2, "V": 0}],
         )
 
     if method_name == "set_timed_boost_enabled":
@@ -589,21 +963,21 @@ def _command_to_rpc_payload(
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_HOT_WATER,
-            [2, {"I": 27, "V": 1 if enabled else 0}],
+            [hot_water_boi, {"I": 27, "V": 1 if enabled else 0}],
         )
 
     if method_name == "turn_controller_on":
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_MODE,
-            [1, {"I": 6, "V": 2}],
+            [mode_boi, {"I": 6, "V": 2}],
         )
 
     if method_name == "turn_controller_off":
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_MODE,
-            [1, {"I": 6, "V": 0}],
+            [mode_boi, {"I": 6, "V": 0}],
         )
 
     raise LocalBleCommissioningError(
@@ -611,10 +985,57 @@ def _command_to_rpc_payload(
     )
 
 
+async def _async_resolve_service_bois(
+    rpc_client: _BleUartRpcClient,
+    *,
+    gateway_mac_id: str,
+) -> tuple[int, int]:
+    """Resolve mode and hot-water BOIs from GetAllServiceValues response."""
+
+    response = await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_GET_ALL_SERVICE_VALUES,
+        service_id=SERVICE_ID_BBSERVER,
+        args=None,
+    )
+
+    mode_boi = 1
+    hot_water_boi = 2
+
+    service_values: list[Any] | None = None
+    if isinstance(response, dict):
+        response_values = response.get("V")
+        if isinstance(response_values, list):
+            service_values = response_values
+    elif isinstance(response, list):
+        service_values = response
+
+    if isinstance(service_values, list):
+        for entry in service_values:
+            if not isinstance(entry, dict):
+                continue
+
+            service_id = entry.get("SI")
+            if not isinstance(service_id, int):
+                service_id = entry.get("value")
+
+            boi = entry.get("I")
+            if not isinstance(service_id, int) or not isinstance(boi, int):
+                continue
+
+            if service_id == SERVICE_ID_MODE:
+                mode_boi = boi
+            elif service_id == SERVICE_ID_HOT_WATER:
+                hot_water_boi = boi
+
+    return mode_boi, hot_water_boi
+
+
 async def async_execute_local_command(
     hass: HomeAssistant,
     *,
     mac_address: str,
+    serial_number: str | None,
     ble_key: str,
     method_name: str,
     operation_kwargs: dict[str, Any],
@@ -623,9 +1044,6 @@ async def async_execute_local_command(
 
     ble_address = _format_mac_address(mac_address)
     gateway_mac_id = str(int(mac_address, 16))
-    handler_id, service_id, args = _command_to_rpc_payload(
-        method_name, operation_kwargs
-    )
 
     try:
         decoded_key = base64.b64decode(ble_key)
@@ -637,15 +1055,34 @@ async def async_execute_local_command(
     if len(decoded_key) != 16:
         raise LocalBleCommissioningError("Stored BLE key must decode to 16 bytes")
 
-    result = await _async_execute_ble_rpc_command(
-        hass,
-        ble_address=ble_address,
-        gateway_mac_id=gateway_mac_id,
-        handler_id=handler_id,
-        service_id=service_id,
-        args=args,
-        auth_key=decoded_key,
-    )
+    last_error: LocalBleCommissioningError | None = None
+    for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+        try:
+            result = await _async_execute_ble_rpc_command(
+                hass,
+                ble_address=ble_address,
+                expected_serial=serial_number,
+                gateway_mac_id=gateway_mac_id,
+                method_name=method_name,
+                operation_kwargs=operation_kwargs,
+                auth_key=decoded_key,
+            )
+            break
+        except LocalBleCommissioningError as error:
+            last_error = error
+            if attempt < BLE_COMMAND_RETRY_LIMIT:
+                _LOGGER.warning(
+                    "BLE command %s failed (attempt %s/%s): %s, retrying",
+                    method_name,
+                    attempt + 1,
+                    BLE_COMMAND_RETRY_LIMIT + 1,
+                    error,
+                )
+                await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
+            else:
+                raise
+    else:
+        raise last_error  # type: ignore[misc]
 
     if result not in (0, "0", None):
         raise LocalBleCommissioningError(
@@ -659,15 +1096,19 @@ async def _async_execute_ble_rpc_command(
     hass: HomeAssistant,
     *,
     ble_address: str,
+    expected_serial: str | None,
     gateway_mac_id: str,
-    handler_id: int,
-    service_id: int,
-    args: list[Any] | None,
+    method_name: str,
+    operation_kwargs: dict[str, Any],
     auth_key: bytes | None,
 ) -> Any:
     """Connect over BLE, optionally authorize, and execute one RPC request."""
 
-    ble_device = await _async_resolve_connectable_device(hass, ble_address)
+    ble_device = await _async_resolve_connectable_device(
+        hass,
+        ble_address,
+        expected_serial=expected_serial,
+    )
 
     def _refresh_ble_device() -> Any:
         from homeassistant.components import bluetooth  # noqa: PLC0415
@@ -688,6 +1129,16 @@ async def _async_execute_ble_rpc_command(
         await rpc_client.async_initialize()
         if auth_key is not None:
             await rpc_client.async_authorize(auth_key)
+        mode_boi, hot_water_boi = await _async_resolve_service_bois(
+            rpc_client,
+            gateway_mac_id=gateway_mac_id,
+        )
+        handler_id, service_id, args = _command_to_rpc_payload(
+            method_name,
+            operation_kwargs,
+            mode_boi=mode_boi,
+            hot_water_boi=hot_water_boi,
+        )
         return await rpc_client.async_rpc_request(
             gateway_mac_id=gateway_mac_id,
             handler_id=handler_id,
@@ -715,6 +1166,8 @@ async def async_commission_local_ble(
 
     ble_address = _format_mac_address(mac_address)
     gateway_mac_id = str(int(mac_address, 16))
+    receiver_name = f"SecureMTR {serial_number}"
+    timezone_id = _resolve_timezone_id(hass)
 
     _LOGGER.info(
         "Starting local BLE commissioning for serial %s at %s",
@@ -722,7 +1175,11 @@ async def async_commission_local_ble(
         ble_address,
     )
 
-    ble_device = await _async_resolve_connectable_device(hass, ble_address)
+    ble_device = await _async_resolve_connectable_device(
+        hass,
+        ble_address,
+        expected_serial=serial_number,
+    )
     _LOGGER.info("Resolved connectable BLE device %s", ble_device.address)
 
     def _refresh_ble_device() -> Any:
@@ -747,8 +1204,9 @@ async def async_commission_local_ble(
         credentials = await _async_commission_over_rpc(
             rpc_client,
             gateway_mac_id=gateway_mac_id,
-            serial_number=serial_number,
+            timezone_id=timezone_id,
             owner_email=DEFAULT_OWNER_EMAIL,
+            receiver_name=receiver_name,
         )
     finally:
         await rpc_client.async_close()

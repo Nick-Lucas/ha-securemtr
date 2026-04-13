@@ -583,9 +583,24 @@ async def test_reconfigure_local_ble_updates_entry_data(
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
-    hass_fixture.config_entries.async_update_entry.assert_called_once_with(
-        entry,
-        data={
+    assert hass_fixture.config_entries.async_update_entry.call_count == 2
+    first_call = hass_fixture.config_entries.async_update_entry.call_args_list[0]
+    assert first_call.args == (entry,)
+    assert first_call.kwargs == {
+        "data": {
+            CONF_CONNECTION_MODE: CONNECTION_MODE_LOCAL_BLE,
+            CONF_SERIAL_NUMBER: "A1B2C3D4",
+            CONF_MAC_ADDRESS: "AABBCCDDEEFF",
+            CONF_DEVICE_TYPE: DEVICE_TYPE_E7_PLUS,
+        },
+        "title": "SecureMTR A1B2C3D4",
+        "unique_id": "local_ble:AABBCCDDEEFF",
+    }
+
+    second_call = hass_fixture.config_entries.async_update_entry.call_args_list[1]
+    assert second_call.args == (entry,)
+    assert second_call.kwargs == {
+        "data": {
             CONF_CONNECTION_MODE: CONNECTION_MODE_LOCAL_BLE,
             CONF_SERIAL_NUMBER: "A1B2C3D4",
             CONF_MAC_ADDRESS: "AABBCCDDEEFF",
@@ -593,8 +608,14 @@ async def test_reconfigure_local_ble_updates_entry_data(
             CONF_LOCAL_BLE_KEY: "00112233445566778899AABBCCDDEEFF",
             CONF_LOCAL_OWNER_TOKEN: "owner-token",
         },
-        title="SecureMTR A1B2C3D4",
-        unique_id="local_ble:AABBCCDDEEFF",
+        "title": "SecureMTR A1B2C3D4",
+        "unique_id": "local_ble:AABBCCDDEEFF",
+    }
+
+    flow._async_commission_local_ble.assert_awaited_once_with(
+        serial_number="A1B2C3D4",
+        mac_address="AABBCCDDEEFF",
+        device_type=DEVICE_TYPE_E7_PLUS,
     )
     hass_fixture.config_entries.async_reload.assert_awaited_once_with("entry-1")
 

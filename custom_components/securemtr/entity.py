@@ -249,6 +249,7 @@ class SecuremtrCommandMixin(SecuremtrRuntimeEntityMixin):
                 result = await async_execute_local_command(
                     hass,
                     mac_address=self._controller.gateway_id,
+                    serial_number=self._controller.serial_number,
                     ble_key=ble_key,
                     method_name=method_name,
                     operation_kwargs=operation_kwargs,

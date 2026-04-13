@@ -340,6 +340,23 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
+            entry = self._get_reconfigure_entry()
+            if self.hass is None:
+                raise RuntimeError("Home Assistant instance is not available")
+
+            wiped_entry_data = {
+                CONF_CONNECTION_MODE: CONNECTION_MODE_LOCAL_BLE,
+                CONF_SERIAL_NUMBER: pending[CONF_SERIAL_NUMBER],
+                CONF_MAC_ADDRESS: pending[CONF_MAC_ADDRESS],
+                CONF_DEVICE_TYPE: pending[CONF_DEVICE_TYPE],
+            }
+            self.hass.config_entries.async_update_entry(
+                entry,
+                data=wiped_entry_data,
+                title=f"SecureMTR {pending[CONF_SERIAL_NUMBER]}",
+                unique_id=_local_unique_id(pending[CONF_MAC_ADDRESS]),
+            )
+
             try:
                 credentials = await self._async_commission_local_ble(
                     serial_number=pending[CONF_SERIAL_NUMBER],
@@ -388,10 +405,6 @@ class SecuremtrConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_MAC_ADDRESS: pending[CONF_MAC_ADDRESS],
                     },
                 )
-
-            entry = self._get_reconfigure_entry()
-            if self.hass is None:
-                raise RuntimeError("Home Assistant instance is not available")
 
             self.hass.config_entries.async_update_entry(
                 entry,

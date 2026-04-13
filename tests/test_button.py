@@ -1004,6 +1004,7 @@ async def test_local_boost_button_uses_local_ble_command(
     kwargs = local_command.await_args.kwargs
     assert kwargs["method_name"] == "start_timed_boost"
     assert kwargs["operation_kwargs"] == {"duration_minutes": 30}
+    assert kwargs["serial_number"] == runtime.controller.serial_number
     assert runtime.timed_boost_active is True
 
 
