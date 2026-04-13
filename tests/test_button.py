@@ -7,12 +7,14 @@ from datetime import datetime, timezone
 import logging
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
+from unittest.mock import AsyncMock
 
 import pytest
 
 import custom_components.securemtr.entity as securemtr_entity
 import custom_components.securemtr.runtime_helpers as runtime_helpers
 from custom_components.securemtr import (
+    CONNECTION_MODE_LOCAL_BLE,
     DEFAULT_DEVICE_LABEL,
     DOMAIN,
     consumption_metrics,
@@ -967,3 +969,55 @@ async def test_consumption_refresh_serializes_with_commands(
     assert submit_calls
     assert update_calls
     assert dispatcher_calls
+
+
+@pytest.mark.asyncio
+async def test_local_boost_button_uses_local_ble_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure local-mode boost buttons invoke the BLE command transport."""
+
+    runtime, _backend = _create_runtime()
+    runtime.connection_mode = CONNECTION_MODE_LOCAL_BLE
+    runtime.websocket = None
+
+    entry = create_config_entry(
+        entry_id="entry-local",
+        data={"local_ble_key": "ABEiM0RVZneImaq7zN3u/w=="},
+    )
+    button = SecuremtrTimedBoostButton(runtime, runtime.controller, entry, 30)
+    button.hass = SimpleNamespace()
+
+    local_command = AsyncMock(return_value=0)
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning.async_execute_local_command",
+        local_command,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.entity.async_dispatch_runtime_update",
+        lambda hass, entry_id: None,
+    )
+
+    await button.async_press()
+
+    local_command.assert_awaited_once()
+    kwargs = local_command.await_args.kwargs
+    assert kwargs["method_name"] == "start_timed_boost"
+    assert kwargs["operation_kwargs"] == {"duration_minutes": 30}
+    assert runtime.timed_boost_active is True
+
+
+@pytest.mark.asyncio
+async def test_local_boost_button_requires_stored_ble_key() -> None:
+    """Ensure local-mode commands fail when BLE credentials are absent."""
+
+    runtime, _backend = _create_runtime()
+    runtime.connection_mode = CONNECTION_MODE_LOCAL_BLE
+    runtime.websocket = None
+
+    entry = create_config_entry(entry_id="entry-local", data={})
+    button = SecuremtrTimedBoostButton(runtime, runtime.controller, entry, 30)
+    button.hass = SimpleNamespace()
+
+    with pytest.raises(HomeAssistantError, match="Local BLE key is missing"):
+        await button.async_press()
