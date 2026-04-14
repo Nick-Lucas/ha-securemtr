@@ -5,14 +5,18 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
 import json
 import logging
+import math
 import random
 import secrets
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from uuid import UUID
 
+#
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -51,10 +55,14 @@ SERVICE_ID_COMMS_MANAGER = 151
 SERVICE_ID_TIME_MANAGEMENT = 103
 SERVICE_ID_WLAN = 102
 SERVICE_ID_MODE = 15
+SERVICE_ID_MODE_LEGACY = 13
 SERVICE_ID_HOT_WATER = 16
+SERVICE_ID_PRIMARY_STATE = 33
+SERVICE_ID_DYNAMIC_TARIFF = 36
 HANDLER_WRITE_DATA = 2
 HANDLER_SET_TIME = 2
 HANDLER_GET_ALL_SERVICE_VALUES = 3
+HANDLER_GET_CONSUMPTION_STATE = 9
 HANDLER_SET_TIMEZONE_ID = 7
 HANDLER_SET_OWNER_IN_RECEIVER = 7
 HANDLER_UPDATE_PHYSICAL_DEVICE_DETAILS = 6
@@ -64,17 +72,36 @@ HANDLER_ADD_HAN_DEVICES = 48
 
 E7_PLUS_HARDWARE_TYPE = 65
 E7_PLUS_CHANNEL_COUNT = 2
+MODE_HOME_VALUE = 2
+DEVICE_CHARACTERISTIC_HOT_WATER_STATE = 4
+DEVICE_CHARACTERISTIC_MODE = 6
+DEVICE_CHARACTERISTIC_ACTIVE_ENERGY = 19
+DEVICE_CHARACTERISTIC_SCHEDULE_ENABLE_DISABLE = 27
+OVERRIDE_TYPE_ADVANCE = 2
 DEFAULT_TIMEZONE_ID = 2
 SET_OWNER_TIMEOUT_ERROR = 20001
 SET_OWNER_RETRY_LIMIT = 5
 BLE_COMMAND_RETRY_LIMIT = 2
 BLE_COMMAND_RETRY_DELAY_SECONDS = 2.0
+BLE_NOTIFY_RECOVERY_DELAY_SECONDS = 0.25
+BLE_DEBUG_PAYLOAD_MAX_CHARS = 4000
 
 BLE_ACK_SUCCESS = 0
 BLE_ACK_INVALID_MESSAGE = 1
 BLE_ACK_KEY_MISMATCH = 2
 
 DEFAULT_OWNER_EMAIL = "homeassistant@local"
+
+SERVICE_ID_SCHEDULE = 17
+HANDLER_READ_WEEKLY_PROGRAM = 22
+
+PROGRAM_ZONE_INDEX: dict[str, int] = {
+    "primary": 1,
+    "boost": 2,
+}
+
+if TYPE_CHECKING:
+    from .beanbag import WeeklyProgram
 
 
 class LocalBleCommissioningError(HomeAssistantError):
@@ -85,6 +112,73 @@ class LocalBleCommissioningError(HomeAssistantError):
 
         super().__init__(message)
         self.error_code = error_code
+
+
+def _is_notify_already_acquired_error(error: Exception) -> bool:
+    """Return True when BlueZ reports notifications already acquired."""
+
+    message = str(error).lower()
+    return "notify acquired" in message or (
+        "notpermitted" in message and "notify" in message
+    )
+
+
+def _format_debug_payload(
+    payload: Any, *, max_chars: int = BLE_DEBUG_PAYLOAD_MAX_CHARS
+) -> str:
+    """Return a bounded JSON-like string for BLE debug logging."""
+
+    try:
+        rendered = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+    except TypeError:
+        rendered = repr(payload)
+
+    if len(rendered) <= max_chars:
+        return rendered
+
+    return f"{rendered[:max_chars]}...(truncated {len(rendered) - max_chars} chars)"
+
+
+def _summarize_service_values(response: Any) -> list[dict[str, Any]]:
+    """Return compact per-service diagnostics from service values payloads."""
+
+    summaries: list[dict[str, Any]] = []
+    for service_entry in _extract_service_values(response):
+        service_id = service_entry.get("SI")
+        if not isinstance(service_id, int):
+            service_id = service_entry.get("value")
+        if not isinstance(service_id, int):
+            continue
+
+        boi = _extract_service_boi(service_entry)
+        characteristic_ids: list[int] = []
+        for char_id in _extract_characteristic_map(service_entry):
+            characteristic_ids.append(char_id)
+        characteristic_ids.sort()
+
+        summaries.append(
+            {
+                "si": service_id,
+                "boi": boi,
+                "chars": characteristic_ids,
+            }
+        )
+
+    return summaries
+
+
+@dataclass(slots=True)
+class LocalBleSnapshot:
+    """Represent parsed local BLE values for runtime sensors."""
+
+    primary_power_on: bool | None = None
+    timed_boost_enabled: bool | None = None
+    timed_boost_active: bool | None = None
+    timed_boost_duration_minutes: int | None = None
+    primary_energy_kwh: float | None = None
+    boost_energy_kwh: float | None = None
+    consumption_days: list[dict[str, Any]] | None = None
+    statistics_recent: dict[str, dict[str, Any]] | None = None
 
 
 class _BleUartRpcClient:
@@ -116,7 +210,30 @@ class _BleUartRpcClient:
                     "SecureMTR UART TX characteristic missing"
                 )
 
-        await self._client.start_notify(UART_TX_UUID, self._notification_callback)
+        try:
+            await self._client.start_notify(UART_TX_UUID, self._notification_callback)
+        except (BleakError, RuntimeError, OSError) as error:
+            if _is_notify_already_acquired_error(error):
+                _LOGGER.debug(
+                    "TX notify channel already acquired; attempting one recovery cycle"
+                )
+                with suppress(BleakError, RuntimeError, OSError):
+                    await self._client.stop_notify(UART_TX_UUID)
+                await asyncio.sleep(BLE_NOTIFY_RECOVERY_DELAY_SECONDS)
+                try:
+                    await self._client.start_notify(
+                        UART_TX_UUID,
+                        self._notification_callback,
+                    )
+                    return
+                except (BleakError, RuntimeError, OSError) as retry_error:
+                    raise LocalBleCommissioningError(
+                        "Failed to subscribe to SecureMTR TX notifications"
+                    ) from retry_error
+
+            raise LocalBleCommissioningError(
+                "Failed to subscribe to SecureMTR TX notifications"
+            ) from error
 
     async def async_close(self) -> None:
         """Stop notifications when possible."""
@@ -302,7 +419,12 @@ class _BleUartRpcClient:
             framed_request = _encrypt_payload(self._auth_key, framed_request)
 
         for packet in _packetize_payload(framed_request):
-            await self._client.write_gatt_char(UART_RX_UUID, packet, response=True)
+            try:
+                await self._client.write_gatt_char(UART_RX_UUID, packet, response=True)
+            except (BleakError, RuntimeError, OSError) as error:
+                raise LocalBleCommissioningError(
+                    "Failed to write BLE UART packet"
+                ) from error
 
     def _reset_response_state(self) -> None:
         """Clear staged response packets and readiness state."""
@@ -930,6 +1052,379 @@ def _resolve_timezone_id(hass: HomeAssistant) -> int:
     return DEFAULT_TIMEZONE_ID
 
 
+def _extract_service_values(response: Any) -> list[dict[str, Any]]:
+    """Extract ServiceValuesDTO entries from a GetAllServiceValues response."""
+
+    service_values: list[Any] | None = None
+    if isinstance(response, dict):
+        response_values = response.get("V")
+        if isinstance(response_values, list):
+            service_values = response_values
+    elif isinstance(response, list):
+        service_values = response
+
+    if not isinstance(service_values, list):
+        return []
+
+    return [entry for entry in service_values if isinstance(entry, dict)]
+
+
+def _extract_characteristic_map(
+    service_entry: dict[str, Any],
+) -> dict[int, dict[str, Any]]:
+    """Build a characteristic-id map from a service values entry."""
+
+    raw_characteristics = service_entry.get("V")
+    if not isinstance(raw_characteristics, list):
+        return {}
+
+    characteristic_map: dict[int, dict[str, Any]] = {}
+    for characteristic in raw_characteristics:
+        if not isinstance(characteristic, dict):
+            continue
+        char_id = characteristic.get("I")
+        if not isinstance(char_id, int):
+            continue
+        if char_id in characteristic_map:
+            continue
+        characteristic_map[char_id] = characteristic
+
+    return characteristic_map
+
+
+def _extract_numeric_value(payload: dict[str, Any], key: str) -> float | None:
+    """Return a float value for a dictionary key when numeric."""
+
+    value = payload.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate == "":
+            return None
+        try:
+            parsed = float(candidate)
+        except ValueError:
+            return None
+        if math.isfinite(parsed):
+            return parsed
+    return None
+
+
+def _extract_service_boi(service_entry: dict[str, Any]) -> int | None:
+    """Return a valid business-object identifier from a service values entry."""
+
+    boi = service_entry.get("I")
+    if isinstance(boi, int):
+        return boi
+    return None
+
+
+def _find_service_boi(response: Any, *, service_id: int) -> int | None:
+    """Find the first BOI for the requested service identifier."""
+
+    for service_entry in _extract_service_values(response):
+        entry_service_id = service_entry.get("SI")
+        if not isinstance(entry_service_id, int):
+            entry_service_id = service_entry.get("value")
+        if entry_service_id != service_id:
+            continue
+        boi = _extract_service_boi(service_entry)
+        if boi is not None:
+            return boi
+    return None
+
+
+def _active_energy_to_kwh(raw_value: float | None) -> float | None:
+    """Convert ActiveEnergy characteristic values to kilowatt-hours."""
+
+    if raw_value is None or raw_value < 0:
+        return None
+    return raw_value / 1000.0
+
+
+def _minutes_to_hours(value: float | None) -> float | None:
+    """Convert runtime minutes into fractional hours."""
+
+    if value is None or value < 0:
+        return None
+    return value / 60.0
+
+
+def _extract_duration_minutes(row: dict[str, Any], key: str) -> float:
+    """Extract duration minutes from a consumption row with zero default."""
+
+    value = _extract_numeric_value(row, key)
+    if value is None or value < 0:
+        return 0.0
+    return value
+
+
+def _extract_consumption_energy_kwh(row: dict[str, Any], key: str) -> float | None:
+    """Extract a daily energy value from DynamicTariff rows as kWh."""
+
+    value = _extract_numeric_value(row, key)
+    if value is None or value < 0:
+        return None
+    return value / 1000.0
+
+
+def _parse_consumption_report_day(timestamp_value: float | None) -> str | None:
+    """Parse the dynamic tariff timestamp into an ISO report day."""
+
+    if timestamp_value is None or timestamp_value <= 0:
+        return None
+    timestamp_seconds = timestamp_value
+    if timestamp_seconds >= 1_000_000_000_000:
+        timestamp_seconds = timestamp_seconds / 1000.0
+
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(timestamp_seconds))
+    except (OverflowError, ValueError):
+        return None
+
+
+def _extract_consumption_rows(response: Any) -> list[dict[str, Any]]:
+    """Extract DynamicDaySchedule-like rows from a consumption payload."""
+
+    payload = response
+    if isinstance(payload, dict):
+        payload_values = payload.get("V")
+        if isinstance(payload_values, list):
+            payload = payload_values
+        elif isinstance(payload.get("D"), list):
+            payload = [payload]
+        elif isinstance(payload.get("D"), dict):
+            payload = [{"D": [payload.get("D")]}]
+        elif any(key in payload for key in ("OA", "OS", "BA", "BS", "T")):
+            payload = [payload]
+
+    if not isinstance(payload, list):
+        _LOGGER.debug(
+            "DynamicTariff consumption payload is not a list: %s",
+            _format_debug_payload(response),
+        )
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if any(key in item for key in ("OA", "OS", "BA", "BS", "T")):
+            rows.append(item)
+            continue
+        day_entries = item.get("D")
+        if not isinstance(day_entries, list):
+            continue
+        rows.extend(entry for entry in day_entries if isinstance(entry, dict))
+
+    return rows
+
+
+def _parse_consumption_day_rows(response: Any) -> list[dict[str, Any]]:
+    """Parse DynamicTariff payload rows into normalized per-day values."""
+
+    rows = _extract_consumption_rows(response)
+    if not rows:
+        _LOGGER.debug(
+            "DynamicTariff consumption payload had no day rows: %s",
+            _format_debug_payload(response),
+        )
+        return []
+
+    parsed_rows: list[dict[str, Any]] = []
+    for row in rows:
+        timestamp = _extract_numeric_value(row, "T")
+        report_day = _parse_consumption_report_day(timestamp)
+
+        parsed_rows.append(
+            {
+                "timestamp": timestamp,
+                "report_day": report_day,
+                "primary_runtime_hours": _minutes_to_hours(
+                    _extract_duration_minutes(row, "OA")
+                ),
+                "primary_scheduled_hours": _minutes_to_hours(
+                    _extract_duration_minutes(row, "OS")
+                ),
+                "boost_runtime_hours": _minutes_to_hours(
+                    _extract_duration_minutes(row, "BA")
+                ),
+                "boost_scheduled_hours": _minutes_to_hours(
+                    _extract_duration_minutes(row, "BS")
+                ),
+                "primary_energy_kwh": _extract_consumption_energy_kwh(row, "OP"),
+                "boost_energy_kwh": _extract_consumption_energy_kwh(row, "BP"),
+                "raw": row,
+            }
+        )
+
+    return parsed_rows
+
+
+def _select_latest_consumption_row(
+    parsed_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Select the latest parsed consumption row using timestamp ordering."""
+
+    if not parsed_rows:
+        return None
+
+    def _sort_key(item: dict[str, Any]) -> float:
+        timestamp = item.get("timestamp")
+        if not isinstance(timestamp, (int, float)):
+            return float("-inf")
+        return float(timestamp)
+
+    return max(parsed_rows, key=_sort_key)
+
+
+def _consumption_rows_have_energy(parsed_rows: list[dict[str, Any]]) -> bool:
+    """Return whether parsed consumption rows contain OP/BP energy values."""
+
+    for row in parsed_rows:
+        if not isinstance(row, dict):
+            continue
+        for field_name in ("primary_energy_kwh", "boost_energy_kwh"):
+            value = row.get(field_name)
+            if isinstance(value, (int, float)) and value >= 0:
+                return True
+    return False
+
+
+def _parse_consumption_state(response: Any) -> dict[str, dict[str, Any]] | None:
+    """Parse DynamicTariff consumption payload into recent duration summaries."""
+
+    parsed_rows = _parse_consumption_day_rows(response)
+    if not parsed_rows:
+        return None
+
+    latest = _select_latest_consumption_row(parsed_rows)
+    if latest is None:
+        return None
+
+    report_day = latest.get("report_day")
+    if not isinstance(report_day, str):
+        report_day = None
+
+    parsed = {
+        "primary": {
+            "report_day": report_day,
+            "runtime_hours": latest.get("primary_runtime_hours"),
+            "scheduled_hours": latest.get("primary_scheduled_hours"),
+            "energy_kwh": latest.get("primary_energy_kwh"),
+        },
+        "boost": {
+            "report_day": report_day,
+            "runtime_hours": latest.get("boost_runtime_hours"),
+            "scheduled_hours": latest.get("boost_scheduled_hours"),
+            "energy_kwh": latest.get("boost_energy_kwh"),
+        },
+    }
+
+    raw_row = latest.get("raw")
+    if not isinstance(raw_row, dict):
+        raw_row = {}
+
+    _LOGGER.debug(
+        "Parsed DynamicTariff consumption row: report_day=%s OA=%s OS=%s BA=%s BS=%s OP=%s BP=%s",
+        report_day,
+        raw_row.get("OA"),
+        raw_row.get("OS"),
+        raw_row.get("BA"),
+        raw_row.get("BS"),
+        raw_row.get("OP"),
+        raw_row.get("BP"),
+    )
+    return parsed
+
+
+def _parse_local_ble_snapshot(response: Any) -> LocalBleSnapshot:
+    """Parse GetAllServiceValues payload into local runtime fields."""
+
+    snapshot = LocalBleSnapshot()
+
+    for service_entry in _extract_service_values(response):
+        service_id = service_entry.get("SI")
+        if not isinstance(service_id, int):
+            service_id = service_entry.get("value")
+        if not isinstance(service_id, int):
+            continue
+
+        characteristic_map = _extract_characteristic_map(service_entry)
+        if service_id in (
+            SERVICE_ID_MODE,
+            SERVICE_ID_MODE_LEGACY,
+            SERVICE_ID_PRIMARY_STATE,
+        ):
+            mode_characteristic = characteristic_map.get(DEVICE_CHARACTERISTIC_MODE)
+            if mode_characteristic is not None:
+                mode_value = _extract_numeric_value(mode_characteristic, "V")
+                if mode_value is not None:
+                    snapshot.primary_power_on = int(mode_value) == MODE_HOME_VALUE
+
+            primary_energy_characteristic = characteristic_map.get(
+                DEVICE_CHARACTERISTIC_ACTIVE_ENERGY
+            )
+            if primary_energy_characteristic is not None:
+                energy_value = _extract_numeric_value(
+                    primary_energy_characteristic, "V"
+                )
+                snapshot.primary_energy_kwh = _active_energy_to_kwh(energy_value)
+
+        elif service_id == SERVICE_ID_HOT_WATER:
+            boost_state_characteristic = characteristic_map.get(
+                DEVICE_CHARACTERISTIC_HOT_WATER_STATE
+            )
+            if boost_state_characteristic is not None:
+                boost_state_value = _extract_numeric_value(
+                    boost_state_characteristic, "V"
+                )
+                override_type = _extract_numeric_value(boost_state_characteristic, "OT")
+                duration_value = _extract_numeric_value(boost_state_characteristic, "D")
+
+                if boost_state_value is not None:
+                    snapshot.timed_boost_active = (
+                        override_type is not None
+                        and int(override_type) == OVERRIDE_TYPE_ADVANCE
+                    )
+
+                if duration_value is not None and duration_value > 0:
+                    snapshot.timed_boost_duration_minutes = int(duration_value)
+
+            timed_boost_enabled_characteristic = characteristic_map.get(
+                DEVICE_CHARACTERISTIC_SCHEDULE_ENABLE_DISABLE
+            )
+            if timed_boost_enabled_characteristic is not None:
+                enabled_value = _extract_numeric_value(
+                    timed_boost_enabled_characteristic,
+                    "V",
+                )
+                if enabled_value is not None:
+                    snapshot.timed_boost_enabled = int(enabled_value) != 0
+
+            boost_energy_characteristic = characteristic_map.get(
+                DEVICE_CHARACTERISTIC_ACTIVE_ENERGY
+            )
+            if boost_energy_characteristic is not None:
+                boost_energy_value = _extract_numeric_value(
+                    boost_energy_characteristic, "V"
+                )
+                snapshot.boost_energy_kwh = _active_energy_to_kwh(boost_energy_value)
+
+    _LOGGER.debug(
+        "Parsed local BLE snapshot: primary_power_on=%s timed_boost_enabled=%s timed_boost_active=%s boost_duration=%s primary_energy_kwh=%s boost_energy_kwh=%s",
+        snapshot.primary_power_on,
+        snapshot.timed_boost_enabled,
+        snapshot.timed_boost_active,
+        snapshot.timed_boost_duration_minutes,
+        snapshot.primary_energy_kwh,
+        snapshot.boost_energy_kwh,
+    )
+
+    return snapshot
+
+
 def _command_to_rpc_payload(
     method_name: str,
     operation_kwargs: dict[str, Any],
@@ -1002,33 +1497,337 @@ async def _async_resolve_service_bois(
     mode_boi = 1
     hot_water_boi = 2
 
-    service_values: list[Any] | None = None
-    if isinstance(response, dict):
-        response_values = response.get("V")
-        if isinstance(response_values, list):
-            service_values = response_values
-    elif isinstance(response, list):
-        service_values = response
+    resolved_mode_boi = _find_service_boi(response, service_id=SERVICE_ID_MODE)
+    if resolved_mode_boi is not None:
+        mode_boi = resolved_mode_boi
 
-    if isinstance(service_values, list):
-        for entry in service_values:
-            if not isinstance(entry, dict):
-                continue
-
-            service_id = entry.get("SI")
-            if not isinstance(service_id, int):
-                service_id = entry.get("value")
-
-            boi = entry.get("I")
-            if not isinstance(service_id, int) or not isinstance(boi, int):
-                continue
-
-            if service_id == SERVICE_ID_MODE:
-                mode_boi = boi
-            elif service_id == SERVICE_ID_HOT_WATER:
-                hot_water_boi = boi
+    resolved_hot_water_boi = _find_service_boi(
+        response,
+        service_id=SERVICE_ID_HOT_WATER,
+    )
+    if resolved_hot_water_boi is not None:
+        hot_water_boi = resolved_hot_water_boi
 
     return mode_boi, hot_water_boi
+
+
+async def async_read_local_snapshot(
+    hass: HomeAssistant,
+    *,
+    mac_address: str,
+    serial_number: str | None,
+    ble_key: str,
+) -> LocalBleSnapshot:
+    """Read and parse local BLE service values for runtime sensors."""
+
+    ble_address = _format_mac_address(mac_address)
+    gateway_mac_id = str(int(mac_address, 16))
+
+    try:
+        decoded_key = base64.b64decode(ble_key)
+    except Exception as error:
+        raise LocalBleCommissioningError(
+            "Stored BLE key is not valid base64"
+        ) from error
+
+    if len(decoded_key) != 16:
+        raise LocalBleCommissioningError("Stored BLE key must decode to 16 bytes")
+
+    for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+        try:
+            return await _async_read_ble_snapshot_once(
+                hass,
+                ble_address=ble_address,
+                expected_serial=serial_number,
+                gateway_mac_id=gateway_mac_id,
+                auth_key=decoded_key,
+            )
+        except LocalBleCommissioningError as error:
+            if attempt >= BLE_COMMAND_RETRY_LIMIT:
+                raise
+            _LOGGER.warning(
+                "BLE snapshot read failed (attempt %s/%s): %s, retrying",
+                attempt + 1,
+                BLE_COMMAND_RETRY_LIMIT + 1,
+                error,
+            )
+            await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
+
+    raise LocalBleCommissioningError("BLE snapshot retries exhausted")
+
+
+async def _async_read_ble_snapshot_once(
+    hass: HomeAssistant,
+    *,
+    ble_address: str,
+    expected_serial: str | None,
+    gateway_mac_id: str,
+    auth_key: bytes,
+) -> LocalBleSnapshot:
+    """Connect over BLE once and read a snapshot payload."""
+
+    ble_device = await _async_resolve_connectable_device(
+        hass,
+        ble_address,
+        expected_serial=expected_serial,
+    )
+
+    def _refresh_ble_device() -> Any:
+        from homeassistant.components import bluetooth  # noqa: PLC0415
+
+        refreshed = bluetooth.async_ble_device_from_address(
+            hass,
+            ble_address,
+            connectable=True,
+        )
+        return refreshed if refreshed is not None else ble_device
+
+    client = await _async_connect_client(
+        ble_device,
+        ble_device_callback=_refresh_ble_device,
+    )
+    rpc_client = _BleUartRpcClient(client)
+    try:
+        await rpc_client.async_initialize()
+        await rpc_client.async_authorize(auth_key)
+        response = await rpc_client.async_rpc_request(
+            gateway_mac_id=gateway_mac_id,
+            handler_id=HANDLER_GET_ALL_SERVICE_VALUES,
+            service_id=SERVICE_ID_BBSERVER,
+            args=None,
+        )
+        _LOGGER.debug(
+            "GetAllServiceValues summary for %s: %s",
+            ble_address,
+            _summarize_service_values(response),
+        )
+        _LOGGER.debug(
+            "GetAllServiceValues raw payload for %s: %s",
+            ble_address,
+            _format_debug_payload(response),
+        )
+        snapshot = _parse_local_ble_snapshot(response)
+
+        dynamic_tariff_boi = _find_service_boi(
+            response,
+            service_id=SERVICE_ID_DYNAMIC_TARIFF,
+        )
+        consumption_args_candidates: list[list[int]] = [[1], [0]]
+        if dynamic_tariff_boi is not None:
+            consumption_args_candidates.append([dynamic_tariff_boi])
+
+        deduped_consumption_args: list[list[int]] = []
+        seen_consumption_args: set[tuple[int, ...]] = set()
+        for consumption_args in consumption_args_candidates:
+            key = tuple(consumption_args)
+            if key in seen_consumption_args:
+                continue
+            seen_consumption_args.add(key)
+            deduped_consumption_args.append(consumption_args)
+
+        for consumption_args in deduped_consumption_args:
+            try:
+                consumption_response = await rpc_client.async_rpc_request(
+                    gateway_mac_id=gateway_mac_id,
+                    handler_id=HANDLER_GET_CONSUMPTION_STATE,
+                    service_id=SERVICE_ID_DYNAMIC_TARIFF,
+                    args=consumption_args,
+                )
+                _LOGGER.debug(
+                    "GetConsumptionState raw payload for %s args=%s: %s",
+                    ble_address,
+                    consumption_args,
+                    _format_debug_payload(consumption_response),
+                )
+                snapshot.consumption_days = _parse_consumption_day_rows(
+                    consumption_response
+                )
+                has_consumption_energy = _consumption_rows_have_energy(
+                    snapshot.consumption_days
+                )
+                snapshot.statistics_recent = _parse_consumption_state(
+                    consumption_response
+                )
+                if snapshot.statistics_recent is not None:
+                    primary_stats = snapshot.statistics_recent.get("primary")
+                    if (
+                        snapshot.primary_energy_kwh is None
+                        and isinstance(primary_stats, dict)
+                        and isinstance(primary_stats.get("energy_kwh"), (int, float))
+                    ):
+                        snapshot.primary_energy_kwh = float(primary_stats["energy_kwh"])
+
+                    boost_stats = snapshot.statistics_recent.get("boost")
+                    if (
+                        snapshot.boost_energy_kwh is None
+                        and isinstance(boost_stats, dict)
+                        and isinstance(boost_stats.get("energy_kwh"), (int, float))
+                    ):
+                        snapshot.boost_energy_kwh = float(boost_stats["energy_kwh"])
+
+                    _LOGGER.debug(
+                        "Parsed statistics_recent from GetConsumptionState args=%s: %s",
+                        consumption_args,
+                        _format_debug_payload(snapshot.statistics_recent),
+                    )
+                    if (
+                        has_consumption_energy
+                        or snapshot.primary_energy_kwh is not None
+                        or snapshot.boost_energy_kwh is not None
+                    ):
+                        break
+            except LocalBleCommissioningError as error:
+                _LOGGER.debug(
+                    "Failed to read local BLE consumption state for args %s: %s",
+                    consumption_args,
+                    error,
+                )
+
+        if snapshot.statistics_recent is None:
+            _LOGGER.debug(
+                "No statistics_recent parsed from local BLE consumption responses for %s",
+                ble_address,
+            )
+
+        return snapshot
+    finally:
+        await rpc_client.async_close()
+        await _async_disconnect_client(client)
+
+
+def _parse_local_weekly_program(payload: Any) -> "WeeklyProgram":
+    """Parse one weekly program payload from local BLE RPC format."""
+
+    from .beanbag import BeanbagBackend, BeanbagError  # noqa: PLC0415
+
+    parse_payload = payload
+    if isinstance(parse_payload, dict):
+        values = parse_payload.get("V")
+        if isinstance(values, list):
+            parse_payload = values
+
+    try:
+        return BeanbagBackend._parse_weekly_program(parse_payload)
+    except BeanbagError as error:
+        raise LocalBleCommissioningError(
+            f"Failed to parse local BLE weekly program payload: {error}"
+        ) from error
+
+
+async def async_read_local_weekly_programs(
+    hass: HomeAssistant,
+    *,
+    mac_address: str,
+    serial_number: str | None,
+    ble_key: str,
+) -> tuple[
+    dict[str, "WeeklyProgram | None"],
+    dict[str, list[tuple[int, int]] | None],
+]:
+    """Read primary and boost weekly schedules from local BLE RPC."""
+
+    ble_address = _format_mac_address(mac_address)
+    gateway_mac_id = str(int(mac_address, 16))
+
+    try:
+        decoded_key = base64.b64decode(ble_key)
+    except Exception as error:
+        raise LocalBleCommissioningError(
+            "Stored BLE key is not valid base64"
+        ) from error
+
+    if len(decoded_key) != 16:
+        raise LocalBleCommissioningError("Stored BLE key must decode to 16 bytes")
+
+    for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+        try:
+            return await _async_read_ble_weekly_programs_once(
+                hass,
+                ble_address=ble_address,
+                expected_serial=serial_number,
+                gateway_mac_id=gateway_mac_id,
+                auth_key=decoded_key,
+            )
+        except LocalBleCommissioningError as error:
+            if attempt >= BLE_COMMAND_RETRY_LIMIT:
+                raise
+            _LOGGER.warning(
+                "BLE weekly schedule read failed (attempt %s/%s): %s, retrying",
+                attempt + 1,
+                BLE_COMMAND_RETRY_LIMIT + 1,
+                error,
+            )
+            await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
+
+    raise LocalBleCommissioningError("BLE weekly schedule retries exhausted")
+
+
+async def _async_read_ble_weekly_programs_once(
+    hass: HomeAssistant,
+    *,
+    ble_address: str,
+    expected_serial: str | None,
+    gateway_mac_id: str,
+    auth_key: bytes,
+) -> tuple[
+    dict[str, "WeeklyProgram | None"],
+    dict[str, list[tuple[int, int]] | None],
+]:
+    """Connect once and read both weekly programs from local BLE RPC."""
+
+    from .schedule import canonicalize_weekly  # noqa: PLC0415
+
+    ble_device = await _async_resolve_connectable_device(
+        hass,
+        ble_address,
+        expected_serial=expected_serial,
+    )
+
+    def _refresh_ble_device() -> Any:
+        from homeassistant.components import bluetooth  # noqa: PLC0415
+
+        refreshed = bluetooth.async_ble_device_from_address(
+            hass,
+            ble_address,
+            connectable=True,
+        )
+        return refreshed if refreshed is not None else ble_device
+
+    client = await _async_connect_client(
+        ble_device,
+        ble_device_callback=_refresh_ble_device,
+    )
+    rpc_client = _BleUartRpcClient(client)
+    try:
+        await rpc_client.async_initialize()
+        await rpc_client.async_authorize(auth_key)
+
+        programs: dict[str, Any] = {}
+        canonicals: dict[str, list[tuple[int, int]] | None] = {}
+
+        for zone_key, zone_index in PROGRAM_ZONE_INDEX.items():
+            response = await rpc_client.async_rpc_request(
+                gateway_mac_id=gateway_mac_id,
+                handler_id=HANDLER_READ_WEEKLY_PROGRAM,
+                service_id=SERVICE_ID_SCHEDULE,
+                args=[zone_index],
+            )
+            _LOGGER.debug(
+                "ReadWeeklyProgram raw payload for %s zone=%s idx=%s: %s",
+                ble_address,
+                zone_key,
+                zone_index,
+                _format_debug_payload(response),
+            )
+
+            program = _parse_local_weekly_program(response)
+            programs[zone_key] = program
+            canonicals[zone_key] = canonicalize_weekly(program)
+
+        return programs, canonicals
+    finally:
+        await rpc_client.async_close()
+        await _async_disconnect_client(client)
 
 
 async def async_execute_local_command(

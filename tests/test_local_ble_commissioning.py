@@ -16,18 +16,26 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from custom_components.securemtr.local_ble_commissioning import (
     FINAL_PACKET_INDEX,
+    LocalBleSnapshot,
     _BleUartRpcClient,
     LocalBleCommissioningError,
     _async_commission_over_rpc,
+    _async_read_ble_snapshot_once,
+    _async_read_ble_weekly_programs_once,
     _async_resolve_service_bois,
     _async_set_owner_with_retry,
     _command_to_rpc_payload,
+    _parse_consumption_day_rows,
+    _parse_consumption_state,
+    _parse_local_weekly_program,
     _extract_length_prefixed_payload,
+    _parse_local_ble_snapshot,
     _format_mac_address,
     _java_utf8_character_length,
     _packetize_payload,
     _reassemble_packet_bytes,
     _validate_advertisement_identity,
+    async_read_local_snapshot,
     async_execute_local_command,
     async_commission_local_ble,
 )
@@ -117,6 +125,487 @@ async def test_async_resolve_service_bois_parses_value_field() -> None:
     assert hot_water_boi == 22
 
 
+def test_parse_local_ble_snapshot_maps_runtime_fields() -> None:
+    """Ensure local snapshot parsing maps power, boost, and energy fields."""
+
+    response = {
+        "V": [
+            {
+                "SI": 15,
+                "I": 11,
+                "V": [
+                    {"I": 6, "V": 2},
+                    {"I": 19, "V": 12345},
+                ],
+            },
+            {
+                "SI": 16,
+                "I": 22,
+                "V": [
+                    {"I": 27, "V": 1},
+                    {"I": 4, "V": 1, "OT": 2, "D": 30},
+                    {"I": 19, "V": 4567},
+                ],
+            },
+        ]
+    }
+
+    snapshot = _parse_local_ble_snapshot(response)
+
+    assert snapshot.primary_power_on is True
+    assert snapshot.timed_boost_enabled is True
+    assert snapshot.timed_boost_active is True
+    assert snapshot.timed_boost_duration_minutes == 30
+    assert snapshot.primary_energy_kwh == pytest.approx(12.345)
+    assert snapshot.boost_energy_kwh == pytest.approx(4.567)
+
+
+def test_parse_local_ble_snapshot_accepts_primary_state_service() -> None:
+    """Ensure primary-state service values are accepted for local runtime fields."""
+
+    response = {
+        "V": [
+            {
+                "SI": 33,
+                "I": 11,
+                "V": [
+                    {"I": 6, "V": 2},
+                    {"I": 19, "V": 9876},
+                ],
+            }
+        ]
+    }
+
+    snapshot = _parse_local_ble_snapshot(response)
+
+    assert snapshot.primary_power_on is True
+    assert snapshot.primary_energy_kwh == pytest.approx(9.876)
+
+
+def test_parse_local_ble_snapshot_marks_scheduled_hot_water_not_boost() -> None:
+    """Ensure scheduled hot-water on state clears timed boost activity."""
+
+    response = {
+        "V": [
+            {
+                "SI": 16,
+                "I": 22,
+                "V": [
+                    {"I": 4, "V": 1, "OT": 0, "D": 30},
+                ],
+            }
+        ]
+    }
+
+    snapshot = _parse_local_ble_snapshot(response)
+
+    assert snapshot.timed_boost_active is False
+
+
+def test_parse_consumption_state_maps_duration_hours() -> None:
+    """Ensure dynamic tariff durations map to runtime and scheduled hours."""
+
+    response = [
+        {
+            "I": 5,
+            "D": [
+                {
+                    "T": 1_712_000_000,
+                    "OA": 120,
+                    "BA": 30,
+                    "OS": 180,
+                    "BS": 45,
+                }
+            ],
+        }
+    ]
+
+    recent = _parse_consumption_state(response)
+
+    assert recent is not None
+    assert recent["primary"]["runtime_hours"] == pytest.approx(2.0)
+    assert recent["primary"]["scheduled_hours"] == pytest.approx(3.0)
+    assert recent["primary"]["energy_kwh"] is None
+    assert recent["boost"]["runtime_hours"] == pytest.approx(0.5)
+    assert recent["boost"]["scheduled_hours"] == pytest.approx(0.75)
+    assert recent["boost"]["energy_kwh"] is None
+    assert recent["primary"]["report_day"] == "2024-04-01"
+
+
+def test_parse_consumption_state_accepts_single_payload_dict() -> None:
+    """Ensure consumption parsing accepts direct {I,D} payload dictionaries."""
+
+    response = {
+        "I": 0,
+        "D": [
+            {
+                "T": 1_712_000_000,
+                "OA": 60,
+                "BA": 30,
+                "OS": 90,
+                "BS": 45,
+            }
+        ],
+    }
+
+    recent = _parse_consumption_state(response)
+
+    assert recent is not None
+    assert recent["primary"]["runtime_hours"] == pytest.approx(1.0)
+    assert recent["boost"]["runtime_hours"] == pytest.approx(0.5)
+
+
+def test_parse_consumption_state_accepts_flat_day_rows() -> None:
+    """Ensure consumption parsing accepts direct DynamicDaySchedule rows."""
+
+    response = [
+        {
+            "T": 1_712_100_000,
+            "OA": 30,
+            "BA": 15,
+            "OS": 60,
+            "BS": 45,
+        }
+    ]
+
+    recent = _parse_consumption_state(response)
+
+    assert recent is not None
+    assert recent["primary"]["runtime_hours"] == pytest.approx(0.5)
+    assert recent["boost"]["runtime_hours"] == pytest.approx(0.25)
+
+
+def test_parse_consumption_state_accepts_single_day_dict() -> None:
+    """Ensure consumption parsing accepts payloads where D is a single object."""
+
+    response = {
+        "D": {
+            "T": 1_712_200_000,
+            "OA": 90,
+            "BA": 30,
+            "OS": 120,
+            "BS": 60,
+        }
+    }
+
+    recent = _parse_consumption_state(response)
+
+    assert recent is not None
+    assert recent["primary"]["runtime_hours"] == pytest.approx(1.5)
+    assert recent["boost"]["scheduled_hours"] == pytest.approx(1.0)
+
+
+def test_parse_consumption_state_defaults_missing_scheduled_to_zero() -> None:
+    """Ensure missing scheduled duration fields default to zero hours."""
+
+    response = [
+        {
+            "T": 1_712_300_000,
+            "OA": 75,
+            "BA": 20,
+        }
+    ]
+
+    recent = _parse_consumption_state(response)
+
+    assert recent is not None
+    assert recent["primary"]["scheduled_hours"] == pytest.approx(0.0)
+    assert recent["boost"]["scheduled_hours"] == pytest.approx(0.0)
+
+
+def test_parse_consumption_state_accepts_string_duration_values() -> None:
+    """Ensure string-encoded duration values are parsed like app Gson floats."""
+
+    response = {
+        "D": {
+            "T": "1712400000",
+            "OA": "120",
+            "BA": "30",
+            "OS": "180",
+            "BS": "45",
+        }
+    }
+
+    recent = _parse_consumption_state(response)
+
+    assert recent is not None
+    assert recent["primary"]["runtime_hours"] == pytest.approx(2.0)
+    assert recent["boost"]["scheduled_hours"] == pytest.approx(0.75)
+
+
+def test_parse_consumption_state_maps_energy_fields() -> None:
+    """Ensure consumption parser maps OP/BP fields into kWh values."""
+
+    response = {
+        "D": {
+            "T": 1_712_400_000,
+            "OA": 120,
+            "BA": 30,
+            "OS": 180,
+            "BS": 45,
+            "OP": 1234,
+            "BP": 567,
+        }
+    }
+
+    recent = _parse_consumption_state(response)
+
+    assert recent is not None
+    assert recent["primary"]["energy_kwh"] == pytest.approx(1.234)
+    assert recent["boost"]["energy_kwh"] == pytest.approx(0.567)
+
+
+def test_parse_consumption_day_rows_keeps_energy_and_duration_data() -> None:
+    """Ensure parsed day rows preserve OP/BP and OA/OS/BA/BS values."""
+
+    response = [
+        {
+            "T": 1_712_500_000,
+            "OA": "60",
+            "BA": "30",
+            "OS": "90",
+            "BS": "45",
+            "OP": "2000",
+            "BP": "500",
+        }
+    ]
+
+    rows = _parse_consumption_day_rows(response)
+
+    assert len(rows) == 1
+    assert rows[0]["primary_runtime_hours"] == pytest.approx(1.0)
+    assert rows[0]["boost_scheduled_hours"] == pytest.approx(0.75)
+    assert rows[0]["primary_energy_kwh"] == pytest.approx(2.0)
+    assert rows[0]["boost_energy_kwh"] == pytest.approx(0.5)
+
+
+def test_parse_local_weekly_program_accepts_dict_payload() -> None:
+    """Ensure local weekly program parsing accepts wrapped dictionary payloads."""
+
+    transitions = [{"O": 65535, "T": 255} for _ in range(42)]
+    transitions[0] = {"O": 60, "T": 1}
+    transitions[1] = {"O": 120, "T": 0}
+
+    program = _parse_local_weekly_program({"V": [{"I": 1, "D": transitions}]})
+
+    assert program[0].on_minutes[0] == 60
+    assert program[0].off_minutes[0] == 120
+    assert len(program) == 7
+
+
+@pytest.mark.asyncio
+async def test_async_read_local_snapshot_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure local snapshot reads retry transient BLE errors."""
+
+    snapshot = LocalBleSnapshot(primary_power_on=True)
+    read_once = AsyncMock(side_effect=[LocalBleCommissioningError("boom"), snapshot])
+    sleep = AsyncMock()
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_read_ble_snapshot_once",
+        read_once,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning.asyncio.sleep",
+        sleep,
+    )
+
+    result = await async_read_local_snapshot(
+        SimpleNamespace(),
+        mac_address="AABBCCDDEEFF",
+        serial_number="A1B2C3D4",
+        ble_key="ABEiM0RVZneImaq7zN3u/w==",
+    )
+
+    assert result is snapshot
+    assert read_once.await_count == 2
+    sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_async_read_ble_snapshot_once_reads_consumption_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure BLE snapshot read requests dynamic tariff consumption state."""
+
+    fake_hass = SimpleNamespace()
+    fake_device = SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+    fake_client = SimpleNamespace()
+
+    class FakeRpcClient:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+            self.requests: list[dict[str, Any]] = []
+
+        async def async_initialize(self) -> None:
+            return None
+
+        async def async_authorize(self, key: bytes) -> None:
+            return None
+
+        async def async_rpc_request(self, **kwargs: Any) -> Any:
+            self.requests.append(kwargs)
+            if kwargs["handler_id"] == 3 and kwargs["service_id"] == 1:
+                return {
+                    "V": [
+                        {"SI": 15, "I": 1, "V": [{"I": 6, "V": 2}]},
+                        {"SI": 16, "I": 2, "V": [{"I": 4, "V": 0, "OT": 2}]},
+                        {"SI": 36, "I": 5, "V": []},
+                    ]
+                }
+            return [
+                {
+                    "I": 5,
+                    "D": [
+                        {
+                            "T": 1_712_000_000,
+                            "OA": 60,
+                            "BA": 30,
+                            "OS": 120,
+                            "BS": 45,
+                            "OP": 1234,
+                            "BP": 567,
+                        }
+                    ],
+                }
+            ]
+
+        async def async_close(self) -> None:
+            return None
+
+    resolve = AsyncMock(return_value=fake_device)
+    connect = AsyncMock(return_value=fake_client)
+    disconnect = AsyncMock()
+    rpc_instances: list[FakeRpcClient] = []
+
+    def _rpc_factory(client: Any) -> FakeRpcClient:
+        instance = FakeRpcClient(client)
+        rpc_instances.append(instance)
+        return instance
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_resolve_connectable_device",
+        resolve,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_connect_client",
+        connect,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_disconnect_client",
+        disconnect,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._BleUartRpcClient",
+        _rpc_factory,
+    )
+
+    snapshot = await _async_read_ble_snapshot_once(
+        fake_hass,
+        ble_address="AA:BB:CC:DD:EE:FF",
+        expected_serial="E0044275",
+        gateway_mac_id="12345",
+        auth_key=bytes.fromhex("00112233445566778899aabbccddeeff"),
+    )
+
+    assert len(rpc_instances) == 1
+    requests = rpc_instances[0].requests
+    assert requests[0]["handler_id"] == 3
+    assert requests[0]["service_id"] == 1
+    assert requests[1]["handler_id"] == 9
+    assert requests[1]["service_id"] == 36
+    assert requests[1]["args"] == [1]
+    assert snapshot.statistics_recent is not None
+    assert snapshot.statistics_recent["primary"]["runtime_hours"] == pytest.approx(1.0)
+    assert snapshot.primary_energy_kwh == pytest.approx(1.234)
+    assert snapshot.boost_energy_kwh == pytest.approx(0.567)
+    assert snapshot.consumption_days is not None
+    assert snapshot.consumption_days[0]["primary_energy_kwh"] == pytest.approx(1.234)
+    disconnect.assert_awaited_once_with(fake_client)
+
+
+@pytest.mark.asyncio
+async def test_async_read_ble_weekly_programs_once_reads_both_zones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure local BLE weekly schedule read requests both primary and boost zones."""
+
+    fake_hass = SimpleNamespace()
+    fake_device = SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+    fake_client = SimpleNamespace()
+
+    transitions = [{"O": 65535, "T": 255} for _ in range(42)]
+    transitions[0] = {"O": 60, "T": 1}
+    transitions[1] = {"O": 120, "T": 0}
+
+    class FakeRpcClient:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+            self.requests: list[dict[str, Any]] = []
+
+        async def async_initialize(self) -> None:
+            return None
+
+        async def async_authorize(self, key: bytes) -> None:
+            return None
+
+        async def async_rpc_request(self, **kwargs: Any) -> Any:
+            self.requests.append(kwargs)
+            return [{"I": kwargs["args"][0], "D": transitions}]
+
+        async def async_close(self) -> None:
+            return None
+
+    resolve = AsyncMock(return_value=fake_device)
+    connect = AsyncMock(return_value=fake_client)
+    disconnect = AsyncMock()
+    rpc_instances: list[FakeRpcClient] = []
+
+    def _rpc_factory(client: Any) -> FakeRpcClient:
+        instance = FakeRpcClient(client)
+        rpc_instances.append(instance)
+        return instance
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_resolve_connectable_device",
+        resolve,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_connect_client",
+        connect,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_disconnect_client",
+        disconnect,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._BleUartRpcClient",
+        _rpc_factory,
+    )
+
+    programs, canonicals = await _async_read_ble_weekly_programs_once(
+        fake_hass,
+        ble_address="AA:BB:CC:DD:EE:FF",
+        expected_serial="E0044275",
+        gateway_mac_id="12345",
+        auth_key=bytes.fromhex("00112233445566778899aabbccddeeff"),
+    )
+
+    assert len(rpc_instances) == 1
+    requests = rpc_instances[0].requests
+    assert requests[0]["handler_id"] == 22
+    assert requests[0]["service_id"] == 17
+    assert requests[0]["args"] == [1]
+    assert requests[1]["args"] == [2]
+    assert programs["primary"] is not None
+    assert programs["boost"] is not None
+    assert canonicals["primary"] == [(60, 120)]
+    assert canonicals["boost"] == [(60, 120)]
+    disconnect.assert_awaited_once_with(fake_client)
+
+
 @pytest.mark.asyncio
 async def test_async_rpc_request_ignores_mismatched_response_ids(
     monkeypatch: pytest.MonkeyPatch,
@@ -156,6 +645,59 @@ async def test_async_rpc_request_ignores_mismatched_response_ids(
     assert result == 0
     assert rpc_client._async_wait_for_response_payload.await_count == 2
     reset_state.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_initialize_recovers_notify_already_acquired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure TX notification setup retries once when BlueZ reports acquisition."""
+
+    fake_client = SimpleNamespace(
+        services=None,
+        start_notify=AsyncMock(side_effect=[RuntimeError("Notify acquired"), None]),
+        stop_notify=AsyncMock(),
+    )
+    rpc_client = _BleUartRpcClient(fake_client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning.asyncio.sleep",
+        sleep,
+    )
+
+    await rpc_client.async_initialize()
+
+    assert fake_client.start_notify.await_count == 2
+    fake_client.stop_notify.assert_awaited_once()
+    sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_async_initialize_wraps_notify_failure() -> None:
+    """Ensure TX notification setup raises integration error on hard failure."""
+
+    fake_client = SimpleNamespace(
+        services=None,
+        start_notify=AsyncMock(side_effect=RuntimeError("boom")),
+        stop_notify=AsyncMock(),
+    )
+    rpc_client = _BleUartRpcClient(fake_client)
+
+    with pytest.raises(LocalBleCommissioningError, match="TX notifications"):
+        await rpc_client.async_initialize()
+
+
+@pytest.mark.asyncio
+async def test_async_send_payload_wraps_write_failures() -> None:
+    """Ensure UART write errors are normalized as commissioning errors."""
+
+    fake_client = SimpleNamespace(
+        write_gatt_char=AsyncMock(side_effect=RuntimeError("bad"))
+    )
+    rpc_client = _BleUartRpcClient(fake_client)
+
+    with pytest.raises(LocalBleCommissioningError, match="BLE UART packet"):
+        await rpc_client._async_send_payload(b"abc", use_java_utf8_length=False)
 
 
 @pytest.mark.asyncio
@@ -302,7 +844,17 @@ async def test_async_commission_over_rpc_falls_back_to_full_sequence() -> None:
     # Already-paired: GetBLEKey (empty) -> SetOwner -> GetBLEKey (empty) -> fails
     # Full sequence: SetTimeZone -> SetTime -> UpdateDevice -> SetOwner -> GetBLEKey (ok) -> AddHAN
     assert [call["handler_id"] for call in calls] == [50, 7, 50, 7, 2, 6, 7, 50, 48]
-    assert [call["service_id"] for call in calls] == [11, 151, 11, 103, 103, 11, 151, 11, 11]
+    assert [call["service_id"] for call in calls] == [
+        11,
+        151,
+        11,
+        103,
+        103,
+        11,
+        151,
+        11,
+        11,
+    ]
     assert credentials["local_ble_key"] == "base64-ble-key"
 
 

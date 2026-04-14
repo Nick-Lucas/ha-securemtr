@@ -446,6 +446,59 @@ async def test_schedule_button_logs_program(caplog: pytest.LogCaptureFixture) ->
 
 
 @pytest.mark.asyncio
+async def test_schedule_button_local_ble_uses_local_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ensure local BLE schedule logging reads schedules over BLE, not cloud."""
+
+    runtime, backend = _create_runtime()
+    runtime.connection_mode = CONNECTION_MODE_LOCAL_BLE
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = create_config_entry(
+        entry_id="entry",
+        data={"local_ble_key": "ABEiM0RVZneImaq7zN3u/w=="},
+    )
+    entities: list[ButtonEntity] = []
+
+    weekday = DailyProgram((60, None, None), (120, None, None))
+    weekend = DailyProgram((480, 1020, None), (540, 1320, None))
+    programs = {
+        "primary": (weekday,) * 5 + (weekend,) * 2,
+        "boost": (weekend,) * 7,
+    }
+    canonicals = {
+        "primary": [(60, 120)],
+        "boost": [(480, 540)],
+    }
+
+    local_reader = AsyncMock(return_value=(programs, canonicals))
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning.async_read_local_weekly_programs",
+        local_reader,
+    )
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    schedule_button = next(
+        entity for entity in entities if entity.unique_id.endswith("log_schedule")
+    )
+    local_hass = SimpleNamespace()
+    schedule_button.hass = local_hass
+
+    with caplog.at_level(logging.INFO):
+        await schedule_button.async_press()
+
+    local_reader.assert_awaited_once_with(
+        local_hass,
+        mac_address=runtime.controller.gateway_id,
+        serial_number=runtime.controller.serial_number,
+        ble_key="ABEiM0RVZneImaq7zN3u/w==",
+    )
+    assert backend.read_calls == []
+
+
+@pytest.mark.asyncio
 async def test_schedule_button_backend_error(caplog: pytest.LogCaptureFixture) -> None:
     """Convert backend read failures into Home Assistant errors."""
 
@@ -830,7 +883,7 @@ async def test_consumption_button_triggers_refresh(
         calls.append((hass_obj, entry_obj))
 
     monkeypatch.setattr(
-        "custom_components.securemtr.button.consumption_metrics", _fake_refresh
+        "custom_components.securemtr.button.async_refresh_entry_state", _fake_refresh
     )
 
     await button.async_press()

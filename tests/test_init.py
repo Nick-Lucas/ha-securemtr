@@ -22,6 +22,8 @@ except ImportError:  # pragma: no cover - fallback
         """Fallback enum mirroring recorder.StatisticsTable."""
 
         STATISTICS = "statistics"
+
+
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -975,7 +977,7 @@ async def test_async_setup_entry_starts_backend(
         assert meter.options[CONF_TARIFFS] == []
         assert meter.options[CONF_METER_NET_CONSUMPTION] is False
         assert meter.options[CONF_METER_DELTA_VALUES] is False
-        assert meter.options[CONF_METER_PERIODICALLY_RESETTING] is True
+        assert meter.options[CONF_METER_PERIODICALLY_RESETTING] is False
         assert meter.options[CONF_SENSOR_ALWAYS_AVAILABLE] is False
 
 
@@ -1148,7 +1150,9 @@ async def test_consumption_scheduler_handles_dst_transitions(
 
     assert len(callbacks) >= 2
     next_action, next_time = callbacks[1]
-    assert next_time.astimezone(london) == _expected_local(first_time + timedelta(seconds=1))
+    assert next_time.astimezone(london) == _expected_local(
+        first_time + timedelta(seconds=1)
+    )
 
     runtime = hass.data[DOMAIN][entry.entry_id]
     assert runtime.consumption_schedule_unsub is not None
@@ -1703,9 +1707,7 @@ async def test_validate_consumption_connection_missing_runtime() -> None:
         data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
     )
 
-    result = await _validate_consumption_connection(
-        hass, entry, "entry-missing"
-    )
+    result = await _validate_consumption_connection(hass, entry, "entry-missing")
 
     assert result is None
 
@@ -2054,7 +2056,9 @@ def test_submit_statistics_samples_emits_records(
     assert stats[0]["sum"] == sample["sum"]
 
 
-def test_submit_statistics_samples_logs_errors(caplog: pytest.LogCaptureFixture) -> None:
+def test_submit_statistics_samples_logs_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Ensure recorder failures are logged for debugging."""
 
     hass = FakeHass()
@@ -3543,7 +3547,9 @@ async def test_energy_dashboard_flow_validates_sensor_states(
     initial_history_count = len(backend.energy_history_calls)
     assert recorded_statistics
     expected_stat_ids = {PRIMARY_ENERGY_ENTITY_ID, BOOST_ENERGY_ENTITY_ID}
-    assert {metadata.statistic_id for metadata, _ in recorded_statistics} == expected_stat_ids
+    assert {
+        metadata.statistic_id for metadata, _ in recorded_statistics
+    } == expected_stat_ids
 
     for step, batch in enumerate(batches[1:], start=1):
         await consumption_metrics(hass, entry)
@@ -3966,7 +3972,11 @@ async def test_async_ensure_utility_meters_detects_existing_helpers(
         minor_version=2,
         source=hass_config_entries.SOURCE_SYSTEM,
         unique_id=f"securemtr_{serial_slug}_primary_daily_utility_meter",
-        options={CONF_SOURCE_SENSOR: source_entity, CONF_METER_TYPE: "daily"},
+        options={
+            CONF_SOURCE_SENSOR: source_entity,
+            CONF_METER_TYPE: "daily",
+            CONF_METER_PERIODICALLY_RESETTING: False,
+        },
         discovery_keys=MappingProxyType({}),
         entry_id=f"securemtr_um_{serial_slug}_primary_daily",
         subentries_data=(),
@@ -4039,7 +4049,11 @@ async def test_async_ensure_utility_meters_skips_new_style_helpers(
         minor_version=2,
         source=hass_config_entries.SOURCE_SYSTEM,
         unique_id=f"securemtr_{serial_slug}_primary_daily_utility_meter",
-        options={CONF_SOURCE_SENSOR: source_entity, CONF_METER_TYPE: "daily"},
+        options={
+            CONF_SOURCE_SENSOR: source_entity,
+            CONF_METER_TYPE: "daily",
+            CONF_METER_PERIODICALLY_RESETTING: False,
+        },
         discovery_keys=MappingProxyType({}),
         entry_id=f"securemtr_um_{serial_slug}_primary_daily",
         subentries_data=(),
@@ -4120,7 +4134,11 @@ async def test_async_ensure_utility_meters_reuses_matching_entry_id(
         minor_version=2,
         source=hass_config_entries.SOURCE_SYSTEM,
         unique_id="legacy_unique_id",
-        options={CONF_SOURCE_SENSOR: source_entity, CONF_METER_TYPE: "daily"},
+        options={
+            CONF_SOURCE_SENSOR: source_entity,
+            CONF_METER_TYPE: "daily",
+            CONF_METER_PERIODICALLY_RESETTING: False,
+        },
         discovery_keys=MappingProxyType({}),
         entry_id=f"securemtr_um_{serial_slug}_primary_daily",
         subentries_data=(),

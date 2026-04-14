@@ -43,7 +43,10 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.event import (
+    async_track_point_in_time,
+    async_track_time_interval,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
@@ -82,6 +85,7 @@ DOMAIN = "securemtr"
 
 CONF_CONNECTION_MODE = "connection_mode"
 CONF_DEVICE_TYPE = "device_type"
+CONF_LOCAL_BLE_KEY = "local_ble_key"
 CONF_MAC_ADDRESS = "mac_address"
 CONF_SERIAL_NUMBER = "serial_number"
 
@@ -119,6 +123,7 @@ ATTR_ZONE = "zone"
 _RESET_SERVICE_FLAG = "_reset_service_registered"
 _LOGIN_RETRY_DELAY = 5.0
 _MAX_IMMEDIATE_STARTUP_RETRIES = 2
+_LOCAL_BLE_REFRESH_INTERVAL_SECONDS = 60
 
 
 _ResultT = TypeVar("_ResultT")
@@ -329,7 +334,7 @@ async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) 
                 CONF_TARIFFS: [],
                 CONF_METER_NET_CONSUMPTION: False,
                 CONF_METER_DELTA_VALUES: False,
-                CONF_METER_PERIODICALLY_RESETTING: True,
+                CONF_METER_PERIODICALLY_RESETTING: False,
                 CONF_SENSOR_ALWAYS_AVAILABLE: False,
             }
 
@@ -443,8 +448,11 @@ def _helper_options_match(
 
     options = helper_entry.options
     meter_type = options.get(CONF_METER_TYPE)
-    return options.get(CONF_SOURCE_SENSOR) == source_entity and (
-        meter_type == cycle or meter_type is None
+    periodically_resetting = options.get(CONF_METER_PERIODICALLY_RESETTING)
+    return (
+        options.get(CONF_SOURCE_SENSOR) == source_entity
+        and (meter_type == cycle or meter_type is None)
+        and periodically_resetting is False
     )
 
 
@@ -497,6 +505,8 @@ class SecuremtrRuntimeData:
     consumption_schedule_unsub: Callable[[], None] | None = None
     consumption_refresh_callback: Callable[[], None] | None = None
     consumption_refresh_pending: bool = False
+    local_refresh_unsub: Callable[[], None] | None = None
+    local_refresh_callback: Callable[[], None] | None = None
     energy_store: Store[dict[str, Any]] | None = None
     energy_state: dict[str, Any] | None = None
     energy_accumulator: EnergyAccumulator | None = None
@@ -754,6 +764,54 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
         runtime.controller = _build_local_controller(entry)
         runtime.controller_ready.set()
+
+        accumulator = await _ensure_energy_accumulator(hass, entry, runtime)
+        runtime.energy_state = accumulator.as_sensor_state()
+
+        def _queue_local_refresh() -> None:
+            """Schedule one asynchronous local BLE snapshot refresh."""
+
+            async def _async_safe_local_refresh() -> None:
+                """Run one local BLE refresh and absorb unexpected task errors."""
+
+                try:
+                    await _async_refresh_local_ble_runtime(hass, entry)
+                except Exception:
+                    _LOGGER.exception(
+                        "Unexpected error during local BLE refresh for %s",
+                        entry_identifier,
+                    )
+
+            def _schedule() -> None:
+                hass.async_create_task(_async_safe_local_refresh())
+
+            loop = getattr(hass, "loop", None)
+            if loop is None:
+                hass.async_create_task(_async_refresh_local_ble_runtime(hass, entry))
+                return
+
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is loop:
+                _schedule()
+            else:
+                loop.call_soon_threadsafe(_schedule)
+
+        def _scheduled_local_refresh(_now: datetime) -> None:
+            """Trigger the interval-based local BLE snapshot refresh."""
+
+            _queue_local_refresh()
+
+        runtime.local_refresh_unsub = async_track_time_interval(
+            hass,
+            _scheduled_local_refresh,
+            timedelta(seconds=_LOCAL_BLE_REFRESH_INTERVAL_SECONDS),
+        )
+        runtime.local_refresh_callback = _queue_local_refresh
+
         _LOGGER.info(
             "Configured local BLE mode for %s (serial=%s)",
             entry_identifier,
@@ -875,6 +933,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await _async_ensure_utility_meters(hass, entry)
 
+    if (
+        runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE
+        and runtime.local_refresh_callback is not None
+    ):
+        runtime.local_refresh_callback()
+
     _LOGGER.info("Config entry setup completed for securemtr: %s", entry_identifier)
     return True
 
@@ -914,6 +978,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         finally:
             runtime.consumption_schedule_unsub = None
     runtime.consumption_refresh_callback = None
+
+    if runtime.local_refresh_unsub is not None:
+        try:
+            runtime.local_refresh_unsub()
+        except Exception:
+            _LOGGER.exception(
+                "Error while unsubscribing local BLE refresh for %s",
+                entry_identifier,
+            )
+        finally:
+            runtime.local_refresh_unsub = None
+    runtime.local_refresh_callback = None
 
     if runtime.startup_task is not None and not runtime.startup_task.done():
         runtime.startup_task.cancel()
@@ -1419,6 +1495,338 @@ def async_dispatch_runtime_update(hass: HomeAssistant, entry_id: str) -> None:
     """Notify entities that runtime state has been updated."""
 
     async_dispatcher_send(hass, runtime_update_signal(entry_id))
+
+
+async def async_refresh_entry_state(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Refresh runtime state for one config entry using its active transport."""
+
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime: SecuremtrRuntimeData | None = domain_state.get(entry.entry_id)
+    if runtime is None:
+        raise HomeAssistantError(
+            f"SecureMTR runtime data is unavailable for entry {entry.entry_id}"
+        )
+
+    if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+        await _async_refresh_local_ble_runtime(hass, entry)
+        return
+
+    await consumption_metrics(hass, entry)
+
+
+def _default_energy_state() -> dict[str, dict[str, Any]]:
+    """Return the default per-zone energy payload for sensor hydration."""
+
+    return {
+        zone: {
+            "energy_sum": 0.0,
+            "last_day": None,
+            "series_start": None,
+            "offset_kwh": 0.0,
+        }
+        for zone in ZONE_KEYS
+    }
+
+
+def _merge_local_snapshot_energy(
+    runtime: SecuremtrRuntimeData,
+    *,
+    primary_energy_kwh: float | None,
+    boost_energy_kwh: float | None,
+) -> bool:
+    """Merge local snapshot energy totals into runtime sensor state."""
+
+    state_payload = runtime.energy_state
+    if not isinstance(state_payload, dict):
+        state_payload = _default_energy_state()
+        runtime.energy_state = state_payload
+
+    changed = False
+    for zone_key, value in (
+        ("primary", primary_energy_kwh),
+        ("boost", boost_energy_kwh),
+    ):
+        if value is None:
+            continue
+        zone_state = state_payload.get(zone_key)
+        if not isinstance(zone_state, dict):
+            zone_state = {
+                "energy_sum": 0.0,
+                "last_day": None,
+                "series_start": None,
+                "offset_kwh": 0.0,
+            }
+            state_payload[zone_key] = zone_state
+
+        previous = zone_state.get("energy_sum")
+        next_value = float(value)
+        if not isinstance(previous, (int, float)) or float(previous) != next_value:
+            zone_state["energy_sum"] = next_value
+            changed = True
+
+    return changed
+
+
+def _snapshot_has_consumption_energy(
+    consumption_days: list[dict[str, Any]] | None,
+) -> bool:
+    """Return whether parsed consumption rows include usable energy values."""
+
+    if not isinstance(consumption_days, list):
+        return False
+
+    for row in consumption_days:
+        if not isinstance(row, dict):
+            continue
+        for field_name in ("primary_energy_kwh", "boost_energy_kwh"):
+            value = row.get(field_name)
+            if isinstance(value, (int, float)) and value >= 0:
+                return True
+    return False
+
+
+async def _merge_local_consumption_energy(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+    *,
+    consumption_days: list[dict[str, Any]] | None,
+) -> bool:
+    """Merge parsed local consumption day rows into the persisted accumulator."""
+
+    if not isinstance(consumption_days, list):
+        return False
+
+    accumulator = await _ensure_energy_accumulator(hass, entry, runtime)
+    changed = False
+
+    for row in consumption_days:
+        if not isinstance(row, dict):
+            continue
+
+        report_day = row.get("report_day")
+        if not isinstance(report_day, str):
+            continue
+        try:
+            parsed_day = date.fromisoformat(report_day)
+        except ValueError:
+            continue
+
+        for zone_key, field_name in (
+            ("primary", "primary_energy_kwh"),
+            ("boost", "boost_energy_kwh"),
+        ):
+            energy_value = row.get(field_name)
+            if not isinstance(energy_value, (int, float)):
+                continue
+            if energy_value < 0:
+                continue
+            if await accumulator.async_add_day(
+                zone_key, parsed_day, float(energy_value)
+            ):
+                changed = True
+
+    sensor_state = accumulator.as_sensor_state()
+    if runtime.energy_state != sensor_state:
+        runtime.energy_state = sensor_state
+        changed = True
+
+    return changed
+
+
+def _merge_local_snapshot_statistics(
+    runtime: SecuremtrRuntimeData,
+    *,
+    statistics_recent: dict[str, dict[str, Any]] | None,
+) -> bool:
+    """Merge local snapshot duration summaries into runtime statistics state."""
+
+    if not isinstance(statistics_recent, dict):
+        return False
+
+    merged_statistics: dict[str, dict[str, Any]] = {}
+    if isinstance(runtime.statistics_recent, dict):
+        for zone_key, zone_payload in runtime.statistics_recent.items():
+            if isinstance(zone_payload, dict):
+                merged_statistics[zone_key] = dict(zone_payload)
+
+    energy_state = (
+        runtime.energy_state if isinstance(runtime.energy_state, dict) else {}
+    )
+
+    changed = False
+    for zone_key in ZONE_KEYS:
+        zone_update = statistics_recent.get(zone_key)
+        if not isinstance(zone_update, dict):
+            continue
+
+        zone_state = merged_statistics.get(zone_key, {})
+        previous_state = dict(zone_state)
+
+        report_day = zone_update.get("report_day")
+        if isinstance(report_day, str) and report_day:
+            zone_state["report_day"] = report_day
+
+        for field_key in ("runtime_hours", "scheduled_hours"):
+            metric_value = zone_update.get(field_key)
+            if isinstance(metric_value, (int, float)):
+                zone_state[field_key] = float(metric_value)
+
+        zone_energy = energy_state.get(zone_key)
+        if isinstance(zone_energy, dict):
+            energy_sum = zone_energy.get("energy_sum")
+            if isinstance(energy_sum, (int, float)):
+                zone_state["energy_sum"] = float(energy_sum)
+
+        if zone_state != previous_state:
+            changed = True
+
+        if zone_state:
+            merged_statistics[zone_key] = zone_state
+
+    if changed:
+        runtime.statistics_recent = merged_statistics
+    return changed
+
+
+async def _async_refresh_local_ble_runtime(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Refresh runtime state from a local BLE GetAllServiceValues snapshot."""
+
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime: SecuremtrRuntimeData | None = domain_state.get(entry.entry_id)
+    if runtime is None or runtime.connection_mode != CONNECTION_MODE_LOCAL_BLE:
+        return
+
+    controller = runtime.controller
+    if controller is None:
+        return
+
+    ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
+    if not isinstance(ble_key, str) or not ble_key:
+        _LOGGER.debug(
+            "Skipping local BLE refresh for %s because BLE key is missing",
+            _entry_display_name(entry),
+        )
+        return
+
+    from .local_ble_commissioning import (  # noqa: PLC0415
+        LocalBleCommissioningError,
+        async_read_local_snapshot,
+    )
+
+    entry_identifier = _entry_display_name(entry)
+    async with runtime.command_lock:
+        try:
+            snapshot = await async_read_local_snapshot(
+                hass,
+                mac_address=controller.gateway_id,
+                serial_number=controller.serial_number,
+                ble_key=ble_key,
+            )
+        except LocalBleCommissioningError as error:
+            _LOGGER.warning(
+                "Failed to refresh local BLE snapshot for %s: %s",
+                entry_identifier,
+                error,
+            )
+            return
+
+    _LOGGER.debug(
+        "Local BLE snapshot for %s: primary_power_on=%s timed_boost_enabled=%s timed_boost_active=%s boost_duration=%s primary_energy_kwh=%s boost_energy_kwh=%s has_consumption_days=%s has_statistics_recent=%s",
+        entry_identifier,
+        snapshot.primary_power_on,
+        snapshot.timed_boost_enabled,
+        snapshot.timed_boost_active,
+        snapshot.timed_boost_duration_minutes,
+        snapshot.primary_energy_kwh,
+        snapshot.boost_energy_kwh,
+        isinstance(snapshot.consumption_days, list),
+        isinstance(snapshot.statistics_recent, dict),
+    )
+
+    changed = False
+
+    if (
+        snapshot.primary_power_on is not None
+        and runtime.primary_power_on != snapshot.primary_power_on
+    ):
+        runtime.primary_power_on = snapshot.primary_power_on
+        changed = True
+
+    if (
+        snapshot.timed_boost_enabled is not None
+        and runtime.timed_boost_enabled != snapshot.timed_boost_enabled
+    ):
+        runtime.timed_boost_enabled = snapshot.timed_boost_enabled
+        changed = True
+
+    was_timed_boost_active = runtime.timed_boost_active is True
+
+    if (
+        snapshot.timed_boost_active is not None
+        and runtime.timed_boost_active != snapshot.timed_boost_active
+    ):
+        runtime.timed_boost_active = snapshot.timed_boost_active
+        changed = True
+
+    if (
+        snapshot.timed_boost_active is True
+        and not was_timed_boost_active
+        and snapshot.timed_boost_duration_minutes
+    ):
+        now_local = dt_util.now()
+        end_local = now_local + timedelta(minutes=snapshot.timed_boost_duration_minutes)
+        end_minute = end_local.hour * 60 + end_local.minute
+        if runtime.timed_boost_end_minute != end_minute:
+            runtime.timed_boost_end_minute = end_minute
+            changed = True
+        end_time = coerce_end_time(end_minute)
+        if runtime.timed_boost_end_time != end_time:
+            runtime.timed_boost_end_time = end_time
+            changed = True
+    elif snapshot.timed_boost_active is False:
+        if runtime.timed_boost_end_minute is not None:
+            runtime.timed_boost_end_minute = None
+            changed = True
+        if runtime.timed_boost_end_time is not None:
+            runtime.timed_boost_end_time = None
+            changed = True
+
+    if _snapshot_has_consumption_energy(snapshot.consumption_days):
+        if await _merge_local_consumption_energy(
+            hass,
+            entry,
+            runtime,
+            consumption_days=snapshot.consumption_days,
+        ):
+            changed = True
+    elif _merge_local_snapshot_energy(
+        runtime,
+        primary_energy_kwh=snapshot.primary_energy_kwh,
+        boost_energy_kwh=snapshot.boost_energy_kwh,
+    ):
+        changed = True
+
+    if _merge_local_snapshot_statistics(
+        runtime,
+        statistics_recent=snapshot.statistics_recent,
+    ):
+        changed = True
+
+    if changed:
+        async_dispatch_runtime_update(hass, entry.entry_id)
+        _LOGGER.debug(
+            "Updated local BLE runtime snapshot for %s",
+            entry_identifier,
+        )
+    else:
+        _LOGGER.debug(
+            "Local BLE snapshot for %s produced no runtime state changes",
+            entry_identifier,
+        )
 
 
 def coerce_end_time(end_minute: int | None) -> datetime | None:
