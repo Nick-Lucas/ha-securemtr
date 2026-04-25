@@ -92,6 +92,54 @@ BLE_ACK_KEY_MISMATCH = 2
 
 DEFAULT_OWNER_EMAIL = "homeassistant@local"
 
+_APP_TIMEZONE_ID_LOOKUP: dict[str, int] = {
+    "asia/dubai": 1,
+    "asia/kolkata": 2,
+    "asia/calcutta": 2,
+    "ist": 2,
+    "europe/london": 3,
+    "utc": 3,
+    "gmt": 3,
+    "europe/paris": 4,
+    "europe/stockholm": 5,
+    "australia/sydney": 6,
+    "austraila/nsw": 6,
+    "australia/melbourne": 7,
+    "austraila/victoria": 7,
+    "antarctica/macquarie": 8,
+    "australia/currie": 9,
+    "australia/hobart": 10,
+    "austraila/tasmania": 10,
+    "australia/lord_howe": 11,
+    "australia/canberra": 12,
+    "australia/adelaide": 13,
+    "austraila/south": 13,
+    "australia/broken_hill": 14,
+    "australia/brisbane": 15,
+    "austraila/queensland": 15,
+    "australia/lindeman": 16,
+    "australia/darwin": 17,
+    "austraila/north": 17,
+    "australia/eucla": 18,
+    "australia/perth": 19,
+    "austraila/west": 19,
+    "asia/singapore": 20,
+    "asia/brunei": 20,
+    "sst": 20,
+    "asia/riyadh": 21,
+    "asia/kuwait": 22,
+    "asia/muscat": 23,
+    "asia/qatar": 24,
+    "asia/bahrain": 25,
+    "asia/kuala_lumpur": 26,
+    "asia/kuching": 26,
+    "mst": 26,
+    "asia/bangkok": 27,
+    "tha": 27,
+    "asia/aden": 28,
+    "ast": 21,
+}
+
 SERVICE_ID_SCHEDULE = 17
 HANDLER_READ_WEEKLY_PROGRAM = 22
 
@@ -1044,11 +1092,15 @@ def _default_han_device_details() -> list[dict[str, Any]]:
 
 
 def _resolve_timezone_id(hass: HomeAssistant) -> int:
-    """Resolve the gateway timezone ID with conservative fallback to app default."""
+    """Resolve the gateway timezone ID using app-parity timezone mappings."""
 
     timezone_name = getattr(getattr(hass, "config", None), "time_zone", "")
-    if isinstance(timezone_name, str) and timezone_name.strip() == "UTC":
-        return 1
+    if isinstance(timezone_name, str):
+        lookup_key = timezone_name.strip().lower()
+        if lookup_key:
+            matched_timezone = _APP_TIMEZONE_ID_LOOKUP.get(lookup_key)
+            if matched_timezone is not None:
+                return matched_timezone
     return DEFAULT_TIMEZONE_ID
 
 

@@ -34,6 +34,7 @@ from custom_components.securemtr.local_ble_commissioning import (
     _java_utf8_character_length,
     _packetize_payload,
     _reassemble_packet_bytes,
+    _resolve_timezone_id,
     _validate_advertisement_identity,
     async_read_local_snapshot,
     async_execute_local_command,
@@ -786,6 +787,29 @@ def test_validate_advertisement_identity_rejects_explicit_wrong_uuid() -> None:
         )
 
 
+def test_resolve_timezone_id_matches_app_timezone_table() -> None:
+    """Ensure timezone IDs align with the decompiled app timezone table."""
+
+    hass = SimpleNamespace(config=SimpleNamespace(time_zone="UTC"))
+    assert _resolve_timezone_id(hass) == 3
+
+    hass.config.time_zone = "Europe/London"
+    assert _resolve_timezone_id(hass) == 3
+
+    hass.config.time_zone = "Asia/Kolkata"
+    assert _resolve_timezone_id(hass) == 2
+
+
+def test_resolve_timezone_id_falls_back_to_app_default_for_unknown_timezone() -> None:
+    """Ensure unknown or unavailable timezones fall back to app default ID 2."""
+
+    hass = SimpleNamespace(config=SimpleNamespace(time_zone="America/New_York"))
+    assert _resolve_timezone_id(hass) == 2
+
+    hass.config.time_zone = ""
+    assert _resolve_timezone_id(hass) == 2
+
+
 @pytest.mark.asyncio
 async def test_async_commission_over_rpc_uses_already_paired_path() -> None:
     """Ensure commissioning tries GetBLEKey first, skipping SetOwner."""
@@ -957,7 +981,7 @@ async def test_async_commission_local_ble_orchestrates_connection(
 ) -> None:
     """Ensure local BLE commissioning executes resolve, connect, and RPC stages."""
 
-    fake_hass = SimpleNamespace()
+    fake_hass = SimpleNamespace(config=SimpleNamespace(time_zone="UTC"))
     fake_device = SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
     fake_client = SimpleNamespace()
 
@@ -1020,6 +1044,7 @@ async def test_async_commission_local_ble_orchestrates_connection(
     assert "ble_device_callback" in connect.await_args.kwargs
     commission.assert_awaited_once()
     assert commission.await_args.kwargs["receiver_name"] == "SecureMTR A1B2C3D4"
+    assert commission.await_args.kwargs["timezone_id"] == 3
     disconnect.assert_awaited_once_with(fake_client)
 
 
