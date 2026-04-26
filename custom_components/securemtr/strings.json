@@ -124,6 +124,12 @@
       },
       "boost_scheduled_daily": {
         "name": "Boost scheduled (last day)"
+      },
+      "primary_weekly_schedule": {
+        "name": "Primary weekly schedule"
+      },
+      "boost_weekly_schedule": {
+        "name": "Boost weekly schedule"
       }
     },
     "switch": {
@@ -175,6 +181,48 @@
         "zone": {
           "name": "Zone",
           "description": "SecureMTR zone to reset. Defaults to the primary zone."
+        }
+      }
+    },
+    "start_timed_boost": {
+      "name": "Start timed boost",
+      "description": "Start a timed boost run for an arbitrary number of minutes.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Config entry ID of the SecureMTR controller to control."
+        },
+        "duration_minutes": {
+          "name": "Duration (minutes)",
+          "description": "Boost duration in minutes (1-1440)."
+        }
+      }
+    },
+    "set_primary_weekly_schedule": {
+      "name": "Set primary weekly schedule",
+      "description": "Update the primary zone weekly schedule using 15-minute aligned transitions.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Config entry ID of the SecureMTR controller to control."
+        },
+        "schedule": {
+          "name": "Weekly schedule payload",
+          "description": "Mapping for monday..sunday where each day contains on/off HH:MM lists."
+        }
+      }
+    },
+    "set_boost_weekly_schedule": {
+      "name": "Set boost weekly schedule",
+      "description": "Update the boost zone weekly schedule using 15-minute aligned transitions.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Config entry ID of the SecureMTR controller to control."
+        },
+        "schedule": {
+          "name": "Weekly schedule payload",
+          "description": "Mapping for monday..sunday where each day contains on/off HH:MM lists."
         }
       }
     }

@@ -58,9 +58,12 @@ from .beanbag import (
     BeanbagGateway,
     BeanbagSession,
     BeanbagStateSnapshot,
+    DailyProgram,
+    WeeklyProgram,
 )
 from .energy import EnergyAccumulator
 from .runtime_helpers import async_read_zone_programs
+from .schedule import canonicalize_weekly
 from .statistics import (
     PreparedSamples as PreparedSamples,
     StatisticsOptions as StatisticsOptions,
@@ -118,15 +121,201 @@ _LOGGER = logging.getLogger(__name__)
 
 ENERGY_STORE_VERSION = 1
 SERVICE_RESET_ENERGY = "reset_energy_accumulator"
+SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE = "set_primary_weekly_schedule"
+SERVICE_SET_BOOST_WEEKLY_SCHEDULE = "set_boost_weekly_schedule"
+SERVICE_START_TIMED_BOOST = "start_timed_boost"
 ATTR_ENTRY_ID = "entry_id"
+ATTR_DURATION_MINUTES = "duration_minutes"
+ATTR_SCHEDULE = "schedule"
 ATTR_ZONE = "zone"
 _RESET_SERVICE_FLAG = "_reset_service_registered"
 _LOGIN_RETRY_DELAY = 5.0
 _MAX_IMMEDIATE_STARTUP_RETRIES = 2
 _LOCAL_BLE_REFRESH_INTERVAL_SECONDS = 60
+_SCHEDULE_WEEKDAY_KEYS: tuple[str, ...] = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
 
 
 _ResultT = TypeVar("_ResultT")
+
+
+def _parse_schedule_time(value: Any, *, day: str, field: str, index: int) -> int:
+    """Parse one HH:MM transition time into minutes after midnight."""
+
+    if not isinstance(value, str):
+        raise HomeAssistantError(
+            f"{day} {field}[{index}] must be a string in HH:MM format"
+        )
+
+    raw = value.strip()
+    parts = raw.split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise HomeAssistantError(
+            f"{day} {field}[{index}] must use HH:MM 24-hour format"
+        )
+
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise HomeAssistantError(
+            f"{day} {field}[{index}] is out of range; expected 00:00-23:59"
+        )
+
+    total_minutes = hour * 60 + minute
+    if total_minutes % 15 != 0:
+        raise HomeAssistantError(
+            f"{day} {field}[{index}] must align to 15-minute intervals"
+        )
+    return total_minutes
+
+
+def _parse_daily_schedule(day: str, payload: Any) -> DailyProgram:
+    """Validate one day schedule payload and return a DailyProgram."""
+
+    if not isinstance(payload, Mapping):
+        raise HomeAssistantError(
+            f"{day} schedule must be a mapping with 'on' and 'off' lists"
+        )
+
+    unknown_keys = {str(key) for key in payload if key not in {"on", "off"}}
+    if unknown_keys:
+        raise HomeAssistantError(
+            f"{day} schedule contains unsupported keys: {', '.join(sorted(unknown_keys))}"
+        )
+
+    on_raw = payload.get("on", [])
+    off_raw = payload.get("off", [])
+    if not isinstance(on_raw, list) or not isinstance(off_raw, list):
+        raise HomeAssistantError(f"{day} schedule 'on' and 'off' must be lists")
+
+    if len(on_raw) > 3 or len(off_raw) > 3:
+        raise HomeAssistantError(
+            f"{day} schedule supports at most 3 on and 3 off transitions"
+        )
+
+    on_minutes = [
+        _parse_schedule_time(value, day=day, field="on", index=index)
+        for index, value in enumerate(on_raw, start=1)
+    ]
+    off_minutes = [
+        _parse_schedule_time(value, day=day, field="off", index=index)
+        for index, value in enumerate(off_raw, start=1)
+    ]
+
+    all_minutes = on_minutes + off_minutes
+    if not all_minutes:
+        raise HomeAssistantError(
+            f"{day} schedule must include at least one transition"
+        )
+    if len(all_minutes) > 6:
+        raise HomeAssistantError(
+            f"{day} schedule supports at most 6 transitions"
+        )
+    if len(set(all_minutes)) != len(all_minutes):
+        raise HomeAssistantError(
+            f"{day} schedule cannot contain duplicate transition times"
+        )
+
+    on_sorted = sorted(on_minutes)
+    off_sorted = sorted(off_minutes)
+
+    on_triplet = tuple(on_sorted + [None] * (3 - len(on_sorted)))
+    off_triplet = tuple(off_sorted + [None] * (3 - len(off_sorted)))
+    return DailyProgram(on_triplet, off_triplet)
+
+
+def _parse_weekly_schedule(payload: Any) -> WeeklyProgram:
+    """Validate and parse a weekly schedule service payload."""
+
+    if not isinstance(payload, Mapping):
+        raise HomeAssistantError("Schedule must be a mapping of weekday names")
+
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            raise HomeAssistantError("Schedule day keys must be strings")
+        day_key = key.strip().lower()
+        if day_key not in _SCHEDULE_WEEKDAY_KEYS:
+            raise HomeAssistantError(
+                f"Unsupported weekday '{key}'; expected Monday through Sunday"
+            )
+        if day_key in normalized:
+            raise HomeAssistantError(f"Duplicate schedule day '{key}'")
+        normalized[day_key] = value
+
+    missing_days = [day for day in _SCHEDULE_WEEKDAY_KEYS if day not in normalized]
+    if missing_days:
+        missing = ", ".join(day.title() for day in missing_days)
+        raise HomeAssistantError(f"Schedule is missing required days: {missing}")
+
+    parsed_days = [
+        _parse_daily_schedule(day.title(), normalized[day])
+        for day in _SCHEDULE_WEEKDAY_KEYS
+    ]
+
+    return (
+        parsed_days[0],
+        parsed_days[1],
+        parsed_days[2],
+        parsed_days[3],
+        parsed_days[4],
+        parsed_days[5],
+        parsed_days[6],
+    )
+
+
+def _format_transition_minutes(minutes: Iterable[int | None]) -> list[str]:
+    """Convert transition minute offsets into HH:MM strings."""
+
+    rendered: list[str] = []
+    for minute in minutes:
+        if minute is None:
+            continue
+        hour, remainder = divmod(minute, 60)
+        rendered.append(f"{hour:02d}:{remainder:02d}")
+    return rendered
+
+
+def _format_weekly_program(program: WeeklyProgram) -> dict[str, dict[str, list[str]]]:
+    """Format a WeeklyProgram into day-keyed on/off HH:MM lists."""
+
+    rendered: dict[str, dict[str, list[str]]] = {}
+    for day_key, daily in zip(_SCHEDULE_WEEKDAY_KEYS, program, strict=False):
+        rendered[day_key] = {
+            "on": _format_transition_minutes(daily.on_minutes),
+            "off": _format_transition_minutes(daily.off_minutes),
+        }
+    return rendered
+
+
+def _cache_weekly_program(runtime: SecuremtrRuntimeData, zone: str, program: WeeklyProgram) -> None:
+    """Update runtime weekly-program caches for one zone."""
+
+    programs = dict(runtime.weekly_programs or {})
+    programs[zone] = program
+    runtime.weekly_programs = programs
+
+    canonicals = dict(runtime.weekly_canonicals or {})
+    canonicals[zone] = canonicalize_weekly(program)
+    runtime.weekly_canonicals = canonicals
+
+
+def _cache_weekly_programs(
+    runtime: SecuremtrRuntimeData,
+    programs: Mapping[str, WeeklyProgram | None],
+    canonicals: Mapping[str, list[tuple[int, int]] | None],
+) -> None:
+    """Store fetched weekly programs and canonical intervals in runtime."""
+
+    runtime.weekly_programs = dict(programs)
+    runtime.weekly_canonicals = dict(canonicals)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
@@ -136,12 +325,43 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if domain_data.get(_RESET_SERVICE_FLAG):
         return
 
-    schema = vol.Schema(
+    reset_schema = vol.Schema(
         {
             vol.Required(ATTR_ENTRY_ID): str,
             vol.Optional(ATTR_ZONE, default=ZONE_KEYS[0]): vol.In(ZONE_KEYS),
         }
     )
+    start_boost_schema = vol.Schema(
+        {
+            vol.Required(ATTR_ENTRY_ID): str,
+            vol.Required(ATTR_DURATION_MINUTES): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=24 * 60)
+            ),
+        }
+    )
+    set_schedule_schema = vol.Schema(
+        {
+            vol.Required(ATTR_ENTRY_ID): str,
+            vol.Required(ATTR_SCHEDULE): dict,
+        }
+    )
+
+    def _resolve_loaded_entry(entry_id: str) -> tuple[Any, SecuremtrRuntimeData]:
+        """Resolve a loaded config entry and runtime pair for service calls."""
+
+        domain_state = hass.data.get(DOMAIN, {})
+        runtime: SecuremtrRuntimeData | None = domain_state.get(entry_id)
+        if runtime is None:
+            raise HomeAssistantError(
+                f"SecureMTR entry {entry_id} is not loaded"
+            )
+
+        entry = runtime.config_entry
+        if entry is None or not hasattr(entry, "data"):
+            raise HomeAssistantError(
+                f"SecureMTR entry {entry_id} config metadata is unavailable"
+            )
+        return entry, runtime
 
     async def _async_handle_reset(call: ServiceCall) -> None:
         """Reset the cumulative energy state for a config entry zone."""
@@ -172,11 +392,182 @@ def _async_register_services(hass: HomeAssistant) -> None:
         _LOGGER.info("Reset cumulative energy state for %s zone %s", entry_id, zone)
         async_dispatch_runtime_update(hass, entry_id)
 
+    async def _async_handle_start_timed_boost(call: ServiceCall) -> None:
+        """Start a timed boost for an arbitrary duration in minutes."""
+
+        entry_id: str = call.data[ATTR_ENTRY_ID]
+        duration_minutes: int = call.data[ATTR_DURATION_MINUTES]
+        entry, runtime = _resolve_loaded_entry(entry_id)
+        controller = runtime.controller
+        if controller is None:
+            raise HomeAssistantError("Secure Meters controller is not connected")
+
+        if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+            ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
+            if not isinstance(ble_key, str) or not ble_key:
+                raise HomeAssistantError("Local BLE key is missing for this entry")
+
+            from .local_ble_commissioning import (  # noqa: PLC0415
+                LocalBleCommissioningError,
+                async_execute_local_command,
+            )
+
+            try:
+                async with runtime.command_lock:
+                    await async_execute_local_command(
+                        hass,
+                        mac_address=controller.gateway_id,
+                        serial_number=controller.serial_number,
+                        ble_key=ble_key,
+                        method_name="start_timed_boost",
+                        operation_kwargs={ATTR_DURATION_MINUTES: duration_minutes},
+                    )
+            except (LocalBleCommissioningError, ValueError) as error:
+                _LOGGER.error("Failed to start Secure Meters timed boost: %s", error)
+                raise HomeAssistantError(
+                    "Failed to start Secure Meters timed boost"
+                ) from error
+        else:
+
+            async def _start_boost(
+                backend: BeanbagBackend,
+                session: BeanbagSession,
+                websocket: ClientWebSocketResponse,
+                active_controller: SecuremtrController,
+            ) -> None:
+                """Send timed-boost start using the cloud websocket transport."""
+
+                await backend.start_timed_boost(
+                    session,
+                    websocket,
+                    active_controller.gateway_id,
+                    duration_minutes=duration_minutes,
+                )
+
+            await async_execute_controller_command(
+                runtime,
+                entry,
+                _start_boost,
+                log_context="Failed to start Secure Meters timed boost",
+                exception_types=(BeanbagError, ValueError),
+            )
+
+        now_local = dt_util.now()
+        end_local = now_local + timedelta(minutes=duration_minutes)
+        end_minute = end_local.hour * 60 + end_local.minute
+        runtime.timed_boost_active = True
+        runtime.timed_boost_end_minute = end_minute
+        runtime.timed_boost_end_time = coerce_end_time(end_minute)
+        async_dispatch_runtime_update(hass, entry_id)
+
+    async def _async_handle_set_weekly_schedule(
+        call: ServiceCall,
+        *,
+        zone: Literal["primary", "boost"],
+    ) -> None:
+        """Persist a weekly schedule update for one zone."""
+
+        entry_id: str = call.data[ATTR_ENTRY_ID]
+        schedule_payload = call.data[ATTR_SCHEDULE]
+        entry, runtime = _resolve_loaded_entry(entry_id)
+        controller = runtime.controller
+        if controller is None:
+            raise HomeAssistantError("Secure Meters controller is not connected")
+
+        weekly_program = _parse_weekly_schedule(schedule_payload)
+
+        if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+            ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
+            if not isinstance(ble_key, str) or not ble_key:
+                raise HomeAssistantError("Local BLE key is missing for this entry")
+
+            from .local_ble_commissioning import (  # noqa: PLC0415
+                LocalBleCommissioningError,
+                async_write_local_weekly_program,
+            )
+
+            try:
+                async with runtime.command_lock:
+                    await async_write_local_weekly_program(
+                        hass,
+                        mac_address=controller.gateway_id,
+                        serial_number=controller.serial_number,
+                        ble_key=ble_key,
+                        zone=zone,
+                        program=weekly_program,
+                        zone_bois=runtime.schedule_zone_bois,
+                    )
+            except (LocalBleCommissioningError, ValueError) as error:
+                _LOGGER.error(
+                    "Failed to update Secure Meters %s schedule: %s",
+                    zone,
+                    error,
+                )
+                raise HomeAssistantError(
+                    f"Failed to update Secure Meters {zone} schedule"
+                ) from error
+        else:
+
+            async def _write_weekly_program(
+                backend: BeanbagBackend,
+                session: BeanbagSession,
+                websocket: ClientWebSocketResponse,
+                active_controller: SecuremtrController,
+            ) -> None:
+                """Write one zone weekly schedule through cloud websocket."""
+
+                await backend.write_weekly_program(
+                    session,
+                    websocket,
+                    active_controller.gateway_id,
+                    weekly_program,
+                    zone=zone,
+                )
+
+            await async_execute_controller_command(
+                runtime,
+                entry,
+                _write_weekly_program,
+                log_context=f"Failed to update Secure Meters {zone} schedule",
+                exception_types=(BeanbagError, ValueError),
+            )
+
+        _cache_weekly_program(runtime, zone, weekly_program)
+        async_dispatch_runtime_update(hass, entry_id)
+
+    async def _async_handle_set_primary_weekly_schedule(call: ServiceCall) -> None:
+        """Update the primary zone weekly schedule."""
+
+        await _async_handle_set_weekly_schedule(call, zone="primary")
+
+    async def _async_handle_set_boost_weekly_schedule(call: ServiceCall) -> None:
+        """Update the boost zone weekly schedule."""
+
+        await _async_handle_set_weekly_schedule(call, zone="boost")
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_RESET_ENERGY,
         _async_handle_reset,
-        schema=schema,
+        schema=reset_schema,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_START_TIMED_BOOST,
+        _async_handle_start_timed_boost,
+        schema=start_boost_schema,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE,
+        _async_handle_set_primary_weekly_schedule,
+        schema=set_schedule_schema,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_BOOST_WEEKLY_SCHEDULE,
+        _async_handle_set_boost_weekly_schedule,
+        schema=set_schedule_schema,
     )
     domain_data[_RESET_SERVICE_FLAG] = True
 
@@ -511,6 +902,9 @@ class SecuremtrRuntimeData:
     energy_state: dict[str, Any] | None = None
     energy_accumulator: EnergyAccumulator | None = None
     statistics_recent: dict[str, Any] | None = None
+    schedule_zone_bois: dict[str, int] | None = None
+    weekly_programs: dict[str, WeeklyProgram | None] | None = None
+    weekly_canonicals: dict[str, list[tuple[int, int]] | None] | None = None
     energy_entity_ids: dict[str, str] = field(default_factory=dict)
 
 
@@ -811,6 +1205,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             timedelta(seconds=_LOCAL_BLE_REFRESH_INTERVAL_SECONDS),
         )
         runtime.local_refresh_callback = _queue_local_refresh
+        hass.async_create_task(_async_refresh_weekly_program_cache(hass, entry))
 
         _LOGGER.info(
             "Configured local BLE mode for %s (serial=%s)",
@@ -1509,9 +1904,56 @@ async def async_refresh_entry_state(hass: HomeAssistant, entry: ConfigEntry) -> 
 
     if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
         await _async_refresh_local_ble_runtime(hass, entry)
+        await _async_refresh_weekly_program_cache(hass, entry)
         return
 
     await consumption_metrics(hass, entry)
+
+
+async def _async_refresh_weekly_program_cache(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Refresh runtime weekly schedule caches for a config entry."""
+
+    domain_state = hass.data.get(DOMAIN, {})
+    runtime: SecuremtrRuntimeData | None = domain_state.get(entry.entry_id)
+    if runtime is None:
+        return
+
+    controller = runtime.controller
+    if controller is None:
+        return
+
+    if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
+        ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
+        if not isinstance(ble_key, str) or not ble_key:
+            return
+
+        from .local_ble_commissioning import (  # noqa: PLC0415
+            LocalBleCommissioningError,
+            async_read_local_weekly_programs,
+        )
+
+        try:
+            async with runtime.command_lock:
+                programs, canonicals = await async_read_local_weekly_programs(
+                    hass,
+                    mac_address=controller.gateway_id,
+                    serial_number=controller.serial_number,
+                    ble_key=ble_key,
+                    zone_bois=runtime.schedule_zone_bois,
+                )
+        except LocalBleCommissioningError as error:
+            _LOGGER.debug(
+                "Failed to refresh local BLE weekly schedules for %s: %s",
+                _entry_display_name(entry),
+                error,
+            )
+            return
+
+        _cache_weekly_programs(runtime, programs, canonicals)
+        async_dispatch_runtime_update(hass, entry.entry_id)
 
 
 def _default_energy_state() -> dict[str, dict[str, Any]]:
@@ -1816,6 +2258,13 @@ async def _async_refresh_local_ble_runtime(
     ):
         changed = True
 
+    if (
+        isinstance(snapshot.schedule_zone_bois, dict)
+        and runtime.schedule_zone_bois != snapshot.schedule_zone_bois
+    ):
+        runtime.schedule_zone_bois = dict(snapshot.schedule_zone_bois)
+        changed = True
+
     if changed:
         async_dispatch_runtime_update(hass, entry.entry_id)
         _LOGGER.debug(
@@ -2112,6 +2561,7 @@ async def _prepare_zone_contexts_and_calibrations(
         gateway_id=controller.gateway_id,
         entry_identifier=entry_identifier,
     )
+    _cache_weekly_programs(runtime, programs, canonicals)
 
     contexts = _build_zone_contexts(options, programs, canonicals)
     calibrations = _build_zone_calibrations(

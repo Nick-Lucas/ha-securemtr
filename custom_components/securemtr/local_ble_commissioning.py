@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 import json
@@ -142,6 +142,7 @@ _APP_TIMEZONE_ID_LOOKUP: dict[str, int] = {
 
 SERVICE_ID_SCHEDULE = 17
 HANDLER_READ_WEEKLY_PROGRAM = 22
+HANDLER_WRITE_WEEKLY_PROGRAM = 21
 
 PROGRAM_ZONE_INDEX: dict[str, int] = {
     "primary": 1,
@@ -227,6 +228,7 @@ class LocalBleSnapshot:
     boost_energy_kwh: float | None = None
     consumption_days: list[dict[str, Any]] | None = None
     statistics_recent: dict[str, dict[str, Any]] | None = None
+    schedule_zone_bois: dict[str, int] | None = None
 
 
 class _BleUartRpcClient:
@@ -1172,19 +1174,146 @@ def _extract_service_boi(service_entry: dict[str, Any]) -> int | None:
     return None
 
 
+def _extract_service_identifier(service_entry: dict[str, Any]) -> int | None:
+    """Return a service identifier from a service-values entry."""
+
+    service_id = service_entry.get("SI")
+    if not isinstance(service_id, int):
+        service_id = service_entry.get("value")
+    if isinstance(service_id, int):
+        return service_id
+    return None
+
+
 def _find_service_boi(response: Any, *, service_id: int) -> int | None:
     """Find the first BOI for the requested service identifier."""
 
     for service_entry in _extract_service_values(response):
-        entry_service_id = service_entry.get("SI")
-        if not isinstance(entry_service_id, int):
-            entry_service_id = service_entry.get("value")
-        if entry_service_id != service_id:
+        if _extract_service_identifier(service_entry) != service_id:
             continue
         boi = _extract_service_boi(service_entry)
         if boi is not None:
             return boi
     return None
+
+
+def _find_service_bois(response: Any, *, service_id: int) -> list[int]:
+    """Find all distinct BOIs for the requested service identifier."""
+
+    bois: list[int] = []
+    for service_entry in _extract_service_values(response):
+        if _extract_service_identifier(service_entry) != service_id:
+            continue
+        boi = _extract_service_boi(service_entry)
+        if boi is None or boi in bois:
+            continue
+        bois.append(boi)
+    return bois
+
+
+def _coerce_schedule_zone_bois(
+    fallback_zone_bois: Mapping[str, Any] | None,
+) -> dict[str, int]:
+    """Normalize optional zone-BOI hints into a strict mapping."""
+
+    zone_bois = dict(PROGRAM_ZONE_INDEX)
+    if not isinstance(fallback_zone_bois, Mapping):
+        return zone_bois
+
+    for zone in PROGRAM_ZONE_INDEX:
+        candidate = fallback_zone_bois.get(zone)
+        if isinstance(candidate, int) and candidate > 0:
+            zone_bois[zone] = candidate
+
+    return zone_bois
+
+
+def _resolve_mode_and_hot_water_service_bois(
+    response: Any,
+) -> tuple[int | None, int | None]:
+    """Resolve mode-service and hot-water-service BOIs from service values."""
+
+    mode_boi = _find_service_boi(response, service_id=SERVICE_ID_MODE)
+    if mode_boi is None:
+        mode_boi = _find_service_boi(response, service_id=SERVICE_ID_MODE_LEGACY)
+
+    hot_water_boi = _find_service_boi(response, service_id=SERVICE_ID_HOT_WATER)
+    return mode_boi, hot_water_boi
+
+
+def _resolve_schedule_zone_bois_from_service_values(
+    response: Any,
+    *,
+    fallback_zone_bois: Mapping[str, Any] | None = None,
+) -> dict[str, int]:
+    """Resolve primary/boost schedule BOIs from GetAllServiceValues payloads."""
+
+    zone_bois = _coerce_schedule_zone_bois(fallback_zone_bois)
+
+    primary_zone_boi_hint, boost_zone_boi_hint = (
+        _resolve_mode_and_hot_water_service_bois(response)
+    )
+    if primary_zone_boi_hint is not None:
+        zone_bois["primary"] = primary_zone_boi_hint
+    if boost_zone_boi_hint is not None:
+        zone_bois["boost"] = boost_zone_boi_hint
+
+    schedule_bois = _find_service_bois(response, service_id=SERVICE_ID_SCHEDULE)
+    if not schedule_bois:
+        return zone_bois
+
+    if zone_bois["primary"] not in schedule_bois:
+        zone_bois["primary"] = schedule_bois[0]
+
+    if (
+        zone_bois["boost"] == zone_bois["primary"]
+        or zone_bois["boost"] not in schedule_bois
+    ):
+        alternate = next(
+            (
+                boi
+                for boi in schedule_bois
+                if boi != zone_bois["primary"]
+            ),
+            None,
+        )
+        if alternate is not None:
+            zone_bois["boost"] = alternate
+
+    return zone_bois
+
+
+async def _async_get_all_service_values(
+    rpc_client: _BleUartRpcClient,
+    *,
+    gateway_mac_id: str,
+) -> Any:
+    """Fetch the local BLE GetAllServiceValues payload."""
+
+    return await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_GET_ALL_SERVICE_VALUES,
+        service_id=SERVICE_ID_BBSERVER,
+        args=None,
+    )
+
+
+async def _async_resolve_schedule_zone_bois(
+    rpc_client: _BleUartRpcClient,
+    *,
+    gateway_mac_id: str,
+    fallback_zone_bois: Mapping[str, Any] | None = None,
+) -> dict[str, int]:
+    """Resolve primary/boost schedule BOIs from live service values."""
+
+    response = await _async_get_all_service_values(
+        rpc_client,
+        gateway_mac_id=gateway_mac_id,
+    )
+    return _resolve_schedule_zone_bois_from_service_values(
+        response,
+        fallback_zone_bois=fallback_zone_bois,
+    )
 
 
 def _active_energy_to_kwh(raw_value: float | None) -> float | None:
@@ -1395,6 +1524,9 @@ def _parse_local_ble_snapshot(response: Any) -> LocalBleSnapshot:
     """Parse GetAllServiceValues payload into local runtime fields."""
 
     snapshot = LocalBleSnapshot()
+    snapshot.schedule_zone_bois = _resolve_schedule_zone_bois_from_service_values(
+        response
+    )
 
     for service_entry in _extract_service_values(response):
         service_id = service_entry.get("SI")
@@ -1465,13 +1597,14 @@ def _parse_local_ble_snapshot(response: Any) -> LocalBleSnapshot:
                 snapshot.boost_energy_kwh = _active_energy_to_kwh(boost_energy_value)
 
     _LOGGER.debug(
-        "Parsed local BLE snapshot: primary_power_on=%s timed_boost_enabled=%s timed_boost_active=%s boost_duration=%s primary_energy_kwh=%s boost_energy_kwh=%s",
+        "Parsed local BLE snapshot: primary_power_on=%s timed_boost_enabled=%s timed_boost_active=%s boost_duration=%s primary_energy_kwh=%s boost_energy_kwh=%s schedule_zone_bois=%s",
         snapshot.primary_power_on,
         snapshot.timed_boost_enabled,
         snapshot.timed_boost_active,
         snapshot.timed_boost_duration_minutes,
         snapshot.primary_energy_kwh,
         snapshot.boost_energy_kwh,
+        snapshot.schedule_zone_bois,
     )
 
     return snapshot
@@ -1481,8 +1614,8 @@ def _command_to_rpc_payload(
     method_name: str,
     operation_kwargs: dict[str, Any],
     *,
-    mode_boi: int,
-    hot_water_boi: int,
+    mode_service_boi: int,
+    hot_water_service_boi: int,
 ) -> tuple[int, int, list[Any] | None]:
     """Translate a local command method name to RPC header and arguments."""
 
@@ -1493,14 +1626,14 @@ def _command_to_rpc_payload(
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_HOT_WATER,
-            [hot_water_boi, {"D": duration, "I": 4, "OT": 2, "V": 0}],
+            [hot_water_service_boi, {"D": duration, "I": 4, "OT": 2, "V": 0}],
         )
 
     if method_name == "stop_timed_boost":
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_HOT_WATER,
-            [hot_water_boi, {"D": 0, "I": 4, "OT": 2, "V": 0}],
+            [hot_water_service_boi, {"D": 0, "I": 4, "OT": 2, "V": 0}],
         )
 
     if method_name == "set_timed_boost_enabled":
@@ -1510,21 +1643,21 @@ def _command_to_rpc_payload(
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_HOT_WATER,
-            [hot_water_boi, {"I": 27, "V": 1 if enabled else 0}],
+            [hot_water_service_boi, {"I": 27, "V": 1 if enabled else 0}],
         )
 
     if method_name == "turn_controller_on":
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_MODE,
-            [mode_boi, {"I": 6, "V": 2}],
+            [mode_service_boi, {"I": 6, "V": 2}],
         )
 
     if method_name == "turn_controller_off":
         return (
             HANDLER_WRITE_DATA,
             SERVICE_ID_MODE,
-            [mode_boi, {"I": 6, "V": 0}],
+            [mode_service_boi, {"I": 6, "V": 0}],
         )
 
     raise LocalBleCommissioningError(
@@ -1532,35 +1665,30 @@ def _command_to_rpc_payload(
     )
 
 
-async def _async_resolve_service_bois(
+async def _async_resolve_mode_and_hot_water_service_bois(
     rpc_client: _BleUartRpcClient,
     *,
     gateway_mac_id: str,
 ) -> tuple[int, int]:
-    """Resolve mode and hot-water BOIs from GetAllServiceValues response."""
+    """Resolve mode-service and hot-water-service BOIs with defaults."""
 
-    response = await rpc_client.async_rpc_request(
+    response = await _async_get_all_service_values(
+        rpc_client,
         gateway_mac_id=gateway_mac_id,
-        handler_id=HANDLER_GET_ALL_SERVICE_VALUES,
-        service_id=SERVICE_ID_BBSERVER,
-        args=None,
     )
 
-    mode_boi = 1
-    hot_water_boi = 2
-
-    resolved_mode_boi = _find_service_boi(response, service_id=SERVICE_ID_MODE)
-    if resolved_mode_boi is not None:
-        mode_boi = resolved_mode_boi
-
-    resolved_hot_water_boi = _find_service_boi(
-        response,
-        service_id=SERVICE_ID_HOT_WATER,
+    resolved_mode_service_boi, resolved_hot_water_service_boi = (
+        _resolve_mode_and_hot_water_service_bois(response)
     )
-    if resolved_hot_water_boi is not None:
-        hot_water_boi = resolved_hot_water_boi
 
-    return mode_boi, hot_water_boi
+    mode_service_boi = (
+        resolved_mode_service_boi if resolved_mode_service_boi is not None else 1
+    )
+    hot_water_service_boi = (
+        resolved_hot_water_service_boi if resolved_hot_water_service_boi is not None else 2
+    )
+
+    return mode_service_boi, hot_water_service_boi
 
 
 async def async_read_local_snapshot(
@@ -1772,6 +1900,7 @@ async def async_read_local_weekly_programs(
     mac_address: str,
     serial_number: str | None,
     ble_key: str,
+    zone_bois: Mapping[str, int] | None = None,
 ) -> tuple[
     dict[str, "WeeklyProgram | None"],
     dict[str, list[tuple[int, int]] | None],
@@ -1799,6 +1928,7 @@ async def async_read_local_weekly_programs(
                 expected_serial=serial_number,
                 gateway_mac_id=gateway_mac_id,
                 auth_key=decoded_key,
+                zone_bois=zone_bois,
             )
         except LocalBleCommissioningError as error:
             if attempt >= BLE_COMMAND_RETRY_LIMIT:
@@ -1821,6 +1951,7 @@ async def _async_read_ble_weekly_programs_once(
     expected_serial: str | None,
     gateway_mac_id: str,
     auth_key: bytes,
+    zone_bois: Mapping[str, int] | None = None,
 ) -> tuple[
     dict[str, "WeeklyProgram | None"],
     dict[str, list[tuple[int, int]] | None],
@@ -1853,11 +1984,17 @@ async def _async_read_ble_weekly_programs_once(
     try:
         await rpc_client.async_initialize()
         await rpc_client.async_authorize(auth_key)
+        resolved_zone_bois = await _async_resolve_schedule_zone_bois(
+            rpc_client,
+            gateway_mac_id=gateway_mac_id,
+            fallback_zone_bois=zone_bois,
+        )
 
         programs: dict[str, Any] = {}
         canonicals: dict[str, list[tuple[int, int]] | None] = {}
 
-        for zone_key, zone_index in PROGRAM_ZONE_INDEX.items():
+        for zone_key in PROGRAM_ZONE_INDEX:
+            zone_index = resolved_zone_bois[zone_key]
             response = await rpc_client.async_rpc_request(
                 gateway_mac_id=gateway_mac_id,
                 handler_id=HANDLER_READ_WEEKLY_PROGRAM,
@@ -1877,6 +2014,122 @@ async def _async_read_ble_weekly_programs_once(
             canonicals[zone_key] = canonicalize_weekly(program)
 
         return programs, canonicals
+    finally:
+        await rpc_client.async_close()
+        await _async_disconnect_client(client)
+
+
+async def async_write_local_weekly_program(
+    hass: HomeAssistant,
+    *,
+    mac_address: str,
+    serial_number: str | None,
+    ble_key: str,
+    zone: str,
+    program: "WeeklyProgram",
+    zone_bois: Mapping[str, int] | None = None,
+) -> None:
+    """Write a weekly schedule for one zone over local BLE RPC."""
+
+    ble_address = _format_mac_address(mac_address)
+    gateway_mac_id = str(int(mac_address, 16))
+
+    try:
+        decoded_key = base64.b64decode(ble_key)
+    except Exception as error:
+        raise LocalBleCommissioningError(
+            "Stored BLE key is not valid base64"
+        ) from error
+
+    if len(decoded_key) != 16:
+        raise LocalBleCommissioningError("Stored BLE key must decode to 16 bytes")
+
+    if zone not in PROGRAM_ZONE_INDEX:
+        raise ValueError(f"Unsupported weekly schedule zone: {zone}")
+
+    for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+        try:
+            await _async_write_local_weekly_program_once(
+                hass,
+                ble_address=ble_address,
+                expected_serial=serial_number,
+                gateway_mac_id=gateway_mac_id,
+                auth_key=decoded_key,
+                zone=zone,
+                program=program,
+                zone_bois=zone_bois,
+            )
+            return
+        except LocalBleCommissioningError as error:
+            if attempt >= BLE_COMMAND_RETRY_LIMIT:
+                raise
+            _LOGGER.warning(
+                "BLE weekly schedule write failed (attempt %s/%s): %s, retrying",
+                attempt + 1,
+                BLE_COMMAND_RETRY_LIMIT + 1,
+                error,
+            )
+            await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
+
+    raise LocalBleCommissioningError("BLE weekly schedule write retries exhausted")
+
+
+async def _async_write_local_weekly_program_once(
+    hass: HomeAssistant,
+    *,
+    ble_address: str,
+    expected_serial: str | None,
+    gateway_mac_id: str,
+    auth_key: bytes,
+    zone: str,
+    program: "WeeklyProgram",
+    zone_bois: Mapping[str, int] | None = None,
+) -> None:
+    """Connect once and write one weekly program payload over BLE."""
+
+    from .beanbag import BeanbagBackend  # noqa: PLC0415
+
+    ble_device = await _async_resolve_connectable_device(
+        hass,
+        ble_address,
+        expected_serial=expected_serial,
+    )
+
+    def _refresh_ble_device() -> Any:
+        from homeassistant.components import bluetooth  # noqa: PLC0415
+
+        refreshed = bluetooth.async_ble_device_from_address(
+            hass,
+            ble_address,
+            connectable=True,
+        )
+        return refreshed if refreshed is not None else ble_device
+
+    client = await _async_connect_client(
+        ble_device,
+        ble_device_callback=_refresh_ble_device,
+    )
+    rpc_client = _BleUartRpcClient(client)
+    try:
+        await rpc_client.async_initialize()
+        await rpc_client.async_authorize(auth_key)
+        resolved_zone_bois = await _async_resolve_schedule_zone_bois(
+            rpc_client,
+            gateway_mac_id=gateway_mac_id,
+            fallback_zone_bois=zone_bois,
+        )
+        zone_index = resolved_zone_bois[zone]
+        payload = BeanbagBackend._build_weekly_program_payload(program, zone_index)
+        acknowledgement = await rpc_client.async_rpc_request(
+            gateway_mac_id=gateway_mac_id,
+            handler_id=HANDLER_WRITE_WEEKLY_PROGRAM,
+            service_id=SERVICE_ID_SCHEDULE,
+            args=payload,
+        )
+        if acknowledgement not in (0, "0", None):
+            raise LocalBleCommissioningError(
+                f"Unexpected local BLE weekly schedule acknowledgement: {acknowledgement}"
+            )
     finally:
         await rpc_client.async_close()
         await _async_disconnect_client(client)
@@ -1980,15 +2233,17 @@ async def _async_execute_ble_rpc_command(
         await rpc_client.async_initialize()
         if auth_key is not None:
             await rpc_client.async_authorize(auth_key)
-        mode_boi, hot_water_boi = await _async_resolve_service_bois(
-            rpc_client,
-            gateway_mac_id=gateway_mac_id,
+        mode_service_boi, hot_water_service_boi = (
+            await _async_resolve_mode_and_hot_water_service_bois(
+                rpc_client,
+                gateway_mac_id=gateway_mac_id,
+            )
         )
         handler_id, service_id, args = _command_to_rpc_payload(
             method_name,
             operation_kwargs,
-            mode_boi=mode_boi,
-            hot_water_boi=hot_water_boi,
+            mode_service_boi=mode_service_boi,
+            hot_water_service_boi=hot_water_service_boi,
         )
         return await rpc_client.async_rpc_request(
             gateway_mac_id=gateway_mac_id,

@@ -78,6 +78,11 @@ from custom_components.securemtr import (
     async_unload_entry,
     ENERGY_STORE_VERSION,
     SERVICE_RESET_ENERGY,
+    SERVICE_SET_BOOST_WEEKLY_SCHEDULE,
+    SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE,
+    SERVICE_START_TIMED_BOOST,
+    ATTR_DURATION_MINUTES,
+    ATTR_SCHEDULE,
     runtime_update_signal,
     consumption_metrics,
     _validate_consumption_connection,
@@ -360,6 +365,8 @@ class FakeBeanbagBackend:
         self.state_calls: list[str] = []
         self.energy_history_calls: list[tuple[str, int]] = []
         self.program_calls: list[tuple[str, str]] = []
+        self.start_boost_calls: list[tuple[str, int]] = []
+        self.write_program_calls: list[tuple[str, str, WeeklyProgram]] = []
         self._session = BeanbagSession(
             user_id=1,
             session_id="session-id",
@@ -512,6 +519,38 @@ class FakeBeanbagBackend:
         if zone == "boost":
             return self._boost_program
         raise BeanbagError(f"Unknown zone {zone}")
+
+    async def write_weekly_program(
+        self,
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+        gateway_id: str,
+        program: WeeklyProgram,
+        *,
+        zone: str,
+    ) -> None:
+        """Record weekly schedule writes for assertions."""
+
+        self.write_program_calls.append((zone, gateway_id, program))
+        if zone == "primary":
+            self._primary_program = program
+            return
+        if zone == "boost":
+            self._boost_program = program
+            return
+        raise BeanbagError(f"Unknown zone {zone}")
+
+    async def start_timed_boost(
+        self,
+        session: BeanbagSession,
+        websocket: FakeWebSocket,
+        gateway_id: str,
+        *,
+        duration_minutes: int,
+    ) -> None:
+        """Record cloud timed-boost service calls."""
+
+        self.start_boost_calls.append((gateway_id, duration_minutes))
 
     async def turn_controller_on(
         self, session: BeanbagSession, websocket: FakeWebSocket, gateway_id: str
@@ -3661,6 +3700,151 @@ async def test_reset_service_resets_zone(store_instances) -> None:
     persisted = store_instances[0].saved[-1]
     assert persisted["boost"]["ledger"] == {}
     assert persisted["boost"]["cumulative_kwh"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_start_timed_boost_service_updates_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure start_timed_boost writes backend state and updates runtime fields."""
+
+    hass = FakeHass()
+    await async_setup(hass, {})
+
+    entry = DummyConfigEntry(
+        entry_id="boost-entry",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "digest"},
+    )
+    backend = FakeBeanbagBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.config_entry = entry
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+",
+        gateway_id="gateway-1",
+        serial_number="serial-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    fixed_now = datetime(2026, 1, 2, 10, 15, tzinfo=timezone.utc)
+    monkeypatch.setattr(dt_util, "now", lambda: fixed_now)
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_START_TIMED_BOOST,
+        {ATTR_ENTRY_ID: entry.entry_id, ATTR_DURATION_MINUTES: 45},
+    )
+
+    assert backend.start_boost_calls == [("gateway-1", 45)]
+    assert runtime.timed_boost_active is True
+    assert runtime.timed_boost_end_minute == 11 * 60
+    assert runtime.timed_boost_end_time == coerce_end_time(11 * 60)
+
+
+@pytest.mark.asyncio
+async def test_set_weekly_schedule_services_write_cloud_and_cache_runtime() -> None:
+    """Ensure weekly schedule service writes cloud payload and updates caches."""
+
+    hass = FakeHass()
+    await async_setup(hass, {})
+
+    entry = DummyConfigEntry(
+        entry_id="schedule-entry",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "digest"},
+    )
+    backend = FakeBeanbagBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.config_entry = entry
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+",
+        gateway_id="gateway-1",
+        serial_number="serial-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    schedule_payload = {
+        day: {"on": ["04:45"], "off": ["07:45"]}
+        for day in (
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        )
+    }
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE,
+        {ATTR_ENTRY_ID: entry.entry_id, ATTR_SCHEDULE: schedule_payload},
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_BOOST_WEEKLY_SCHEDULE,
+        {ATTR_ENTRY_ID: entry.entry_id, ATTR_SCHEDULE: schedule_payload},
+    )
+
+    assert backend.write_program_calls[0][0] == "primary"
+    assert backend.write_program_calls[1][0] == "boost"
+    assert runtime.weekly_programs is not None
+    assert runtime.weekly_programs["primary"] is not None
+    assert runtime.weekly_programs["boost"] is not None
+    assert runtime.weekly_canonicals is not None
+    assert runtime.weekly_canonicals["primary"] is not None
+    assert runtime.weekly_canonicals["primary"][0] == (285, 465)
+
+
+@pytest.mark.asyncio
+async def test_set_weekly_schedule_services_validate_fifteen_minute_intervals() -> None:
+    """Reject weekly schedule payloads that do not align to 15-minute times."""
+
+    hass = FakeHass()
+    await async_setup(hass, {})
+
+    entry = DummyConfigEntry(
+        entry_id="schedule-invalid",
+        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "digest"},
+    )
+    backend = FakeBeanbagBackend(object())
+    runtime = SecuremtrRuntimeData(backend=backend)
+    runtime.config_entry = entry
+    runtime.session = backend._session
+    runtime.websocket = backend.websocket
+    runtime.controller = SecuremtrController(
+        identifier="controller-1",
+        name="E7+",
+        gateway_id="gateway-1",
+        serial_number="serial-1",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    invalid_payload = {
+        day: {"on": ["04:45"], "off": ["07:45"]}
+        for day in (
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        )
+    }
+    invalid_payload["monday"] = {"on": ["04:40"], "off": ["07:45"]}
+
+    with pytest.raises(HomeAssistantError, match="15-minute"):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE,
+            {ATTR_ENTRY_ID: entry.entry_id, ATTR_SCHEDULE: invalid_payload},
+        )
+
+    assert backend.write_program_calls == []
 
 
 def test_load_statistics_options_prefers_hass_timezone() -> None:

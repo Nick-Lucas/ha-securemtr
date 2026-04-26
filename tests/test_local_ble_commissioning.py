@@ -22,7 +22,7 @@ from custom_components.securemtr.local_ble_commissioning import (
     _async_commission_over_rpc,
     _async_read_ble_snapshot_once,
     _async_read_ble_weekly_programs_once,
-    _async_resolve_service_bois,
+    _async_resolve_mode_and_hot_water_service_bois,
     _async_set_owner_with_retry,
     _command_to_rpc_payload,
     _parse_consumption_day_rows,
@@ -37,9 +37,11 @@ from custom_components.securemtr.local_ble_commissioning import (
     _resolve_timezone_id,
     _validate_advertisement_identity,
     async_read_local_snapshot,
+    async_write_local_weekly_program,
     async_execute_local_command,
     async_commission_local_ble,
 )
+from custom_components.securemtr.beanbag import DailyProgram
 
 
 def test_packetize_payload_includes_final_packet_for_exact_multiple() -> None:
@@ -81,8 +83,8 @@ def test_command_to_rpc_payload_start_timed_boost() -> None:
     handler_id, service_id, args = _command_to_rpc_payload(
         "start_timed_boost",
         {"duration_minutes": 30},
-        mode_boi=11,
-        hot_water_boi=22,
+        mode_service_boi=11,
+        hot_water_service_boi=22,
     )
 
     assert handler_id == 2
@@ -97,8 +99,8 @@ def test_command_to_rpc_payload_rejects_unknown_command() -> None:
         _command_to_rpc_payload(
             "read_zone_topology",
             {},
-            mode_boi=1,
-            hot_water_boi=2,
+            mode_service_boi=1,
+            hot_water_service_boi=2,
         )
 
 
@@ -110,14 +112,14 @@ def test_java_utf8_character_length_mimics_java_decode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_resolve_service_bois_parses_value_field() -> None:
+async def test_async_resolve_mode_and_hot_water_service_bois_parses_value_field() -> None:
     """Ensure BOI resolution accepts the decompiled ServiceValuesDTO `value` key."""
 
     class FakeRpcClient:
         async def async_rpc_request(self, **kwargs: Any) -> Any:
             return {"V": [{"value": 15, "I": 11}, {"value": 16, "I": 22}]}
 
-    mode_boi, hot_water_boi = await _async_resolve_service_bois(
+    mode_boi, hot_water_boi = await _async_resolve_mode_and_hot_water_service_bois(
         FakeRpcClient(),
         gateway_mac_id="12345",
     )
@@ -159,6 +161,7 @@ def test_parse_local_ble_snapshot_maps_runtime_fields() -> None:
     assert snapshot.timed_boost_duration_minutes == 30
     assert snapshot.primary_energy_kwh == pytest.approx(12.345)
     assert snapshot.boost_energy_kwh == pytest.approx(4.567)
+    assert snapshot.schedule_zone_bois == {"primary": 11, "boost": 22}
 
 
 def test_parse_local_ble_snapshot_accepts_primary_state_service() -> None:
@@ -554,6 +557,16 @@ async def test_async_read_ble_weekly_programs_once_reads_both_zones(
 
         async def async_rpc_request(self, **kwargs: Any) -> Any:
             self.requests.append(kwargs)
+            if kwargs["handler_id"] == 3:
+                return {
+                    "V": [
+                        {"SI": 15, "I": 11},
+                        {"SI": 16, "I": 22},
+                        {"SI": 17, "I": 11},
+                        {"SI": 17, "I": 22},
+                    ]
+                }
+
             return [{"I": kwargs["args"][0], "D": transitions}]
 
         async def async_close(self) -> None:
@@ -596,14 +609,112 @@ async def test_async_read_ble_weekly_programs_once_reads_both_zones(
 
     assert len(rpc_instances) == 1
     requests = rpc_instances[0].requests
-    assert requests[0]["handler_id"] == 22
-    assert requests[0]["service_id"] == 17
-    assert requests[0]["args"] == [1]
-    assert requests[1]["args"] == [2]
+    assert requests[0]["handler_id"] == 3
+    assert requests[0]["service_id"] == 1
+    assert requests[1]["handler_id"] == 22
+    assert requests[1]["service_id"] == 17
+    assert requests[1]["args"] == [11]
+    assert requests[2]["args"] == [22]
     assert programs["primary"] is not None
     assert programs["boost"] is not None
     assert canonicals["primary"] == [(60, 120)]
     assert canonicals["boost"] == [(60, 120)]
+    disconnect.assert_awaited_once_with(fake_client)
+
+
+@pytest.mark.asyncio
+async def test_async_write_local_weekly_program_once_writes_zone_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure local BLE weekly writes use handler 21/service 17 with zone index."""
+
+    fake_hass = SimpleNamespace()
+    fake_device = SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+    fake_client = SimpleNamespace()
+
+    class FakeRpcClient:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+            self.requests: list[dict[str, Any]] = []
+
+        async def async_initialize(self) -> None:
+            return None
+
+        async def async_authorize(self, key: bytes) -> None:
+            return None
+
+        async def async_rpc_request(self, **kwargs: Any) -> Any:
+            self.requests.append(kwargs)
+            if kwargs["handler_id"] == 3:
+                return {
+                    "V": [
+                        {"SI": 15, "I": 11},
+                        {"SI": 16, "I": 22},
+                        {"SI": 17, "I": 11},
+                        {"SI": 17, "I": 22},
+                    ]
+                }
+            return 0
+
+        async def async_close(self) -> None:
+            return None
+
+    resolve = AsyncMock(return_value=fake_device)
+    connect = AsyncMock(return_value=fake_client)
+    disconnect = AsyncMock()
+    rpc_instances: list[FakeRpcClient] = []
+
+    def _rpc_factory(client: Any) -> FakeRpcClient:
+        instance = FakeRpcClient(client)
+        rpc_instances.append(instance)
+        return instance
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_resolve_connectable_device",
+        resolve,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_connect_client",
+        connect,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_disconnect_client",
+        disconnect,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._BleUartRpcClient",
+        _rpc_factory,
+    )
+
+    empty_day = DailyProgram((None, None, None), (None, None, None))
+    program = (
+        DailyProgram((60, None, None), (120, None, None)),
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+    )
+
+    await async_write_local_weekly_program(
+        fake_hass,
+        mac_address="AABBCCDDEEFF",
+        serial_number="E0044275",
+        ble_key="ABEiM0RVZneImaq7zN3u/w==",
+        zone="boost",
+        program=program,
+    )
+
+    assert len(rpc_instances) == 1
+    requests = rpc_instances[0].requests
+    assert requests[0]["handler_id"] == 3
+    assert requests[0]["service_id"] == 1
+    assert requests[1]["handler_id"] == 21
+    assert requests[1]["service_id"] == 17
+    assert requests[1]["args"][0]["I"] == 22
+    assert requests[1]["args"][0]["D"][0] == {"O": 60, "T": 1}
+    assert requests[1]["args"][0]["D"][1] == {"O": 120, "T": 0}
     disconnect.assert_awaited_once_with(fake_client)
 
 
