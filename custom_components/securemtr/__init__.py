@@ -129,6 +129,7 @@ ATTR_DURATION_MINUTES = "duration_minutes"
 ATTR_SCHEDULE = "schedule"
 ATTR_ZONE = "zone"
 _RESET_SERVICE_FLAG = "_reset_service_registered"
+_REGISTERED_SERVICES_FLAG = "_registered_services"
 _LOGIN_RETRY_DELAY = 5.0
 _MAX_IMMEDIATE_STARTUP_RETRIES = 2
 _LOCAL_BLE_REFRESH_INTERVAL_SECONDS = 60
@@ -322,8 +323,34 @@ def _async_register_services(hass: HomeAssistant) -> None:
     """Register SecureMTR domain services once per Home Assistant instance."""
 
     domain_data = hass.data.setdefault(DOMAIN, {})
-    if domain_data.get(_RESET_SERVICE_FLAG):
-        return
+
+    registered_raw = domain_data.get(_REGISTERED_SERVICES_FLAG)
+    if isinstance(registered_raw, set):
+        registered_services = set(registered_raw)
+    elif isinstance(registered_raw, (list, tuple)):
+        registered_services = {str(item) for item in registered_raw}
+    else:
+        registered_services: set[str] = set()
+
+    def _service_exists(service_name: str) -> bool:
+        """Return whether a service is already registered for this domain."""
+
+        has_service = getattr(hass.services, "has_service", None)
+        if callable(has_service):
+            with suppress(Exception):
+                return bool(has_service(DOMAIN, service_name))
+
+        handlers = getattr(hass.services, "handlers", None)
+        if isinstance(handlers, dict):
+            return (DOMAIN, service_name) in handlers
+
+        return False
+
+    if (
+        domain_data.get(_RESET_SERVICE_FLAG)
+        and _service_exists(SERVICE_RESET_ENERGY)
+    ):
+        registered_services.add(SERVICE_RESET_ENERGY)
 
     reset_schema = vol.Schema(
         {
@@ -545,31 +572,35 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         await _async_handle_set_weekly_schedule(call, zone="boost")
 
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RESET_ENERGY,
-        _async_handle_reset,
-        schema=reset_schema,
+    service_specs: tuple[tuple[str, Callable[..., Any], vol.Schema], ...] = (
+        (SERVICE_RESET_ENERGY, _async_handle_reset, reset_schema),
+        (SERVICE_START_TIMED_BOOST, _async_handle_start_timed_boost, start_boost_schema),
+        (
+            SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE,
+            _async_handle_set_primary_weekly_schedule,
+            set_schedule_schema,
+        ),
+        (
+            SERVICE_SET_BOOST_WEEKLY_SCHEDULE,
+            _async_handle_set_boost_weekly_schedule,
+            set_schedule_schema,
+        ),
     )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_START_TIMED_BOOST,
-        _async_handle_start_timed_boost,
-        schema=start_boost_schema,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE,
-        _async_handle_set_primary_weekly_schedule,
-        schema=set_schedule_schema,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_SET_BOOST_WEEKLY_SCHEDULE,
-        _async_handle_set_boost_weekly_schedule,
-        schema=set_schedule_schema,
-    )
-    domain_data[_RESET_SERVICE_FLAG] = True
+
+    for service_name, handler, schema in service_specs:
+        if service_name in registered_services or _service_exists(service_name):
+            registered_services.add(service_name)
+            continue
+        hass.services.async_register(
+            DOMAIN,
+            service_name,
+            handler,
+            schema=schema,
+        )
+        registered_services.add(service_name)
+
+    domain_data[_REGISTERED_SERVICES_FLAG] = registered_services
+    domain_data[_RESET_SERVICE_FLAG] = SERVICE_RESET_ENERGY in registered_services
 
 
 async def _async_ensure_utility_meters(hass: HomeAssistant, entry: ConfigEntry) -> None:

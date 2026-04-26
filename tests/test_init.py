@@ -4119,6 +4119,26 @@ async def test_reset_service_validates_runtime(monkeypatch: pytest.MonkeyPatch) 
     assert dispatch_calls[-1] == (hass, "entry")
 
 
+def test_register_services_backfills_new_actions_from_legacy_marker() -> None:
+    """Ensure legacy service marker does not block new service registration."""
+
+    hass = FakeHass()
+
+    async def _legacy_reset(_call: Any) -> None:
+        return None
+
+    hass.services.async_register(DOMAIN, SERVICE_RESET_ENERGY, _legacy_reset)
+    hass.data[DOMAIN] = {"_reset_service_registered": True}
+
+    _async_register_services(hass)
+
+    assert (DOMAIN, SERVICE_RESET_ENERGY) in hass.services.handlers
+    assert (DOMAIN, SERVICE_START_TIMED_BOOST) in hass.services.handlers
+    assert (DOMAIN, SERVICE_SET_PRIMARY_WEEKLY_SCHEDULE) in hass.services.handlers
+    assert (DOMAIN, SERVICE_SET_BOOST_WEEKLY_SCHEDULE) in hass.services.handlers
+    assert hass.services.handlers[(DOMAIN, SERVICE_RESET_ENERGY)][0] is _legacy_reset
+
+
 @pytest.mark.asyncio
 async def test_async_ensure_utility_meters_requires_helper_methods() -> None:
     """Skip helper creation when config_entries lacks required APIs."""
