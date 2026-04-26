@@ -27,6 +27,7 @@ from custom_components.securemtr.local_ble_commissioning import (
     _command_to_rpc_payload,
     _parse_consumption_day_rows,
     _parse_consumption_state,
+    _parse_local_ble_alarms,
     _parse_local_weekly_program,
     _extract_length_prefixed_payload,
     _parse_local_ble_snapshot,
@@ -204,6 +205,51 @@ def test_parse_local_ble_snapshot_marks_scheduled_hot_water_not_boost() -> None:
     snapshot = _parse_local_ble_snapshot(response)
 
     assert snapshot.timed_boost_active is False
+
+
+def test_parse_local_ble_alarms_maps_active_states() -> None:
+    """Ensure GetAllBBAlarm parsing maps known alarms and active semantics."""
+
+    response = {
+        "V": [
+            {
+                "I": 1,
+                "V": [
+                    {"ALI": 8, "OR": 1, "TS": 1712000000},
+                    {"ALI": 9, "OR": 0, "TS": 1712000100},
+                    {"ALI": 10, "OR": 1, "TS": 4},
+                ],
+            },
+            {
+                "I": 2,
+                "V": [
+                    {"ALI": 8, "OR": 1, "TS": 1712000200},
+                    {"ALI": 11, "OR": 1, "TS": 1712000300},
+                    {"ALI": 12, "OR": 1, "TS": 1712000400},
+                ],
+            },
+        ]
+    }
+
+    alarms = _parse_local_ble_alarms(response)
+
+    assert alarms is not None
+    assert alarms["low_battery_ext_temp_sensor"]["active"] is True
+    assert alarms["low_battery_ext_temp_sensor"]["active_count"] == 2
+    assert alarms["low_battery_ext_temp_sensor"]["channels"] == [1, 2]
+    assert alarms["low_battery_ext_temp_sensor"]["latest_raw_value"] == pytest.approx(
+        1712000200.0
+    )
+    assert alarms["han_comms_state"]["active"] is True
+    assert alarms["service_clock_expired"]["latest_raw_value"] == pytest.approx(4.0)
+    assert alarms["over_current"]["active"] is True
+    assert alarms["switch_weld"]["active"] is True
+
+
+def test_parse_local_ble_alarms_ignores_unknown_payload() -> None:
+    """Ensure alarm parsing rejects non-list payload wrappers."""
+
+    assert _parse_local_ble_alarms({"V": "invalid"}) is None
 
 
 def test_parse_consumption_state_maps_duration_hours() -> None:
@@ -459,6 +505,17 @@ async def test_async_read_ble_snapshot_once_reads_consumption_state(
                         {"SI": 36, "I": 5, "V": []},
                     ]
                 }
+            if kwargs["handler_id"] == 5 and kwargs["service_id"] == 1:
+                return {
+                    "V": [
+                        {
+                            "I": 1,
+                            "V": [
+                                {"ALI": 9, "OR": 0, "TS": 1712000100},
+                            ],
+                        }
+                    ]
+                }
             return [
                 {
                     "I": 5,
@@ -518,15 +575,19 @@ async def test_async_read_ble_snapshot_once_reads_consumption_state(
     requests = rpc_instances[0].requests
     assert requests[0]["handler_id"] == 3
     assert requests[0]["service_id"] == 1
-    assert requests[1]["handler_id"] == 9
-    assert requests[1]["service_id"] == 36
-    assert requests[1]["args"] == [1]
+    assert requests[1]["handler_id"] == 5
+    assert requests[1]["service_id"] == 1
+    assert requests[2]["handler_id"] == 9
+    assert requests[2]["service_id"] == 36
+    assert requests[2]["args"] == [1]
     assert snapshot.statistics_recent is not None
     assert snapshot.statistics_recent["primary"]["runtime_hours"] == pytest.approx(1.0)
     assert snapshot.primary_energy_kwh == pytest.approx(1.234)
     assert snapshot.boost_energy_kwh == pytest.approx(0.567)
     assert snapshot.consumption_days is not None
     assert snapshot.consumption_days[0]["primary_energy_kwh"] == pytest.approx(1.234)
+    assert snapshot.alarms_state is not None
+    assert snapshot.alarms_state["han_comms_state"]["active"] is True
     disconnect.assert_awaited_once_with(fake_client)
 
 

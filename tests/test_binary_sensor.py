@@ -11,6 +11,7 @@ from custom_components.securemtr import (
     SecuremtrRuntimeData,
 )
 from custom_components.securemtr.binary_sensor import (
+    SecuremtrAlarmBinarySensor,
     SecuremtrBoostActiveBinarySensor,
     async_setup_entry,
 )
@@ -160,3 +161,55 @@ async def test_binary_sensor_async_added_to_hass_without_hass() -> None:
     sensor = SecuremtrBoostActiveBinarySensor(runtime, runtime.controller, entry)
     sensor.hass = None
     await sensor.async_added_to_hass()
+
+
+@pytest.mark.asyncio
+async def test_binary_sensor_setup_local_mode_includes_alarms() -> None:
+    """Ensure local BLE mode exposes per-alarm binary sensors."""
+
+    runtime = _create_runtime()
+    runtime.connection_mode = "local_ble"
+    runtime.alarms_state = {
+        "han_comms_state": {
+            "alarm_id": 9,
+            "active": True,
+            "active_count": 1,
+            "channels": [1],
+            "latest_raw_value": 1_712_000_100.0,
+        },
+        "service_clock_expired": {
+            "alarm_id": 10,
+            "active": True,
+            "active_count": 1,
+            "channels": [1],
+            "latest_raw_value": 4.0,
+        },
+    }
+    hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
+    entry = create_config_entry(entry_id="entry")
+    entities: list[BinarySensorEntity] = []
+
+    await async_setup_entry(hass, entry, entities.extend)
+
+    assert len(entities) == 6
+    alarms = [entity for entity in entities if isinstance(entity, SecuremtrAlarmBinarySensor)]
+    assert len(alarms) == 5
+
+    by_unique_id = {entity.unique_id: entity for entity in alarms}
+
+    han_alarm = by_unique_id["serial_1_alarm_han_comms_state"]
+    assert han_alarm.is_on is True
+    han_attrs = han_alarm.extra_state_attributes
+    assert han_attrs is not None
+    assert han_attrs["alarm_id"] == 9
+    assert han_attrs["active_count"] == 1
+    assert han_attrs["channels"] == [1]
+    assert han_attrs["last_event_utc"].startswith("2024")
+
+    service_clock_alarm = by_unique_id["serial_1_alarm_service_clock_expired"]
+    service_clock_attrs = service_clock_alarm.extra_state_attributes
+    assert service_clock_attrs is not None
+    assert service_clock_attrs["days_remaining"] == 4
+
+    unknown_alarm = by_unique_id["serial_1_alarm_over_current"]
+    assert unknown_alarm.is_on is False

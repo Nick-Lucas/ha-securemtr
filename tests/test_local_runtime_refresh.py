@@ -60,14 +60,20 @@ async def test_refresh_entry_state_routes_local_mode(
     hass = SimpleNamespace(data={DOMAIN: {entry.entry_id: runtime}})
 
     local_refresh = AsyncMock()
+    weekly_refresh = AsyncMock()
     monkeypatch.setattr(
         "custom_components.securemtr._async_refresh_local_ble_runtime",
         local_refresh,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_refresh_weekly_program_cache",
+        weekly_refresh,
     )
 
     await async_refresh_entry_state(hass, entry)
 
     local_refresh.assert_awaited_once_with(hass, entry)
+    weekly_refresh.assert_awaited_once_with(hass, entry)
 
 
 @pytest.mark.asyncio
@@ -110,6 +116,15 @@ async def test_local_ble_refresh_updates_runtime_and_energy(
         timed_boost_active=False,
         primary_energy_kwh=12.0,
         boost_energy_kwh=3.5,
+        alarms_state={
+            "han_comms_state": {
+                "alarm_id": 9,
+                "active": True,
+                "active_count": 1,
+                "channels": [1],
+                "latest_raw_value": 1712000100.0,
+            }
+        },
         statistics_recent={
             "primary": {
                 "report_day": "2026-04-14",
@@ -150,6 +165,8 @@ async def test_local_ble_refresh_updates_runtime_and_energy(
     assert runtime.statistics_recent["boost"]["scheduled_hours"] == pytest.approx(1.0)
     assert runtime.statistics_recent["primary"]["energy_sum"] == pytest.approx(12.0)
     assert runtime.statistics_recent["boost"]["energy_sum"] == pytest.approx(3.5)
+    assert runtime.alarms_state is not None
+    assert runtime.alarms_state["han_comms_state"]["active"] is True
     assert dispatch_calls == [(hass, entry.entry_id)]
 
 

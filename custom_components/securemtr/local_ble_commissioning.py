@@ -16,7 +16,6 @@ import time
 from typing import Any, TYPE_CHECKING
 from uuid import UUID
 
-#
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -62,6 +61,7 @@ SERVICE_ID_DYNAMIC_TARIFF = 36
 HANDLER_WRITE_DATA = 2
 HANDLER_SET_TIME = 2
 HANDLER_GET_ALL_SERVICE_VALUES = 3
+HANDLER_GET_ALL_BB_ALARM = 5
 HANDLER_GET_CONSUMPTION_STATE = 9
 HANDLER_SET_TIMEZONE_ID = 7
 HANDLER_SET_OWNER_IN_RECEIVER = 7
@@ -89,6 +89,20 @@ BLE_DEBUG_PAYLOAD_MAX_CHARS = 4000
 BLE_ACK_SUCCESS = 0
 BLE_ACK_INVALID_MESSAGE = 1
 BLE_ACK_KEY_MISMATCH = 2
+
+ALARM_ID_LOW_BATTERY_EXT_TEMP_SENSOR = 8
+ALARM_ID_HAN_COMMS_STATE = 9
+ALARM_ID_SERVICE_CLOCK_EXP = 10
+ALARM_ID_OVER_CURRENT = 11
+ALARM_ID_SWITCH_WELD = 12
+
+ALARM_KEY_BY_ID: dict[int, str] = {
+    ALARM_ID_LOW_BATTERY_EXT_TEMP_SENSOR: "low_battery_ext_temp_sensor",
+    ALARM_ID_HAN_COMMS_STATE: "han_comms_state",
+    ALARM_ID_SERVICE_CLOCK_EXP: "service_clock_expired",
+    ALARM_ID_OVER_CURRENT: "over_current",
+    ALARM_ID_SWITCH_WELD: "switch_weld",
+}
 
 DEFAULT_OWNER_EMAIL = "homeassistant@local"
 
@@ -229,6 +243,7 @@ class LocalBleSnapshot:
     consumption_days: list[dict[str, Any]] | None = None
     statistics_recent: dict[str, dict[str, Any]] | None = None
     schedule_zone_bois: dict[str, int] | None = None
+    alarms_state: dict[str, dict[str, Any]] | None = None
 
 
 class _BleUartRpcClient:
@@ -1520,6 +1535,101 @@ def _parse_consumption_state(response: Any) -> dict[str, dict[str, Any]] | None:
     return parsed
 
 
+def _alarm_is_active(alarm_id: int, alarm_status: int | None) -> bool:
+    """Return whether an alarm entry should be treated as active."""
+
+    if alarm_status is None:
+        return False
+    if alarm_id == ALARM_ID_HAN_COMMS_STATE:
+        return alarm_status == 0
+    return alarm_status == 1
+
+
+def _parse_local_ble_alarms(response: Any) -> dict[str, dict[str, Any]] | None:
+    """Parse GetAllBBAlarm payload into per-alarm active state."""
+
+    payload = response
+    if isinstance(payload, dict):
+        values = payload.get("V")
+        if isinstance(values, list):
+            payload = values
+
+    if not isinstance(payload, list):
+        _LOGGER.debug(
+            "GetAllBBAlarm payload is not a list: %s",
+            _format_debug_payload(response),
+        )
+        return None
+
+    parsed_state: dict[str, dict[str, Any]] = {
+        alarm_key: {
+            "alarm_id": alarm_id,
+            "active": False,
+            "active_count": 0,
+            "channels": [],
+            "latest_raw_value": None,
+        }
+        for alarm_id, alarm_key in ALARM_KEY_BY_ID.items()
+    }
+
+    for service_entry in payload:
+        if not isinstance(service_entry, dict):
+            continue
+
+        channel_value = _extract_numeric_value(service_entry, "I")
+        channel_number = int(channel_value) if channel_value is not None else None
+
+        alarm_rows = service_entry.get("V")
+        if not isinstance(alarm_rows, list):
+            continue
+
+        for alarm_row in alarm_rows:
+            if not isinstance(alarm_row, dict):
+                continue
+
+            alarm_id_value = _extract_numeric_value(alarm_row, "ALI")
+            if alarm_id_value is None:
+                continue
+
+            alarm_id = int(alarm_id_value)
+            alarm_key = ALARM_KEY_BY_ID.get(alarm_id)
+            if alarm_key is None:
+                continue
+
+            alarm_status_value = _extract_numeric_value(alarm_row, "OR")
+            alarm_status = (
+                int(alarm_status_value) if alarm_status_value is not None else None
+            )
+            if not _alarm_is_active(alarm_id, alarm_status):
+                continue
+
+            alarm_state = parsed_state[alarm_key]
+            alarm_state["active"] = True
+            alarm_state["active_count"] = int(alarm_state["active_count"]) + 1
+
+            if channel_number is not None:
+                channels = alarm_state["channels"]
+                if isinstance(channels, list) and channel_number not in channels:
+                    channels.append(channel_number)
+
+            raw_value = _extract_numeric_value(alarm_row, "TS")
+            if raw_value is not None:
+                latest_raw = alarm_state.get("latest_raw_value")
+                if not isinstance(latest_raw, (int, float)) or raw_value > latest_raw:
+                    alarm_state["latest_raw_value"] = float(raw_value)
+
+    for alarm_state in parsed_state.values():
+        channels = alarm_state.get("channels")
+        if isinstance(channels, list):
+            channels.sort()
+
+    _LOGGER.debug(
+        "Parsed local BLE alarms: %s",
+        _format_debug_payload(parsed_state),
+    )
+    return parsed_state
+
+
 def _parse_local_ble_snapshot(response: Any) -> LocalBleSnapshot:
     """Parse GetAllServiceValues payload into local runtime fields."""
 
@@ -1787,6 +1897,26 @@ async def _async_read_ble_snapshot_once(
             _format_debug_payload(response),
         )
         snapshot = _parse_local_ble_snapshot(response)
+
+        try:
+            alarms_response = await rpc_client.async_rpc_request(
+                gateway_mac_id=gateway_mac_id,
+                handler_id=HANDLER_GET_ALL_BB_ALARM,
+                service_id=SERVICE_ID_BBSERVER,
+                args=None,
+            )
+            _LOGGER.debug(
+                "GetAllBBAlarm raw payload for %s: %s",
+                ble_address,
+                _format_debug_payload(alarms_response),
+            )
+            snapshot.alarms_state = _parse_local_ble_alarms(alarms_response)
+        except LocalBleCommissioningError as error:
+            _LOGGER.debug(
+                "Failed to read local BLE alarms for %s: %s",
+                ble_address,
+                error,
+            )
 
         dynamic_tariff_boi = _find_service_boi(
             response,

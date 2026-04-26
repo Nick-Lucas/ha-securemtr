@@ -228,3 +228,9 @@ custom_components.securemtr.local_ble_commissioning._async_read_ble_snapshot_onc
 custom_components.securemtr.local_ble_commissioning._parse_local_weekly_program: Parse one weekly program payload from local BLE RPC format.
 custom_components.securemtr.local_ble_commissioning.async_read_local_weekly_programs: Read primary and boost weekly schedules from local BLE RPC.
 custom_components.securemtr.local_ble_commissioning._async_read_ble_weekly_programs_once: Connect once and read both weekly programs from local BLE RPC.
+custom_components.securemtr.local_ble_commissioning._alarm_is_active: Return whether an alarm entry should be treated as active.
+custom_components.securemtr.local_ble_commissioning._parse_local_ble_alarms: Parse GetAllBBAlarm payload into per-alarm active state.
+custom_components.securemtr.binary_sensor._coerce_alarm_timestamp: Coerce an alarm timestamp value into an aware UTC datetime.
+custom_components.securemtr.binary_sensor.SecuremtrAlarmBinarySensor: Expose one local BLE alarm state as a binary sensor.
+custom_components.securemtr.binary_sensor.SecuremtrAlarmBinarySensor.is_on: Return whether this alarm is currently active.
+custom_components.securemtr.binary_sensor.SecuremtrAlarmBinarySensor.extra_state_attributes: Return additional alarm metadata from the last BLE snapshot.

@@ -902,6 +902,7 @@ class SecuremtrRuntimeData:
     energy_state: dict[str, Any] | None = None
     energy_accumulator: EnergyAccumulator | None = None
     statistics_recent: dict[str, Any] | None = None
+    alarms_state: dict[str, Any] | None = None
     schedule_zone_bois: dict[str, int] | None = None
     weekly_programs: dict[str, WeeklyProgram | None] | None = None
     weekly_canonicals: dict[str, list[tuple[int, int]] | None] | None = None
@@ -2177,7 +2178,7 @@ async def _async_refresh_local_ble_runtime(
             return
 
     _LOGGER.debug(
-        "Local BLE snapshot for %s: primary_power_on=%s timed_boost_enabled=%s timed_boost_active=%s boost_duration=%s primary_energy_kwh=%s boost_energy_kwh=%s has_consumption_days=%s has_statistics_recent=%s",
+        "Local BLE snapshot for %s: primary_power_on=%s timed_boost_enabled=%s timed_boost_active=%s boost_duration=%s primary_energy_kwh=%s boost_energy_kwh=%s has_consumption_days=%s has_statistics_recent=%s has_alarms_state=%s",
         entry_identifier,
         snapshot.primary_power_on,
         snapshot.timed_boost_enabled,
@@ -2187,6 +2188,7 @@ async def _async_refresh_local_ble_runtime(
         snapshot.boost_energy_kwh,
         isinstance(snapshot.consumption_days, list),
         isinstance(snapshot.statistics_recent, dict),
+        isinstance(snapshot.alarms_state, dict),
     )
 
     changed = False
@@ -2263,6 +2265,10 @@ async def _async_refresh_local_ble_runtime(
         and runtime.schedule_zone_bois != snapshot.schedule_zone_bois
     ):
         runtime.schedule_zone_bois = dict(snapshot.schedule_zone_bois)
+        changed = True
+
+    if isinstance(snapshot.alarms_state, dict) and runtime.alarms_state != snapshot.alarms_state:
+        runtime.alarms_state = dict(snapshot.alarms_state)
         changed = True
 
     if changed:
