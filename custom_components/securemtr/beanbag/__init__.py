@@ -1019,16 +1019,8 @@ class BeanbagBackend:
                 )
 
             if state == 1:
-                if len(on_minutes) >= 3:
-                    raise BeanbagWebSocketError(
-                        "Beanbag weekly program reported more than 3 on transitions"
-                    )
                 on_minutes.append(minute)
             elif state == 0:
-                if len(off_minutes) >= 3:
-                    raise BeanbagWebSocketError(
-                        "Beanbag weekly program reported more than 3 off transitions"
-                    )
                 off_minutes.append(minute)
             else:
                 raise BeanbagWebSocketError(
