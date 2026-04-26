@@ -3847,6 +3847,21 @@ async def test_set_weekly_schedule_services_validate_fifteen_minute_intervals() 
     assert backend.write_program_calls == []
 
 
+@pytest.mark.asyncio
+async def test_service_calls_require_entry_id() -> None:
+    """Ensure services fail fast when entry_id is missing."""
+
+    hass = FakeHass()
+    await async_setup(hass, {})
+
+    with pytest.raises(HomeAssistantError, match="entry_id is required"):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_START_TIMED_BOOST,
+            {ATTR_DURATION_MINUTES: 30},
+        )
+
+
 def test_load_statistics_options_prefers_hass_timezone() -> None:
     """Ensure statistics options honour the Home Assistant timezone."""
 

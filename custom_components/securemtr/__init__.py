@@ -354,13 +354,13 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
     reset_schema = vol.Schema(
         {
-            vol.Required(ATTR_ENTRY_ID): str,
+            vol.Optional(ATTR_ENTRY_ID): str,
             vol.Optional(ATTR_ZONE, default=ZONE_KEYS[0]): vol.In(ZONE_KEYS),
         }
     )
     start_boost_schema = vol.Schema(
         {
-            vol.Required(ATTR_ENTRY_ID): str,
+            vol.Optional(ATTR_ENTRY_ID): str,
             vol.Required(ATTR_DURATION_MINUTES): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=24 * 60)
             ),
@@ -368,13 +368,26 @@ def _async_register_services(hass: HomeAssistant) -> None:
     )
     set_schedule_schema = vol.Schema(
         {
-            vol.Required(ATTR_ENTRY_ID): str,
+            vol.Optional(ATTR_ENTRY_ID): str,
             vol.Required(ATTR_SCHEDULE): dict,
         }
     )
 
-    def _resolve_loaded_entry(entry_id: str) -> tuple[Any, SecuremtrRuntimeData]:
-        """Resolve a loaded config entry and runtime pair for service calls."""
+    def _resolve_loaded_entry(
+        call: ServiceCall,
+        *,
+        require_config_entry: bool = True,
+    ) -> tuple[str, Any | None, SecuremtrRuntimeData]:
+        """Resolve entry_id + runtime from explicit entry_id."""
+
+        entry_id_raw = call.data.get(ATTR_ENTRY_ID)
+
+        entry_id: str | None = None
+        if isinstance(entry_id_raw, str) and entry_id_raw.strip():
+            entry_id = entry_id_raw.strip()
+
+        if entry_id is None:
+            raise HomeAssistantError("entry_id is required for SecureMTR actions")
 
         domain_state = hass.data.get(DOMAIN, {})
         runtime: SecuremtrRuntimeData | None = domain_state.get(entry_id)
@@ -384,23 +397,20 @@ def _async_register_services(hass: HomeAssistant) -> None:
             )
 
         entry = runtime.config_entry
-        if entry is None or not hasattr(entry, "data"):
+        if require_config_entry and (entry is None or not hasattr(entry, "data")):
             raise HomeAssistantError(
                 f"SecureMTR entry {entry_id} config metadata is unavailable"
             )
-        return entry, runtime
+        return entry_id, entry, runtime
 
     async def _async_handle_reset(call: ServiceCall) -> None:
         """Reset the cumulative energy state for a config entry zone."""
 
-        entry_id: str = call.data[ATTR_ENTRY_ID]
+        entry_id, _entry, runtime = _resolve_loaded_entry(
+            call,
+            require_config_entry=False,
+        )
         zone: str = call.data[ATTR_ZONE]
-        domain_state = hass.data.get(DOMAIN, {})
-        runtime: SecuremtrRuntimeData | None = domain_state.get(entry_id)
-        if runtime is None:
-            raise HomeAssistantError(
-                f"SecureMTR entry {entry_id} is not loaded; cannot reset energy"
-            )
 
         accumulator = runtime.energy_accumulator
         if accumulator is None:
@@ -422,9 +432,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def _async_handle_start_timed_boost(call: ServiceCall) -> None:
         """Start a timed boost for an arbitrary duration in minutes."""
 
-        entry_id: str = call.data[ATTR_ENTRY_ID]
+        entry_id, entry, runtime = _resolve_loaded_entry(call)
         duration_minutes: int = call.data[ATTR_DURATION_MINUTES]
-        entry, runtime = _resolve_loaded_entry(entry_id)
         controller = runtime.controller
         if controller is None:
             raise HomeAssistantError("Secure Meters controller is not connected")
@@ -494,9 +503,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
     ) -> None:
         """Persist a weekly schedule update for one zone."""
 
-        entry_id: str = call.data[ATTR_ENTRY_ID]
+        entry_id, entry, runtime = _resolve_loaded_entry(call)
         schedule_payload = call.data[ATTR_SCHEDULE]
-        entry, runtime = _resolve_loaded_entry(entry_id)
         controller = runtime.controller
         if controller is None:
             raise HomeAssistantError("Secure Meters controller is not connected")

@@ -4,11 +4,12 @@ reset_energy_accumulator:
   fields:
     entry_id:
       name: Entry ID
-      description: Config entry ID of the SecureMTR controller to reset.
+      description: SecureMTR integration entry to reset.
       example: 1234567890abcdef1234567890abcdef
       required: true
       selector:
-        text:
+        config_entry:
+          integration: securemtr
     zone:
       name: Zone
       description: SecureMTR zone to reset. Defaults to the primary zone.
@@ -26,11 +27,12 @@ start_timed_boost:
   fields:
     entry_id:
       name: Entry ID
-      description: Config entry ID of the SecureMTR controller to control.
+      description: SecureMTR integration entry to control.
       example: 1234567890abcdef1234567890abcdef
       required: true
       selector:
-        text:
+        config_entry:
+          integration: securemtr
     duration_minutes:
       name: Duration (minutes)
       description: Boost duration in minutes (1-1440).
@@ -49,11 +51,12 @@ set_primary_weekly_schedule:
   fields:
     entry_id:
       name: Entry ID
-      description: Config entry ID of the SecureMTR controller to control.
+      description: SecureMTR integration entry to control.
       example: 1234567890abcdef1234567890abcdef
       required: true
       selector:
-        text:
+        config_entry:
+          integration: securemtr
     schedule:
       name: Weekly schedule payload
       description: >-
@@ -69,11 +72,12 @@ set_boost_weekly_schedule:
   fields:
     entry_id:
       name: Entry ID
-      description: Config entry ID of the SecureMTR controller to control.
+      description: SecureMTR integration entry to control.
       example: 1234567890abcdef1234567890abcdef
       required: true
       selector:
-        text:
+        config_entry:
+          integration: securemtr
     schedule:
       name: Weekly schedule payload
       description: >-
