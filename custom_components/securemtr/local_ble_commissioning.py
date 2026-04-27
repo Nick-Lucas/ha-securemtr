@@ -699,12 +699,27 @@ class LocalBleWorker:
         if self._worker_task is not None and not self._worker_task.done():
             return
 
+        task_name = (
+            f"securemtr_local_ble_worker_{self._ble_address.lower().replace(':', '')}"
+        )
+        create_background_task = getattr(self._hass, "async_create_background_task", None)
+        if callable(create_background_task):
+            self._worker_task = create_background_task(self._async_worker(), task_name)
+            _LOGGER.debug(
+                "Started local BLE worker task for %s using Home Assistant background task API",
+                self._ble_address,
+            )
+            return
+
         create_task = getattr(self._hass, "async_create_task", None)
         if callable(create_task):
             self._worker_task = create_task(self._async_worker())
         else:
-            self._worker_task = asyncio.create_task(self._async_worker())
-        _LOGGER.debug("Started local BLE worker task for %s", self._ble_address)
+            self._worker_task = asyncio.create_task(self._async_worker(), name=task_name)
+        _LOGGER.debug(
+            "Started local BLE worker task for %s using fallback task API",
+            self._ble_address,
+        )
 
     async def _async_worker(self) -> None:
         """Process queued jobs while keeping a reusable BLE session open."""
