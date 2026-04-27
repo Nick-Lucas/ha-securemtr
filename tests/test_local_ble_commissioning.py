@@ -760,6 +760,49 @@ async def test_async_rpc_request_ignores_mismatched_response_ids(
 
 
 @pytest.mark.asyncio
+async def test_async_rpc_request_ignores_malformed_payload_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure RPC request ignores one malformed payload and keeps waiting."""
+
+    rpc_client = _BleUartRpcClient(SimpleNamespace())
+    monkeypatch.setattr(rpc_client, "_async_send_payload", AsyncMock())
+    reset_state = Mock()
+    monkeypatch.setattr(rpc_client, "_reset_response_state", reset_state)
+    monkeypatch.setattr(
+        rpc_client,
+        "_async_wait_for_response_payload",
+        AsyncMock(
+            side_effect=[
+                LocalBleCommissioningError(
+                    "Encrypted BLE payload length is not a 16-byte multiple"
+                ),
+                b'{"I":"123-456","R":0}',
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning.random.randint",
+        lambda _a, _b: 456,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning.time.time",
+        lambda: 123,
+    )
+
+    result = await rpc_client.async_rpc_request(
+        gateway_mac_id="12345",
+        handler_id=1,
+        service_id=2,
+        args=None,
+    )
+
+    assert result == 0
+    assert rpc_client._async_wait_for_response_payload.await_count == 2
+    reset_state.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_async_initialize_recovers_notify_already_acquired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

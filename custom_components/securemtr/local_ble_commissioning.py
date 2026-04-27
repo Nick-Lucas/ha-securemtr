@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import IntEnum
 import json
 import logging
 import math
@@ -16,7 +17,6 @@ import time
 from typing import Any, TYPE_CHECKING
 from uuid import UUID
 
-#
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -47,7 +47,7 @@ PACKET_SIZE = 19
 FINAL_PACKET_INDEX = 255
 BLE_DISCOVERY_TIMEOUT_SECONDS = 20.0
 BLE_CONNECT_TIMEOUT_SECONDS = 15.0
-BLE_REQUEST_TIMEOUT_SECONDS = 15.0
+BLE_REQUEST_TIMEOUT_SECONDS = 30.0
 
 SERVICE_ID_HAN_MANAGEMENT = 11
 SERVICE_ID_BBSERVER = 1
@@ -85,6 +85,8 @@ BLE_COMMAND_RETRY_LIMIT = 2
 BLE_COMMAND_RETRY_DELAY_SECONDS = 2.0
 BLE_NOTIFY_RECOVERY_DELAY_SECONDS = 0.25
 BLE_DEBUG_PAYLOAD_MAX_CHARS = 4000
+BLE_SESSION_IDLE_TIMEOUT_SECONDS = 30.0
+BLE_RESPONSE_TIMEOUT_MESSAGE = "Timed out waiting for BLE response"
 
 BLE_ACK_SUCCESS = 0
 BLE_ACK_INVALID_MESSAGE = 1
@@ -231,6 +233,622 @@ class LocalBleSnapshot:
     schedule_zone_bois: dict[str, int] | None = None
 
 
+class LocalBlePriority(IntEnum):
+    """Represent local BLE worker queue priorities."""
+
+    USER_COMMAND = 0
+    SCHEDULE_WRITE = 1
+    USER_READ = 5
+    SCHEDULE_READ = 6
+    BACKGROUND_REFRESH = 10
+
+
+@dataclass(slots=True)
+class _LocalBleQueuedJob:
+    """Store metadata for one queued local BLE worker job."""
+
+    priority: int
+    order: int
+    name: str
+    coalesce_key: str | None
+    operation: Callable[[], Awaitable[Any]]
+    future: asyncio.Future[Any]
+
+
+class LocalBleWorker:
+    """Queue and execute local BLE operations on one reusable session."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        *,
+        mac_address: str,
+        serial_number: str | None,
+        ble_key: str,
+    ) -> None:
+        """Initialize one local BLE worker bound to a gateway identity."""
+
+        self._hass = hass
+        self._mac_address = mac_address.strip().upper()
+        self._ble_address = _format_mac_address(mac_address)
+        self._serial_number = serial_number.strip() if isinstance(serial_number, str) else None
+        if self._serial_number == "":
+            self._serial_number = None
+        self._gateway_mac_id = str(int(self._mac_address, 16))
+        self._ble_key = ble_key
+
+        try:
+            decoded_key = base64.b64decode(ble_key)
+        except Exception as error:
+            raise LocalBleCommissioningError(
+                "Stored BLE key is not valid base64"
+            ) from error
+        if len(decoded_key) != 16:
+            raise LocalBleCommissioningError("Stored BLE key must decode to 16 bytes")
+        self._auth_key = decoded_key
+
+        self._queue: asyncio.PriorityQueue[tuple[int, int, _LocalBleQueuedJob]] = (
+            asyncio.PriorityQueue()
+        )
+        self._coalesced_futures: dict[str, asyncio.Future[Any]] = {}
+        self._submit_lock = asyncio.Lock()
+        self._job_counter = 0
+        self._worker_task: asyncio.Task[Any] | None = None
+        self._closing = False
+
+        self._client: Any | None = None
+        self._rpc_client: _BleUartRpcClient | None = None
+        self._mode_hot_water_service_bois: tuple[int, int] | None = None
+        self._schedule_zone_bois: dict[str, int] | None = None
+
+    def matches(
+        self,
+        *,
+        mac_address: str,
+        serial_number: str | None,
+        ble_key: str,
+    ) -> bool:
+        """Return whether this worker still matches entry connection settings."""
+
+        serial = serial_number.strip() if isinstance(serial_number, str) else None
+        if serial == "":
+            serial = None
+        return (
+            mac_address.strip().upper() == self._mac_address
+            and serial == self._serial_number
+            and ble_key == self._ble_key
+        )
+
+    async def async_close(self) -> None:
+        """Stop the queue worker and close any open BLE session."""
+
+        self._closing = True
+
+        if self._worker_task is not None and not self._worker_task.done():
+            self._worker_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._worker_task
+        self._worker_task = None
+
+        await self._async_clear_queued_jobs()
+        await self._async_disconnect_session()
+
+    async def async_execute_local_command(
+        self,
+        *,
+        method_name: str,
+        operation_kwargs: dict[str, Any],
+        priority: LocalBlePriority | int = LocalBlePriority.USER_COMMAND,
+        coalesce_key: str | None = None,
+    ) -> Any:
+        """Queue and execute one local BLE command with retries."""
+
+        async def _operation() -> Any:
+            """Execute one queued local BLE command operation."""
+
+            last_error: LocalBleCommissioningError | None = None
+            for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+                try:
+                    return await self._async_execute_command_once(
+                        method_name=method_name,
+                        operation_kwargs=operation_kwargs,
+                    )
+                except LocalBleCommissioningError as error:
+                    last_error = error
+                    self._invalidate_service_cache()
+                    await self._async_disconnect_session()
+                    if attempt < BLE_COMMAND_RETRY_LIMIT:
+                        _LOGGER.warning(
+                            "BLE command %s failed (attempt %s/%s): %s, retrying",
+                            method_name,
+                            attempt + 1,
+                            BLE_COMMAND_RETRY_LIMIT + 1,
+                            error,
+                        )
+                        await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
+                    else:
+                        raise
+
+            if last_error is None:
+                raise LocalBleCommissioningError(
+                    f"BLE command {method_name} failed unexpectedly"
+                )
+            raise last_error
+
+        return await self.async_submit(
+            priority=priority,
+            job_name=f"command:{method_name}",
+            operation=_operation,
+            coalesce_key=coalesce_key,
+        )
+
+    async def async_read_local_snapshot(
+        self,
+        *,
+        priority: LocalBlePriority | int = LocalBlePriority.USER_READ,
+        coalesce_key: str | None = None,
+    ) -> LocalBleSnapshot:
+        """Queue and execute one local BLE snapshot read operation."""
+
+        async def _operation() -> LocalBleSnapshot:
+            """Execute one queued local BLE snapshot read operation."""
+
+            last_error: LocalBleCommissioningError | None = None
+            for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+                try:
+                    return await self._async_read_local_snapshot_once()
+                except LocalBleCommissioningError as error:
+                    last_error = error
+                    self._invalidate_service_cache()
+                    await self._async_disconnect_session()
+                    if attempt < BLE_COMMAND_RETRY_LIMIT:
+                        _LOGGER.warning(
+                            "BLE snapshot read failed (attempt %s/%s): %s, retrying",
+                            attempt + 1,
+                            BLE_COMMAND_RETRY_LIMIT + 1,
+                            error,
+                        )
+                        await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
+                    else:
+                        raise
+
+            if last_error is None:
+                raise LocalBleCommissioningError("BLE snapshot retries exhausted")
+            raise last_error
+
+        result = await self.async_submit(
+            priority=priority,
+            job_name="snapshot:read",
+            operation=_operation,
+            coalesce_key=coalesce_key,
+        )
+        if not isinstance(result, LocalBleSnapshot):
+            raise LocalBleCommissioningError("Local BLE snapshot read returned invalid data")
+        return result
+
+    async def async_read_local_weekly_programs(
+        self,
+        *,
+        zone_bois: Mapping[str, int] | None = None,
+        priority: LocalBlePriority | int = LocalBlePriority.SCHEDULE_READ,
+        coalesce_key: str | None = None,
+    ) -> tuple[
+        dict[str, "WeeklyProgram | None"],
+        dict[str, list[tuple[int, int]] | None],
+    ]:
+        """Queue and execute one local BLE weekly schedule read operation."""
+
+        async def _operation() -> tuple[
+            dict[str, "WeeklyProgram | None"],
+            dict[str, list[tuple[int, int]] | None],
+        ]:
+            """Execute one queued local BLE weekly schedule read operation."""
+
+            last_error: LocalBleCommissioningError | None = None
+            for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+                try:
+                    return await self._async_read_local_weekly_programs_once(
+                        zone_bois=zone_bois,
+                    )
+                except LocalBleCommissioningError as error:
+                    last_error = error
+                    self._invalidate_service_cache()
+                    await self._async_disconnect_session()
+                    if attempt < BLE_COMMAND_RETRY_LIMIT:
+                        _LOGGER.warning(
+                            "BLE weekly schedule read failed (attempt %s/%s): %s, retrying",
+                            attempt + 1,
+                            BLE_COMMAND_RETRY_LIMIT + 1,
+                            error,
+                        )
+                        await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
+                    else:
+                        raise
+
+            if last_error is None:
+                raise LocalBleCommissioningError("BLE weekly schedule retries exhausted")
+            raise last_error
+
+        result = await self.async_submit(
+            priority=priority,
+            job_name="schedule:read",
+            operation=_operation,
+            coalesce_key=coalesce_key,
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise LocalBleCommissioningError(
+                "Local BLE weekly schedule read returned invalid data"
+            )
+        return result
+
+    async def async_write_local_weekly_program(
+        self,
+        *,
+        zone: str,
+        program: "WeeklyProgram",
+        zone_bois: Mapping[str, int] | None = None,
+        priority: LocalBlePriority | int = LocalBlePriority.SCHEDULE_WRITE,
+        coalesce_key: str | None = None,
+    ) -> None:
+        """Queue and execute one local BLE weekly schedule write operation."""
+
+        async def _operation() -> None:
+            """Execute one queued local BLE weekly schedule write operation."""
+
+            last_error: LocalBleCommissioningError | None = None
+            for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+                try:
+                    await self._async_write_local_weekly_program_once(
+                        zone=zone,
+                        program=program,
+                        zone_bois=zone_bois,
+                    )
+                    return
+                except LocalBleCommissioningError as error:
+                    last_error = error
+                    self._invalidate_service_cache()
+                    await self._async_disconnect_session()
+                    if attempt < BLE_COMMAND_RETRY_LIMIT:
+                        _LOGGER.warning(
+                            "BLE weekly schedule write failed (attempt %s/%s): %s, retrying",
+                            attempt + 1,
+                            BLE_COMMAND_RETRY_LIMIT + 1,
+                            error,
+                        )
+                        await asyncio.sleep(BLE_COMMAND_RETRY_DELAY_SECONDS)
+                    else:
+                        raise
+
+            if last_error is None:
+                raise LocalBleCommissioningError(
+                    "BLE weekly schedule write retries exhausted"
+                )
+            raise last_error
+
+        await self.async_submit(
+            priority=priority,
+            job_name=f"schedule:write:{zone}",
+            operation=_operation,
+            coalesce_key=coalesce_key,
+        )
+
+    async def async_submit(
+        self,
+        *,
+        priority: LocalBlePriority | int,
+        job_name: str,
+        operation: Callable[[], Awaitable[Any]],
+        coalesce_key: str | None = None,
+    ) -> Any:
+        """Queue one callable and await its result."""
+
+        if self._closing:
+            raise LocalBleCommissioningError("Local BLE worker is shutting down")
+
+        await self._async_ensure_worker()
+
+        existing_future: asyncio.Future[Any] | None = None
+        queued_future: asyncio.Future[Any] | None = None
+        async with self._submit_lock:
+            if coalesce_key is not None:
+                candidate = self._coalesced_futures.get(coalesce_key)
+                if candidate is not None and not candidate.done():
+                    existing_future = candidate
+
+            if existing_future is None:
+                loop = asyncio.get_running_loop()
+                queued_future = loop.create_future()
+                job = _LocalBleQueuedJob(
+                    priority=int(priority),
+                    order=self._job_counter,
+                    name=job_name,
+                    coalesce_key=coalesce_key,
+                    operation=operation,
+                    future=queued_future,
+                )
+                self._job_counter += 1
+
+                if coalesce_key is not None:
+                    self._coalesced_futures[coalesce_key] = queued_future
+
+                    def _cleanup(done_future: asyncio.Future[Any], *, key: str) -> None:
+                        """Drop finished coalesced futures from the lookup map."""
+
+                        self._remove_coalesced_future(key, done_future)
+
+                    queued_future.add_done_callback(
+                        lambda done_future, key=coalesce_key: _cleanup(
+                            done_future,
+                            key=key,
+                        )
+                    )
+
+                self._queue.put_nowait((job.priority, job.order, job))
+
+        active_future = existing_future if existing_future is not None else queued_future
+        if active_future is None:
+            raise LocalBleCommissioningError("Failed to queue local BLE job")
+        return await asyncio.shield(active_future)
+
+    async def _async_ensure_worker(self) -> None:
+        """Start the background worker task when not running."""
+
+        if self._worker_task is not None and not self._worker_task.done():
+            return
+
+        create_task = getattr(self._hass, "async_create_task", None)
+        if callable(create_task):
+            self._worker_task = create_task(self._async_worker())
+        else:
+            self._worker_task = asyncio.create_task(self._async_worker())
+
+    async def _async_worker(self) -> None:
+        """Process queued jobs while keeping a reusable BLE session open."""
+
+        try:
+            while True:
+                try:
+                    _priority, _order, job = await asyncio.wait_for(
+                        self._queue.get(),
+                        timeout=BLE_SESSION_IDLE_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    await self._async_disconnect_session()
+                    continue
+
+                try:
+                    result = await job.operation()
+                except asyncio.CancelledError:
+                    if not job.future.done():
+                        job.future.cancel()
+                    raise
+                except Exception as error:
+                    if not job.future.done():
+                        job.future.set_exception(error)
+                else:
+                    if not job.future.done():
+                        job.future.set_result(result)
+                finally:
+                    self._queue.task_done()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await self._async_clear_queued_jobs()
+            await self._async_disconnect_session()
+
+    async def _async_clear_queued_jobs(self) -> None:
+        """Fail every queued job when the worker stops."""
+
+        while True:
+            try:
+                _priority, _order, job = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            if not job.future.done():
+                job.future.set_exception(
+                    LocalBleCommissioningError("Local BLE worker was stopped")
+                )
+            self._queue.task_done()
+
+    def _remove_coalesced_future(
+        self,
+        key: str,
+        done_future: asyncio.Future[Any],
+    ) -> None:
+        """Remove one finished coalesced future entry when it matches."""
+
+        current = self._coalesced_futures.get(key)
+        if current is done_future:
+            self._coalesced_futures.pop(key, None)
+
+    async def _async_ensure_rpc_client(self) -> _BleUartRpcClient:
+        """Return an authorized RPC client, reconnecting when needed."""
+
+        if (
+            self._client is not None
+            and self._rpc_client is not None
+            and self._is_client_connected(self._client)
+        ):
+            return self._rpc_client
+
+        await self._async_disconnect_session()
+
+        ble_device = await _async_resolve_connectable_device(
+            self._hass,
+            self._ble_address,
+            expected_serial=self._serial_number,
+        )
+
+        def _refresh_ble_device() -> Any:
+            """Refresh the Home Assistant BLEDevice instance before reconnects."""
+
+            from homeassistant.components import bluetooth  # noqa: PLC0415
+
+            refreshed = bluetooth.async_ble_device_from_address(
+                self._hass,
+                self._ble_address,
+                connectable=True,
+            )
+            return refreshed if refreshed is not None else ble_device
+
+        client = await _async_connect_client(
+            ble_device,
+            ble_device_callback=_refresh_ble_device,
+        )
+        rpc_client = _BleUartRpcClient(client)
+        try:
+            await rpc_client.async_initialize()
+            await rpc_client.async_authorize(self._auth_key)
+        except Exception:
+            await rpc_client.async_close()
+            await _async_disconnect_client(client)
+            raise
+
+        self._client = client
+        self._rpc_client = rpc_client
+        self._invalidate_service_cache()
+        return rpc_client
+
+    def _is_client_connected(self, client: Any) -> bool:
+        """Return whether a Bleak-style client appears connected."""
+
+        is_connected = getattr(client, "is_connected", None)
+        if isinstance(is_connected, bool):
+            return is_connected
+        if callable(is_connected):
+            with suppress(Exception):
+                result = is_connected()
+                if isinstance(result, bool):
+                    return result
+        return is_connected is None
+
+    def _invalidate_service_cache(self) -> None:
+        """Clear cached service BOIs after reconnect-sensitive failures."""
+
+        self._mode_hot_water_service_bois = None
+
+    async def _async_disconnect_session(self) -> None:
+        """Close the current BLE session and clear stateful caches."""
+
+        rpc_client = self._rpc_client
+        client = self._client
+        self._rpc_client = None
+        self._client = None
+        self._invalidate_service_cache()
+
+        if rpc_client is not None:
+            await rpc_client.async_close()
+        if client is not None:
+            await _async_disconnect_client(client)
+
+    async def _async_resolve_mode_and_hot_water_service_bois_cached(
+        self,
+        rpc_client: _BleUartRpcClient,
+    ) -> tuple[int, int]:
+        """Return mode and hot-water BOIs using a reconnect-aware cache."""
+
+        if self._mode_hot_water_service_bois is not None:
+            return self._mode_hot_water_service_bois
+
+        resolved = await _async_resolve_mode_and_hot_water_service_bois(
+            rpc_client,
+            gateway_mac_id=self._gateway_mac_id,
+        )
+        self._mode_hot_water_service_bois = resolved
+        return resolved
+
+    async def _async_execute_command_once(
+        self,
+        *,
+        method_name: str,
+        operation_kwargs: dict[str, Any],
+    ) -> Any:
+        """Execute one local BLE command with the active reusable session."""
+
+        rpc_client = await self._async_ensure_rpc_client()
+        mode_service_boi, hot_water_service_boi = (
+            await self._async_resolve_mode_and_hot_water_service_bois_cached(rpc_client)
+        )
+        handler_id, service_id, args = _command_to_rpc_payload(
+            method_name,
+            operation_kwargs,
+            mode_service_boi=mode_service_boi,
+            hot_water_service_boi=hot_water_service_boi,
+        )
+        result = await rpc_client.async_rpc_request(
+            gateway_mac_id=self._gateway_mac_id,
+            handler_id=handler_id,
+            service_id=service_id,
+            args=args,
+        )
+        if result not in (0, "0", None):
+            raise LocalBleCommissioningError(
+                f"Unexpected local BLE acknowledgement for {method_name}: {result}"
+            )
+        return result
+
+    async def _async_read_local_snapshot_once(self) -> LocalBleSnapshot:
+        """Read one local BLE snapshot using the active reusable session."""
+
+        rpc_client = await self._async_ensure_rpc_client()
+        snapshot = await _async_read_ble_snapshot_payload(
+            rpc_client,
+            ble_address=self._ble_address,
+            gateway_mac_id=self._gateway_mac_id,
+        )
+        if isinstance(snapshot.schedule_zone_bois, dict):
+            self._schedule_zone_bois = dict(snapshot.schedule_zone_bois)
+        return snapshot
+
+    async def _async_read_local_weekly_programs_once(
+        self,
+        *,
+        zone_bois: Mapping[str, int] | None,
+    ) -> tuple[
+        dict[str, "WeeklyProgram | None"],
+        dict[str, list[tuple[int, int]] | None],
+    ]:
+        """Read one weekly schedule payload set using the reusable session."""
+
+        rpc_client = await self._async_ensure_rpc_client()
+        fallback_zone_bois = (
+            zone_bois if zone_bois is not None else self._schedule_zone_bois
+        )
+        programs, canonicals, resolved_zone_bois = (
+            await _async_read_ble_weekly_programs_payload(
+                rpc_client,
+                ble_address=self._ble_address,
+                gateway_mac_id=self._gateway_mac_id,
+                zone_bois=fallback_zone_bois,
+            )
+        )
+        self._schedule_zone_bois = dict(resolved_zone_bois)
+        return programs, canonicals
+
+    async def _async_write_local_weekly_program_once(
+        self,
+        *,
+        zone: str,
+        program: "WeeklyProgram",
+        zone_bois: Mapping[str, int] | None,
+    ) -> None:
+        """Write one weekly schedule payload using the reusable session."""
+
+        rpc_client = await self._async_ensure_rpc_client()
+        fallback_zone_bois = (
+            zone_bois if zone_bois is not None else self._schedule_zone_bois
+        )
+        resolved_zone_bois = await _async_write_local_weekly_program_payload(
+            rpc_client,
+            gateway_mac_id=self._gateway_mac_id,
+            zone=zone,
+            program=program,
+            zone_bois=fallback_zone_bois,
+        )
+        self._schedule_zone_bois = dict(resolved_zone_bois)
+
+
 class _BleUartRpcClient:
     """Manage packetized UART-over-BLE RPC exchanges."""
 
@@ -334,18 +952,40 @@ class _BleUartRpcClient:
                     f"RPC response ID mismatch (expected {request_id})"
                 )
 
-            response_body = await self._async_wait_for_response_payload(
-                timeout=remaining,
-            )
+            try:
+                response_body = await self._async_wait_for_response_payload(
+                    timeout=remaining,
+                )
+            except LocalBleCommissioningError as error:
+                if str(error) == BLE_RESPONSE_TIMEOUT_MESSAGE:
+                    raise
+
+                _LOGGER.debug(
+                    "Ignoring malformed BLE response payload while waiting for id %s: %s",
+                    request_id,
+                    error,
+                )
+                self._reset_response_state()
+                continue
+
             try:
                 response = json.loads(response_body.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise LocalBleCommissioningError(
-                    "Failed to parse BLE JSON response"
-                ) from error
+                _LOGGER.debug(
+                    "Ignoring malformed BLE JSON response while waiting for id %s: %s",
+                    request_id,
+                    error,
+                )
+                self._reset_response_state()
+                continue
 
             if not isinstance(response, dict):
-                raise LocalBleCommissioningError("BLE JSON response is not an object")
+                _LOGGER.debug(
+                    "Ignoring non-object BLE JSON response while waiting for id %s",
+                    request_id,
+                )
+                self._reset_response_state()
+                continue
 
             response_id = response.get("I")
             if response_id != request_id:
@@ -488,9 +1128,7 @@ class _BleUartRpcClient:
         try:
             await asyncio.wait_for(self._response_event.wait(), timeout=timeout)
         except TimeoutError as error:
-            raise LocalBleCommissioningError(
-                "Timed out waiting for BLE response"
-            ) from error
+            raise LocalBleCommissioningError(BLE_RESPONSE_TIMEOUT_MESSAGE) from error
 
         response_body = _reassemble_packet_bytes(self._response_packets)
         if self._auth_key is not None:
@@ -509,8 +1147,7 @@ class _BleUartRpcClient:
         if not packet:
             return
         packet_index = packet[0]
-        if packet_index not in self._response_packets:
-            self._response_packets[packet_index] = packet[1:]
+        self._response_packets[packet_index] = packet[1:]
         if packet_index == FINAL_PACKET_INDEX:
             self._response_event.set()
 
@@ -1770,109 +2407,122 @@ async def _async_read_ble_snapshot_once(
     try:
         await rpc_client.async_initialize()
         await rpc_client.async_authorize(auth_key)
-        response = await rpc_client.async_rpc_request(
+        return await _async_read_ble_snapshot_payload(
+            rpc_client,
+            ble_address=ble_address,
             gateway_mac_id=gateway_mac_id,
-            handler_id=HANDLER_GET_ALL_SERVICE_VALUES,
-            service_id=SERVICE_ID_BBSERVER,
-            args=None,
         )
-        _LOGGER.debug(
-            "GetAllServiceValues summary for %s: %s",
-            ble_address,
-            _summarize_service_values(response),
-        )
-        _LOGGER.debug(
-            "GetAllServiceValues raw payload for %s: %s",
-            ble_address,
-            _format_debug_payload(response),
-        )
-        snapshot = _parse_local_ble_snapshot(response)
-
-        dynamic_tariff_boi = _find_service_boi(
-            response,
-            service_id=SERVICE_ID_DYNAMIC_TARIFF,
-        )
-        consumption_args_candidates: list[list[int]] = [[1], [0]]
-        if dynamic_tariff_boi is not None:
-            consumption_args_candidates.append([dynamic_tariff_boi])
-
-        deduped_consumption_args: list[list[int]] = []
-        seen_consumption_args: set[tuple[int, ...]] = set()
-        for consumption_args in consumption_args_candidates:
-            key = tuple(consumption_args)
-            if key in seen_consumption_args:
-                continue
-            seen_consumption_args.add(key)
-            deduped_consumption_args.append(consumption_args)
-
-        for consumption_args in deduped_consumption_args:
-            try:
-                consumption_response = await rpc_client.async_rpc_request(
-                    gateway_mac_id=gateway_mac_id,
-                    handler_id=HANDLER_GET_CONSUMPTION_STATE,
-                    service_id=SERVICE_ID_DYNAMIC_TARIFF,
-                    args=consumption_args,
-                )
-                _LOGGER.debug(
-                    "GetConsumptionState raw payload for %s args=%s: %s",
-                    ble_address,
-                    consumption_args,
-                    _format_debug_payload(consumption_response),
-                )
-                snapshot.consumption_days = _parse_consumption_day_rows(
-                    consumption_response
-                )
-                has_consumption_energy = _consumption_rows_have_energy(
-                    snapshot.consumption_days
-                )
-                snapshot.statistics_recent = _parse_consumption_state(
-                    consumption_response
-                )
-                if snapshot.statistics_recent is not None:
-                    primary_stats = snapshot.statistics_recent.get("primary")
-                    if (
-                        snapshot.primary_energy_kwh is None
-                        and isinstance(primary_stats, dict)
-                        and isinstance(primary_stats.get("energy_kwh"), (int, float))
-                    ):
-                        snapshot.primary_energy_kwh = float(primary_stats["energy_kwh"])
-
-                    boost_stats = snapshot.statistics_recent.get("boost")
-                    if (
-                        snapshot.boost_energy_kwh is None
-                        and isinstance(boost_stats, dict)
-                        and isinstance(boost_stats.get("energy_kwh"), (int, float))
-                    ):
-                        snapshot.boost_energy_kwh = float(boost_stats["energy_kwh"])
-
-                    _LOGGER.debug(
-                        "Parsed statistics_recent from GetConsumptionState args=%s: %s",
-                        consumption_args,
-                        _format_debug_payload(snapshot.statistics_recent),
-                    )
-                    if (
-                        has_consumption_energy
-                        or snapshot.primary_energy_kwh is not None
-                        or snapshot.boost_energy_kwh is not None
-                    ):
-                        break
-            except LocalBleCommissioningError as error:
-                _LOGGER.debug(
-                    "Failed to read local BLE consumption state for args %s: %s",
-                    consumption_args,
-                    error,
-                )
-
-        if snapshot.statistics_recent is None:
-            _LOGGER.debug(
-                "No statistics_recent parsed from local BLE consumption responses for %s",
-                ble_address,
-            )
-
-        return snapshot
     finally:
         await rpc_client.async_close()
         await _async_disconnect_client(client)
+
+
+async def _async_read_ble_snapshot_payload(
+    rpc_client: _BleUartRpcClient,
+    *,
+    ble_address: str,
+    gateway_mac_id: str,
+) -> LocalBleSnapshot:
+    """Read one local BLE snapshot payload using an active RPC client."""
+
+    response = await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_GET_ALL_SERVICE_VALUES,
+        service_id=SERVICE_ID_BBSERVER,
+        args=None,
+    )
+    _LOGGER.debug(
+        "GetAllServiceValues summary for %s: %s",
+        ble_address,
+        _summarize_service_values(response),
+    )
+    _LOGGER.debug(
+        "GetAllServiceValues raw payload for %s: %s",
+        ble_address,
+        _format_debug_payload(response),
+    )
+    snapshot = _parse_local_ble_snapshot(response)
+
+    dynamic_tariff_boi = _find_service_boi(
+        response,
+        service_id=SERVICE_ID_DYNAMIC_TARIFF,
+    )
+    consumption_args_candidates: list[list[int]] = [[1], [0]]
+    if dynamic_tariff_boi is not None:
+        consumption_args_candidates.append([dynamic_tariff_boi])
+
+    deduped_consumption_args: list[list[int]] = []
+    seen_consumption_args: set[tuple[int, ...]] = set()
+    for consumption_args in consumption_args_candidates:
+        key = tuple(consumption_args)
+        if key in seen_consumption_args:
+            continue
+        seen_consumption_args.add(key)
+        deduped_consumption_args.append(consumption_args)
+
+    for consumption_args in deduped_consumption_args:
+        try:
+            consumption_response = await rpc_client.async_rpc_request(
+                gateway_mac_id=gateway_mac_id,
+                handler_id=HANDLER_GET_CONSUMPTION_STATE,
+                service_id=SERVICE_ID_DYNAMIC_TARIFF,
+                args=consumption_args,
+            )
+            _LOGGER.debug(
+                "GetConsumptionState raw payload for %s args=%s: %s",
+                ble_address,
+                consumption_args,
+                _format_debug_payload(consumption_response),
+            )
+            snapshot.consumption_days = _parse_consumption_day_rows(
+                consumption_response
+            )
+            has_consumption_energy = _consumption_rows_have_energy(
+                snapshot.consumption_days
+            )
+            snapshot.statistics_recent = _parse_consumption_state(consumption_response)
+            if snapshot.statistics_recent is not None:
+                primary_stats = snapshot.statistics_recent.get("primary")
+                if (
+                    snapshot.primary_energy_kwh is None
+                    and isinstance(primary_stats, dict)
+                    and isinstance(primary_stats.get("energy_kwh"), (int, float))
+                ):
+                    snapshot.primary_energy_kwh = float(primary_stats["energy_kwh"])
+
+                boost_stats = snapshot.statistics_recent.get("boost")
+                if (
+                    snapshot.boost_energy_kwh is None
+                    and isinstance(boost_stats, dict)
+                    and isinstance(boost_stats.get("energy_kwh"), (int, float))
+                ):
+                    snapshot.boost_energy_kwh = float(boost_stats["energy_kwh"])
+
+                _LOGGER.debug(
+                    "Parsed statistics_recent from GetConsumptionState args=%s: %s",
+                    consumption_args,
+                    _format_debug_payload(snapshot.statistics_recent),
+                )
+                if (
+                    has_consumption_energy
+                    or snapshot.primary_energy_kwh is not None
+                    or snapshot.boost_energy_kwh is not None
+                ):
+                    break
+        except LocalBleCommissioningError as error:
+            _LOGGER.debug(
+                "Failed to read local BLE consumption state for args %s: %s",
+                consumption_args,
+                error,
+            )
+
+    if snapshot.statistics_recent is None:
+        _LOGGER.debug(
+            "No statistics_recent parsed from local BLE consumption responses for %s",
+            ble_address,
+        )
+
+    return snapshot
 
 
 def _parse_local_weekly_program(payload: Any) -> "WeeklyProgram":
@@ -1958,8 +2608,6 @@ async def _async_read_ble_weekly_programs_once(
 ]:
     """Connect once and read both weekly programs from local BLE RPC."""
 
-    from .schedule import canonicalize_weekly  # noqa: PLC0415
-
     ble_device = await _async_resolve_connectable_device(
         hass,
         ble_address,
@@ -1984,39 +2632,65 @@ async def _async_read_ble_weekly_programs_once(
     try:
         await rpc_client.async_initialize()
         await rpc_client.async_authorize(auth_key)
-        resolved_zone_bois = await _async_resolve_schedule_zone_bois(
-            rpc_client,
-            gateway_mac_id=gateway_mac_id,
-            fallback_zone_bois=zone_bois,
-        )
-
-        programs: dict[str, Any] = {}
-        canonicals: dict[str, list[tuple[int, int]] | None] = {}
-
-        for zone_key in PROGRAM_ZONE_INDEX:
-            zone_index = resolved_zone_bois[zone_key]
-            response = await rpc_client.async_rpc_request(
+        programs, canonicals, _resolved_zone_bois = (
+            await _async_read_ble_weekly_programs_payload(
+                rpc_client,
+                ble_address=ble_address,
                 gateway_mac_id=gateway_mac_id,
-                handler_id=HANDLER_READ_WEEKLY_PROGRAM,
-                service_id=SERVICE_ID_SCHEDULE,
-                args=[zone_index],
+                zone_bois=zone_bois,
             )
-            _LOGGER.debug(
-                "ReadWeeklyProgram raw payload for %s zone=%s idx=%s: %s",
-                ble_address,
-                zone_key,
-                zone_index,
-                _format_debug_payload(response),
-            )
-
-            program = _parse_local_weekly_program(response)
-            programs[zone_key] = program
-            canonicals[zone_key] = canonicalize_weekly(program)
-
+        )
         return programs, canonicals
     finally:
         await rpc_client.async_close()
         await _async_disconnect_client(client)
+
+
+async def _async_read_ble_weekly_programs_payload(
+    rpc_client: _BleUartRpcClient,
+    *,
+    ble_address: str,
+    gateway_mac_id: str,
+    zone_bois: Mapping[str, int] | None = None,
+) -> tuple[
+    dict[str, "WeeklyProgram | None"],
+    dict[str, list[tuple[int, int]] | None],
+    dict[str, int],
+]:
+    """Read weekly schedules with an active RPC client and return resolved BOIs."""
+
+    from .schedule import canonicalize_weekly  # noqa: PLC0415
+
+    resolved_zone_bois = await _async_resolve_schedule_zone_bois(
+        rpc_client,
+        gateway_mac_id=gateway_mac_id,
+        fallback_zone_bois=zone_bois,
+    )
+
+    programs: dict[str, Any] = {}
+    canonicals: dict[str, list[tuple[int, int]] | None] = {}
+
+    for zone_key in PROGRAM_ZONE_INDEX:
+        zone_index = resolved_zone_bois[zone_key]
+        response = await rpc_client.async_rpc_request(
+            gateway_mac_id=gateway_mac_id,
+            handler_id=HANDLER_READ_WEEKLY_PROGRAM,
+            service_id=SERVICE_ID_SCHEDULE,
+            args=[zone_index],
+        )
+        _LOGGER.debug(
+            "ReadWeeklyProgram raw payload for %s zone=%s idx=%s: %s",
+            ble_address,
+            zone_key,
+            zone_index,
+            _format_debug_payload(response),
+        )
+
+        program = _parse_local_weekly_program(response)
+        programs[zone_key] = program
+        canonicals[zone_key] = canonicalize_weekly(program)
+
+    return programs, canonicals, resolved_zone_bois
 
 
 async def async_write_local_weekly_program(
@@ -2087,8 +2761,6 @@ async def _async_write_local_weekly_program_once(
 ) -> None:
     """Connect once and write one weekly program payload over BLE."""
 
-    from .beanbag import BeanbagBackend  # noqa: PLC0415
-
     ble_device = await _async_resolve_connectable_device(
         hass,
         ble_address,
@@ -2113,26 +2785,48 @@ async def _async_write_local_weekly_program_once(
     try:
         await rpc_client.async_initialize()
         await rpc_client.async_authorize(auth_key)
-        resolved_zone_bois = await _async_resolve_schedule_zone_bois(
+        await _async_write_local_weekly_program_payload(
             rpc_client,
             gateway_mac_id=gateway_mac_id,
-            fallback_zone_bois=zone_bois,
+            zone=zone,
+            program=program,
+            zone_bois=zone_bois,
         )
-        zone_index = resolved_zone_bois[zone]
-        payload = BeanbagBackend._build_weekly_program_payload(program, zone_index)
-        acknowledgement = await rpc_client.async_rpc_request(
-            gateway_mac_id=gateway_mac_id,
-            handler_id=HANDLER_WRITE_WEEKLY_PROGRAM,
-            service_id=SERVICE_ID_SCHEDULE,
-            args=payload,
-        )
-        if acknowledgement not in (0, "0", None):
-            raise LocalBleCommissioningError(
-                f"Unexpected local BLE weekly schedule acknowledgement: {acknowledgement}"
-            )
     finally:
         await rpc_client.async_close()
         await _async_disconnect_client(client)
+
+
+async def _async_write_local_weekly_program_payload(
+    rpc_client: _BleUartRpcClient,
+    *,
+    gateway_mac_id: str,
+    zone: str,
+    program: "WeeklyProgram",
+    zone_bois: Mapping[str, int] | None = None,
+) -> dict[str, int]:
+    """Write one weekly schedule payload with an active RPC client."""
+
+    from .beanbag import BeanbagBackend  # noqa: PLC0415
+
+    resolved_zone_bois = await _async_resolve_schedule_zone_bois(
+        rpc_client,
+        gateway_mac_id=gateway_mac_id,
+        fallback_zone_bois=zone_bois,
+    )
+    zone_index = resolved_zone_bois[zone]
+    payload = BeanbagBackend._build_weekly_program_payload(program, zone_index)
+    acknowledgement = await rpc_client.async_rpc_request(
+        gateway_mac_id=gateway_mac_id,
+        handler_id=HANDLER_WRITE_WEEKLY_PROGRAM,
+        service_id=SERVICE_ID_SCHEDULE,
+        args=payload,
+    )
+    if acknowledgement not in (0, "0", None):
+        raise LocalBleCommissioningError(
+            f"Unexpected local BLE weekly schedule acknowledgement: {acknowledgement}"
+        )
+    return resolved_zone_bois
 
 
 async def async_execute_local_command(

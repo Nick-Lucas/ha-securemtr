@@ -11,7 +11,7 @@ from decimal import Decimal
 from importlib import import_module
 import logging
 from types import MappingProxyType
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TYPE_CHECKING, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientSession, ClientWebSocketResponse
@@ -84,6 +84,9 @@ from .utils import (
 )
 from .zones import ZONE_KEYS, ZONE_METADATA
 
+if TYPE_CHECKING:
+    from .local_ble_commissioning import LocalBlePriority, LocalBleWorker
+
 DOMAIN = "securemtr"
 
 CONF_CONNECTION_MODE = "connection_mode"
@@ -133,6 +136,8 @@ _REGISTERED_SERVICES_FLAG = "_registered_services"
 _LOGIN_RETRY_DELAY = 5.0
 _MAX_IMMEDIATE_STARTUP_RETRIES = 2
 _LOCAL_BLE_REFRESH_INTERVAL_SECONDS = 60
+_LOCAL_BLE_SNAPSHOT_COALESCE_KEY = "local_snapshot_refresh"
+_LOCAL_BLE_WEEKLY_CACHE_COALESCE_KEY = "local_weekly_cache_refresh"
 _SCHEDULE_WEEKDAY_KEYS: tuple[str, ...] = (
     "monday",
     "tuesday",
@@ -439,25 +444,18 @@ def _async_register_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError("Secure Meters controller is not connected")
 
         if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
-            ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
-            if not isinstance(ble_key, str) or not ble_key:
-                raise HomeAssistantError("Local BLE key is missing for this entry")
-
             from .local_ble_commissioning import (  # noqa: PLC0415
                 LocalBleCommissioningError,
-                async_execute_local_command,
+                LocalBlePriority,
             )
 
             try:
-                async with runtime.command_lock:
-                    await async_execute_local_command(
-                        hass,
-                        mac_address=controller.gateway_id,
-                        serial_number=controller.serial_number,
-                        ble_key=ble_key,
-                        method_name="start_timed_boost",
-                        operation_kwargs={ATTR_DURATION_MINUTES: duration_minutes},
-                    )
+                worker = await async_get_local_ble_worker(hass, entry, runtime)
+                await worker.async_execute_local_command(
+                    method_name="start_timed_boost",
+                    operation_kwargs={ATTR_DURATION_MINUTES: duration_minutes},
+                    priority=LocalBlePriority.USER_COMMAND,
+                )
             except (LocalBleCommissioningError, ValueError) as error:
                 _LOGGER.error("Failed to start Secure Meters timed boost: %s", error)
                 raise HomeAssistantError(
@@ -512,26 +510,19 @@ def _async_register_services(hass: HomeAssistant) -> None:
         weekly_program = _parse_weekly_schedule(schedule_payload)
 
         if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
-            ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
-            if not isinstance(ble_key, str) or not ble_key:
-                raise HomeAssistantError("Local BLE key is missing for this entry")
-
             from .local_ble_commissioning import (  # noqa: PLC0415
                 LocalBleCommissioningError,
-                async_write_local_weekly_program,
+                LocalBlePriority,
             )
 
             try:
-                async with runtime.command_lock:
-                    await async_write_local_weekly_program(
-                        hass,
-                        mac_address=controller.gateway_id,
-                        serial_number=controller.serial_number,
-                        ble_key=ble_key,
-                        zone=zone,
-                        program=weekly_program,
-                        zone_bois=runtime.schedule_zone_bois,
-                    )
+                worker = await async_get_local_ble_worker(hass, entry, runtime)
+                await worker.async_write_local_weekly_program(
+                    zone=zone,
+                    program=weekly_program,
+                    zone_bois=runtime.schedule_zone_bois,
+                    priority=LocalBlePriority.SCHEDULE_WRITE,
+                )
             except (LocalBleCommissioningError, ValueError) as error:
                 _LOGGER.error(
                     "Failed to update Secure Meters %s schedule: %s",
@@ -937,6 +928,7 @@ class SecuremtrRuntimeData:
     consumption_refresh_pending: bool = False
     local_refresh_unsub: Callable[[], None] | None = None
     local_refresh_callback: Callable[[], None] | None = None
+    local_ble_worker: "LocalBleWorker | None" = None
     energy_store: Store[dict[str, Any]] | None = None
     energy_state: dict[str, Any] | None = None
     energy_accumulator: EnergyAccumulator | None = None
@@ -992,6 +984,52 @@ def _build_local_controller(entry: ConfigEntry) -> SecuremtrController:
         serial_number=serial_number,
         model=model,
     )
+
+
+async def async_get_local_ble_worker(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: SecuremtrRuntimeData,
+) -> "LocalBleWorker":
+    """Return a configured local BLE worker for one runtime entry."""
+
+    if runtime.connection_mode != CONNECTION_MODE_LOCAL_BLE:
+        raise HomeAssistantError("SecureMTR entry is not configured for local BLE")
+
+    controller = runtime.controller
+    if controller is None:
+        raise HomeAssistantError("Secure Meters controller is not connected")
+
+    ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
+    if not isinstance(ble_key, str) or not ble_key:
+        raise HomeAssistantError("Local BLE key is missing for this entry")
+
+    from .local_ble_commissioning import LocalBleWorker  # noqa: PLC0415
+
+    existing = runtime.local_ble_worker
+    if existing is not None and existing.matches(
+        mac_address=controller.gateway_id,
+        serial_number=controller.serial_number,
+        ble_key=ble_key,
+    ):
+        return existing
+
+    if existing is not None:
+        await existing.async_close()
+
+    try:
+        worker = LocalBleWorker(
+            hass,
+            mac_address=controller.gateway_id,
+            serial_number=controller.serial_number,
+            ble_key=ble_key,
+        )
+    except ValueError as error:
+        raise HomeAssistantError(
+            "Local BLE MAC address is invalid for this entry"
+        ) from error
+    runtime.local_ble_worker = worker
+    return worker
 
 
 def _utility_meter_identifier(hass: HomeAssistant, entry: ConfigEntry) -> str:
@@ -1424,6 +1462,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         finally:
             runtime.local_refresh_unsub = None
     runtime.local_refresh_callback = None
+
+    if runtime.local_ble_worker is not None:
+        try:
+            await runtime.local_ble_worker.async_close()
+        except Exception:
+            _LOGGER.exception(
+                "Error while stopping local BLE worker for %s",
+                entry_identifier,
+            )
+        finally:
+            runtime.local_ble_worker = None
 
     if runtime.startup_task is not None and not runtime.startup_task.done():
         runtime.startup_task.cancel()
@@ -1942,8 +1991,20 @@ async def async_refresh_entry_state(hass: HomeAssistant, entry: ConfigEntry) -> 
         )
 
     if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
-        await _async_refresh_local_ble_runtime(hass, entry)
-        await _async_refresh_weekly_program_cache(hass, entry)
+        from .local_ble_commissioning import LocalBlePriority  # noqa: PLC0415
+
+        await _async_refresh_local_ble_runtime(
+            hass,
+            entry,
+            priority=LocalBlePriority.USER_READ,
+            coalesce_key=None,
+        )
+        await _async_refresh_weekly_program_cache(
+            hass,
+            entry,
+            priority=LocalBlePriority.USER_READ,
+            coalesce_key=None,
+        )
         return
 
     await consumption_metrics(hass, entry)
@@ -1952,6 +2013,9 @@ async def async_refresh_entry_state(hass: HomeAssistant, entry: ConfigEntry) -> 
 async def _async_refresh_weekly_program_cache(
     hass: HomeAssistant,
     entry: ConfigEntry,
+    *,
+    priority: "LocalBlePriority | int | None" = None,
+    coalesce_key: str | None = _LOCAL_BLE_WEEKLY_CACHE_COALESCE_KEY,
 ) -> None:
     """Refresh runtime weekly schedule caches for a config entry."""
 
@@ -1960,30 +2024,25 @@ async def _async_refresh_weekly_program_cache(
     if runtime is None:
         return
 
-    controller = runtime.controller
-    if controller is None:
-        return
-
     if runtime.connection_mode == CONNECTION_MODE_LOCAL_BLE:
-        ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
-        if not isinstance(ble_key, str) or not ble_key:
-            return
-
         from .local_ble_commissioning import (  # noqa: PLC0415
             LocalBleCommissioningError,
-            async_read_local_weekly_programs,
+            LocalBlePriority,
         )
 
         try:
-            async with runtime.command_lock:
-                programs, canonicals = await async_read_local_weekly_programs(
-                    hass,
-                    mac_address=controller.gateway_id,
-                    serial_number=controller.serial_number,
-                    ble_key=ble_key,
-                    zone_bois=runtime.schedule_zone_bois,
-                )
-        except LocalBleCommissioningError as error:
+            worker = await async_get_local_ble_worker(hass, entry, runtime)
+            resolved_priority = (
+                LocalBlePriority.BACKGROUND_REFRESH
+                if priority is None
+                else priority
+            )
+            programs, canonicals = await worker.async_read_local_weekly_programs(
+                priority=resolved_priority,
+                coalesce_key=coalesce_key,
+                zone_bois=runtime.schedule_zone_bois,
+            )
+        except (LocalBleCommissioningError, HomeAssistantError) as error:
             _LOGGER.debug(
                 "Failed to refresh local BLE weekly schedules for %s: %s",
                 _entry_display_name(entry),
@@ -2173,6 +2232,9 @@ def _merge_local_snapshot_statistics(
 async def _async_refresh_local_ble_runtime(
     hass: HomeAssistant,
     entry: ConfigEntry,
+    *,
+    priority: "LocalBlePriority | int | None" = None,
+    coalesce_key: str | None = _LOCAL_BLE_SNAPSHOT_COALESCE_KEY,
 ) -> None:
     """Refresh runtime state from a local BLE GetAllServiceValues snapshot."""
 
@@ -2181,39 +2243,35 @@ async def _async_refresh_local_ble_runtime(
     if runtime is None or runtime.connection_mode != CONNECTION_MODE_LOCAL_BLE:
         return
 
-    controller = runtime.controller
-    if controller is None:
-        return
-
-    ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
-    if not isinstance(ble_key, str) or not ble_key:
-        _LOGGER.debug(
-            "Skipping local BLE refresh for %s because BLE key is missing",
-            _entry_display_name(entry),
-        )
-        return
-
     from .local_ble_commissioning import (  # noqa: PLC0415
         LocalBleCommissioningError,
-        async_read_local_snapshot,
+        LocalBlePriority,
     )
 
     entry_identifier = _entry_display_name(entry)
-    async with runtime.command_lock:
-        try:
-            snapshot = await async_read_local_snapshot(
-                hass,
-                mac_address=controller.gateway_id,
-                serial_number=controller.serial_number,
-                ble_key=ble_key,
-            )
-        except LocalBleCommissioningError as error:
-            _LOGGER.warning(
-                "Failed to refresh local BLE snapshot for %s: %s",
-                entry_identifier,
-                error,
-            )
-            return
+    try:
+        worker = await async_get_local_ble_worker(hass, entry, runtime)
+        resolved_priority = (
+            LocalBlePriority.BACKGROUND_REFRESH if priority is None else priority
+        )
+        snapshot = await worker.async_read_local_snapshot(
+            priority=resolved_priority,
+            coalesce_key=coalesce_key,
+        )
+    except HomeAssistantError as error:
+        _LOGGER.debug(
+            "Skipping local BLE refresh for %s: %s",
+            entry_identifier,
+            error,
+        )
+        return
+    except LocalBleCommissioningError as error:
+        _LOGGER.warning(
+            "Failed to refresh local BLE snapshot for %s: %s",
+            entry_identifier,
+            error,
+        )
+        return
 
     _LOGGER.debug(
         "Local BLE snapshot for %s: primary_power_on=%s timed_boost_enabled=%s timed_boost_active=%s boost_duration=%s primary_energy_kwh=%s boost_energy_kwh=%s has_consumption_days=%s has_statistics_recent=%s",

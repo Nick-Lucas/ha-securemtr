@@ -16,10 +16,10 @@ from homeassistant.util import dt as dt_util
 
 from . import (
     CONNECTION_MODE_LOCAL_BLE,
-    CONF_LOCAL_BLE_KEY,
     DOMAIN,
     SecuremtrController,
     SecuremtrRuntimeData,
+    async_get_local_ble_worker,
     async_refresh_entry_state,
     async_execute_controller_command,
     coerce_end_time,
@@ -144,27 +144,18 @@ class SecuremtrLogWeeklyScheduleButton(SecuremtrRuntimeEntityMixin, ButtonEntity
             if hass is None:
                 raise HomeAssistantError("Home Assistant instance is not available")
 
-            ble_key = entry.data.get(CONF_LOCAL_BLE_KEY)
-            if not isinstance(ble_key, str) or not ble_key:
-                raise HomeAssistantError("Local BLE key is missing for this entry")
-
-            controller = runtime.controller
-            if controller is None:
-                raise HomeAssistantError("Secure Meters controller is not connected")
-
             from .local_ble_commissioning import (  # noqa: PLC0415
                 LocalBleCommissioningError,
-                async_read_local_weekly_programs,
+                LocalBlePriority,
             )
 
             try:
-                async with runtime.command_lock:
-                    programs, canonicals = await async_read_local_weekly_programs(
-                        hass,
-                        mac_address=controller.gateway_id,
-                        serial_number=controller.serial_number,
-                        ble_key=ble_key,
-                    )
+                worker = await async_get_local_ble_worker(hass, entry, runtime)
+                programs, canonicals = await worker.async_read_local_weekly_programs(
+                    priority=LocalBlePriority.USER_READ,
+                    coalesce_key=None,
+                    zone_bois=runtime.schedule_zone_bois,
+                )
             except LocalBleCommissioningError as error:
                 _LOGGER.error("Failed to read Secure Meters weekly schedule: %s", error)
                 raise HomeAssistantError(

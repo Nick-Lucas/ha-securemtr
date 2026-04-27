@@ -472,10 +472,13 @@ async def test_schedule_button_local_ble_uses_local_reader(
         "boost": [(480, 540)],
     }
 
-    local_reader = AsyncMock(return_value=(programs, canonicals))
+    fake_worker = SimpleNamespace(
+        async_read_local_weekly_programs=AsyncMock(return_value=(programs, canonicals))
+    )
+    get_worker = AsyncMock(return_value=fake_worker)
     monkeypatch.setattr(
-        "custom_components.securemtr.local_ble_commissioning.async_read_local_weekly_programs",
-        local_reader,
+        "custom_components.securemtr.button.async_get_local_ble_worker",
+        get_worker,
     )
 
     await async_setup_entry(hass, entry, entities.extend)
@@ -489,12 +492,11 @@ async def test_schedule_button_local_ble_uses_local_reader(
     with caplog.at_level(logging.INFO):
         await schedule_button.async_press()
 
-    local_reader.assert_awaited_once_with(
-        local_hass,
-        mac_address=runtime.controller.gateway_id,
-        serial_number=runtime.controller.serial_number,
-        ble_key="ABEiM0RVZneImaq7zN3u/w==",
-    )
+    get_worker.assert_awaited_once_with(local_hass, entry, runtime)
+    fake_worker.async_read_local_weekly_programs.assert_awaited_once()
+    read_kwargs = fake_worker.async_read_local_weekly_programs.await_args.kwargs
+    assert read_kwargs["coalesce_key"] is None
+    assert read_kwargs["zone_bois"] is runtime.schedule_zone_bois
     assert backend.read_calls == []
 
 
@@ -1041,10 +1043,11 @@ async def test_local_boost_button_uses_local_ble_command(
     button = SecuremtrTimedBoostButton(runtime, runtime.controller, entry, 30)
     button.hass = SimpleNamespace()
 
-    local_command = AsyncMock(return_value=0)
+    fake_worker = SimpleNamespace(async_execute_local_command=AsyncMock(return_value=0))
+    get_worker = AsyncMock(return_value=fake_worker)
     monkeypatch.setattr(
-        "custom_components.securemtr.local_ble_commissioning.async_execute_local_command",
-        local_command,
+        "custom_components.securemtr.entity.async_get_local_ble_worker",
+        get_worker,
     )
     monkeypatch.setattr(
         "custom_components.securemtr.entity.async_dispatch_runtime_update",
@@ -1053,11 +1056,11 @@ async def test_local_boost_button_uses_local_ble_command(
 
     await button.async_press()
 
-    local_command.assert_awaited_once()
-    kwargs = local_command.await_args.kwargs
+    get_worker.assert_awaited_once_with(button.hass, entry, runtime)
+    fake_worker.async_execute_local_command.assert_awaited_once()
+    kwargs = fake_worker.async_execute_local_command.await_args.kwargs
     assert kwargs["method_name"] == "start_timed_boost"
     assert kwargs["operation_kwargs"] == {"duration_minutes": 30}
-    assert kwargs["serial_number"] == runtime.controller.serial_number
     assert runtime.timed_boost_active is True
 
 

@@ -18,6 +18,7 @@ from . import (
     DOMAIN,
     SecuremtrController,
     SecuremtrRuntimeData,
+    async_get_local_ble_worker,
     runtime_update_signal,
 )
 from .runtime_helpers import (
@@ -29,8 +30,6 @@ from .runtime_helpers import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-_CONF_LOCAL_BLE_KEY = "local_ble_key"
 
 _CONTROLLER_READY_TIMEOUT = 15.0
 
@@ -236,25 +235,22 @@ class SecuremtrCommandMixin(SecuremtrRuntimeEntityMixin):
             if hass is None:
                 raise HomeAssistantError("Home Assistant instance is not available")
 
-            ble_key = self._entry.data.get(_CONF_LOCAL_BLE_KEY)
-            if not isinstance(ble_key, str) or not ble_key:
-                raise HomeAssistantError("Local BLE key is missing for this entry")
-
             from .local_ble_commissioning import (  # noqa: PLC0415
                 LocalBleCommissioningError,
-                async_execute_local_command,
+                LocalBlePriority,
             )
 
             try:
-                async with self._runtime.command_lock:
-                    result = await async_execute_local_command(
-                        hass,
-                        mac_address=self._controller.gateway_id,
-                        serial_number=self._controller.serial_number,
-                        ble_key=ble_key,
-                        method_name=method_name,
-                        operation_kwargs=operation_kwargs,
-                    )
+                worker = await async_get_local_ble_worker(
+                    hass,
+                    self._entry,
+                    self._runtime,
+                )
+                result = await worker.async_execute_local_command(
+                    method_name=method_name,
+                    operation_kwargs=operation_kwargs,
+                    priority=LocalBlePriority.USER_COMMAND,
+                )
             except (LocalBleCommissioningError, ValueError) as error:
                 _LOGGER.error("%s: %s", log_context, error)
                 raise HomeAssistantError(error_message or log_context) from error

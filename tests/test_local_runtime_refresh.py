@@ -25,7 +25,10 @@ from custom_components.securemtr import (
     async_refresh_entry_state,
     coerce_end_time,
 )
-from custom_components.securemtr.local_ble_commissioning import LocalBleSnapshot
+from custom_components.securemtr.local_ble_commissioning import (
+    LocalBlePriority,
+    LocalBleSnapshot,
+)
 
 from tests.helpers import create_config_entry
 
@@ -46,6 +49,19 @@ def _build_runtime(mode: str) -> SecuremtrRuntimeData:
     return runtime
 
 
+def _patch_snapshot_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    snapshot: LocalBleSnapshot,
+) -> tuple[Any, AsyncMock]:
+    """Patch the local BLE worker helper to return a snapshot stub."""
+
+    fake_worker = SimpleNamespace(async_read_local_snapshot=AsyncMock(return_value=snapshot))
+    get_worker = AsyncMock(return_value=fake_worker)
+    monkeypatch.setattr("custom_components.securemtr.async_get_local_ble_worker", get_worker)
+    return fake_worker, get_worker
+
+
 @pytest.mark.asyncio
 async def test_refresh_entry_state_routes_local_mode(
     monkeypatch: pytest.MonkeyPatch,
@@ -60,14 +76,30 @@ async def test_refresh_entry_state_routes_local_mode(
     hass = SimpleNamespace(data={DOMAIN: {entry.entry_id: runtime}})
 
     local_refresh = AsyncMock()
+    weekly_refresh = AsyncMock()
     monkeypatch.setattr(
         "custom_components.securemtr._async_refresh_local_ble_runtime",
         local_refresh,
     )
+    monkeypatch.setattr(
+        "custom_components.securemtr._async_refresh_weekly_program_cache",
+        weekly_refresh,
+    )
 
     await async_refresh_entry_state(hass, entry)
 
-    local_refresh.assert_awaited_once_with(hass, entry)
+    local_refresh.assert_awaited_once_with(
+        hass,
+        entry,
+        priority=LocalBlePriority.USER_READ,
+        coalesce_key=None,
+    )
+    weekly_refresh.assert_awaited_once_with(
+        hass,
+        entry,
+        priority=LocalBlePriority.USER_READ,
+        coalesce_key=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -123,19 +155,20 @@ async def test_local_ble_refresh_updates_runtime_and_energy(
             },
         },
     )
-    read_snapshot = AsyncMock(return_value=snapshot)
+    fake_worker, _get_worker = _patch_snapshot_worker(
+        monkeypatch,
+        snapshot=snapshot,
+    )
     dispatch_calls: list[tuple[Any, str]] = []
 
-    monkeypatch.setattr(
-        "custom_components.securemtr.local_ble_commissioning.async_read_local_snapshot",
-        read_snapshot,
-    )
     monkeypatch.setattr(
         "custom_components.securemtr.async_dispatch_runtime_update",
         lambda hass_obj, entry_id: dispatch_calls.append((hass_obj, entry_id)),
     )
 
     await _async_refresh_local_ble_runtime(hass, entry)
+
+    fake_worker.async_read_local_snapshot.assert_awaited_once()
 
     assert runtime.primary_power_on is True
     assert runtime.timed_boost_enabled is True
@@ -177,13 +210,12 @@ async def test_local_ble_refresh_does_not_drift_boost_end_time(
         timed_boost_duration_minutes=30,
     )
 
-    read_snapshot = AsyncMock(return_value=snapshot)
+    fake_worker, _get_worker = _patch_snapshot_worker(
+        monkeypatch,
+        snapshot=snapshot,
+    )
     dispatch_calls: list[tuple[Any, str]] = []
 
-    monkeypatch.setattr(
-        "custom_components.securemtr.local_ble_commissioning.async_read_local_snapshot",
-        read_snapshot,
-    )
     monkeypatch.setattr(
         "custom_components.securemtr.async_dispatch_runtime_update",
         lambda hass_obj, entry_id: dispatch_calls.append((hass_obj, entry_id)),
@@ -194,6 +226,8 @@ async def test_local_ble_refresh_does_not_drift_boost_end_time(
     )
 
     await _async_refresh_local_ble_runtime(hass, entry)
+
+    fake_worker.async_read_local_snapshot.assert_awaited_once()
 
     assert runtime.timed_boost_end_minute == previous_end_minute
     assert runtime.timed_boost_end_time == previous_end_time
@@ -218,12 +252,11 @@ async def test_local_ble_refresh_sets_boost_end_time_on_transition(
         timed_boost_active=True,
         timed_boost_duration_minutes=30,
     )
-    read_snapshot = AsyncMock(return_value=snapshot)
-
-    monkeypatch.setattr(
-        "custom_components.securemtr.local_ble_commissioning.async_read_local_snapshot",
-        read_snapshot,
+    fake_worker, _get_worker = _patch_snapshot_worker(
+        monkeypatch,
+        snapshot=snapshot,
     )
+
     monkeypatch.setattr(
         "custom_components.securemtr.dt_util.now",
         lambda: datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc),
@@ -234,6 +267,8 @@ async def test_local_ble_refresh_sets_boost_end_time_on_transition(
     )
 
     await _async_refresh_local_ble_runtime(hass, entry)
+
+    fake_worker.async_read_local_snapshot.assert_awaited_once()
 
     assert runtime.timed_boost_active is True
     assert runtime.timed_boost_end_minute == 570
@@ -281,7 +316,10 @@ async def test_local_ble_refresh_prefers_consumption_day_energy(
             "boost": {"report_day": "2026-04-13", "runtime_hours": 0.5},
         },
     )
-    read_snapshot = AsyncMock(return_value=snapshot)
+    fake_worker, _get_worker = _patch_snapshot_worker(
+        monkeypatch,
+        snapshot=snapshot,
+    )
 
     class FakeAccumulator:
         def __init__(self) -> None:
@@ -315,10 +353,6 @@ async def test_local_ble_refresh_prefers_consumption_day_energy(
     dispatch_calls: list[tuple[Any, str]] = []
 
     monkeypatch.setattr(
-        "custom_components.securemtr.local_ble_commissioning.async_read_local_snapshot",
-        read_snapshot,
-    )
-    monkeypatch.setattr(
         "custom_components.securemtr._ensure_energy_accumulator",
         ensure_accumulator,
     )
@@ -328,6 +362,8 @@ async def test_local_ble_refresh_prefers_consumption_day_energy(
     )
 
     await _async_refresh_local_ble_runtime(hass, entry)
+
+    fake_worker.async_read_local_snapshot.assert_awaited_once()
 
     assert runtime.energy_state is not None
     assert runtime.energy_state["primary"]["energy_sum"] == pytest.approx(8.0)
