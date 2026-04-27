@@ -253,6 +253,8 @@ class _LocalBleQueuedJob:
     coalesce_key: str | None
     operation: Callable[[], Awaitable[Any]]
     future: asyncio.Future[Any]
+    submitted_monotonic: float
+    queue_depth_at_submit: int
 
 
 class LocalBleWorker:
@@ -323,6 +325,12 @@ class LocalBleWorker:
         """Stop the queue worker and close any open BLE session."""
 
         self._closing = True
+        _LOGGER.debug(
+            "Stopping local BLE worker for %s (queued_jobs=%s, coalesced_futures=%s)",
+            self._ble_address,
+            self._queue.qsize(),
+            len(self._coalesced_futures),
+        )
 
         if self._worker_task is not None and not self._worker_task.done():
             self._worker_task.cancel()
@@ -348,15 +356,32 @@ class LocalBleWorker:
 
             last_error: LocalBleCommissioningError | None = None
             for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+                attempt_started = time.monotonic()
                 try:
-                    return await self._async_execute_command_once(
+                    result = await self._async_execute_command_once(
                         method_name=method_name,
                         operation_kwargs=operation_kwargs,
                     )
+                    _LOGGER.debug(
+                        "BLE command %s attempt %s/%s succeeded in %.1f ms",
+                        method_name,
+                        attempt + 1,
+                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        (time.monotonic() - attempt_started) * 1000,
+                    )
+                    return result
                 except LocalBleCommissioningError as error:
                     last_error = error
                     self._invalidate_service_cache()
                     await self._async_disconnect_session()
+                    _LOGGER.debug(
+                        "BLE command %s attempt %s/%s failed in %.1f ms: %s",
+                        method_name,
+                        attempt + 1,
+                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        (time.monotonic() - attempt_started) * 1000,
+                        error,
+                    )
                     if attempt < BLE_COMMAND_RETRY_LIMIT:
                         _LOGGER.warning(
                             "BLE command %s failed (attempt %s/%s): %s, retrying",
@@ -395,12 +420,27 @@ class LocalBleWorker:
 
             last_error: LocalBleCommissioningError | None = None
             for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+                attempt_started = time.monotonic()
                 try:
-                    return await self._async_read_local_snapshot_once()
+                    result = await self._async_read_local_snapshot_once()
+                    _LOGGER.debug(
+                        "BLE snapshot read attempt %s/%s succeeded in %.1f ms",
+                        attempt + 1,
+                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        (time.monotonic() - attempt_started) * 1000,
+                    )
+                    return result
                 except LocalBleCommissioningError as error:
                     last_error = error
                     self._invalidate_service_cache()
                     await self._async_disconnect_session()
+                    _LOGGER.debug(
+                        "BLE snapshot read attempt %s/%s failed in %.1f ms: %s",
+                        attempt + 1,
+                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        (time.monotonic() - attempt_started) * 1000,
+                        error,
+                    )
                     if attempt < BLE_COMMAND_RETRY_LIMIT:
                         _LOGGER.warning(
                             "BLE snapshot read failed (attempt %s/%s): %s, retrying",
@@ -446,14 +486,29 @@ class LocalBleWorker:
 
             last_error: LocalBleCommissioningError | None = None
             for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+                attempt_started = time.monotonic()
                 try:
-                    return await self._async_read_local_weekly_programs_once(
+                    result = await self._async_read_local_weekly_programs_once(
                         zone_bois=zone_bois,
                     )
+                    _LOGGER.debug(
+                        "BLE weekly schedule read attempt %s/%s succeeded in %.1f ms",
+                        attempt + 1,
+                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        (time.monotonic() - attempt_started) * 1000,
+                    )
+                    return result
                 except LocalBleCommissioningError as error:
                     last_error = error
                     self._invalidate_service_cache()
                     await self._async_disconnect_session()
+                    _LOGGER.debug(
+                        "BLE weekly schedule read attempt %s/%s failed in %.1f ms: %s",
+                        attempt + 1,
+                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        (time.monotonic() - attempt_started) * 1000,
+                        error,
+                    )
                     if attempt < BLE_COMMAND_RETRY_LIMIT:
                         _LOGGER.warning(
                             "BLE weekly schedule read failed (attempt %s/%s): %s, retrying",
@@ -497,17 +552,33 @@ class LocalBleWorker:
 
             last_error: LocalBleCommissioningError | None = None
             for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
+                attempt_started = time.monotonic()
                 try:
                     await self._async_write_local_weekly_program_once(
                         zone=zone,
                         program=program,
                         zone_bois=zone_bois,
                     )
+                    _LOGGER.debug(
+                        "BLE weekly schedule write %s attempt %s/%s succeeded in %.1f ms",
+                        zone,
+                        attempt + 1,
+                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        (time.monotonic() - attempt_started) * 1000,
+                    )
                     return
                 except LocalBleCommissioningError as error:
                     last_error = error
                     self._invalidate_service_cache()
                     await self._async_disconnect_session()
+                    _LOGGER.debug(
+                        "BLE weekly schedule write %s attempt %s/%s failed in %.1f ms: %s",
+                        zone,
+                        attempt + 1,
+                        BLE_COMMAND_RETRY_LIMIT + 1,
+                        (time.monotonic() - attempt_started) * 1000,
+                        error,
+                    )
                     if attempt < BLE_COMMAND_RETRY_LIMIT:
                         _LOGGER.warning(
                             "BLE weekly schedule write failed (attempt %s/%s): %s, retrying",
@@ -547,6 +618,8 @@ class LocalBleWorker:
 
         await self._async_ensure_worker()
 
+        submit_started = time.monotonic()
+
         existing_future: asyncio.Future[Any] | None = None
         queued_future: asyncio.Future[Any] | None = None
         async with self._submit_lock:
@@ -554,6 +627,8 @@ class LocalBleWorker:
                 candidate = self._coalesced_futures.get(coalesce_key)
                 if candidate is not None and not candidate.done():
                     existing_future = candidate
+
+            queue_depth_before = self._queue.qsize()
 
             if existing_future is None:
                 loop = asyncio.get_running_loop()
@@ -565,6 +640,8 @@ class LocalBleWorker:
                     coalesce_key=coalesce_key,
                     operation=operation,
                     future=queued_future,
+                    submitted_monotonic=time.monotonic(),
+                    queue_depth_at_submit=queue_depth_before,
                 )
                 self._job_counter += 1
 
@@ -584,11 +661,37 @@ class LocalBleWorker:
                     )
 
                 self._queue.put_nowait((job.priority, job.order, job))
+                _LOGGER.debug(
+                    "Queued local BLE job %s (priority=%s, order=%s, queue_depth=%s->%s, coalesce_key=%s)",
+                    job_name,
+                    job.priority,
+                    job.order,
+                    queue_depth_before,
+                    self._queue.qsize(),
+                    coalesce_key,
+                )
+            else:
+                _LOGGER.debug(
+                    "Coalesced local BLE job %s onto key %s (queue_depth=%s, coalesced_futures=%s)",
+                    job_name,
+                    coalesce_key,
+                    queue_depth_before,
+                    len(self._coalesced_futures),
+                )
 
         active_future = existing_future if existing_future is not None else queued_future
         if active_future is None:
             raise LocalBleCommissioningError("Failed to queue local BLE job")
-        return await asyncio.shield(active_future)
+
+        try:
+            return await asyncio.shield(active_future)
+        finally:
+            _LOGGER.debug(
+                "Local BLE job wait complete for %s in %.1f ms (coalesced=%s)",
+                job_name,
+                (time.monotonic() - submit_started) * 1000,
+                existing_future is not None,
+            )
 
     async def _async_ensure_worker(self) -> None:
         """Start the background worker task when not running."""
@@ -601,10 +704,12 @@ class LocalBleWorker:
             self._worker_task = create_task(self._async_worker())
         else:
             self._worker_task = asyncio.create_task(self._async_worker())
+        _LOGGER.debug("Started local BLE worker task for %s", self._ble_address)
 
     async def _async_worker(self) -> None:
         """Process queued jobs while keeping a reusable BLE session open."""
 
+        _LOGGER.debug("Local BLE worker loop running for %s", self._ble_address)
         try:
             while True:
                 try:
@@ -613,32 +718,68 @@ class LocalBleWorker:
                         timeout=BLE_SESSION_IDLE_TIMEOUT_SECONDS,
                     )
                 except TimeoutError:
+                    if self._client is not None or self._rpc_client is not None:
+                        _LOGGER.debug(
+                            "Local BLE worker idle for %.1f s, disconnecting session for %s",
+                            BLE_SESSION_IDLE_TIMEOUT_SECONDS,
+                            self._ble_address,
+                        )
                     await self._async_disconnect_session()
                     continue
 
+                queue_wait_ms = (time.monotonic() - job.submitted_monotonic) * 1000
+                queue_depth_after_get = self._queue.qsize()
+                _LOGGER.debug(
+                    "Starting local BLE job %s (priority=%s, queue_wait_ms=%.1f, queue_depth_submit=%s, queue_depth_now=%s)",
+                    job.name,
+                    job.priority,
+                    queue_wait_ms,
+                    job.queue_depth_at_submit,
+                    queue_depth_after_get,
+                )
+
+                operation_started = time.monotonic()
                 try:
                     result = await job.operation()
                 except asyncio.CancelledError:
                     if not job.future.done():
                         job.future.cancel()
+                    _LOGGER.debug(
+                        "Cancelled local BLE job %s after %.1f ms",
+                        job.name,
+                        (time.monotonic() - operation_started) * 1000,
+                    )
                     raise
                 except Exception as error:
                     if not job.future.done():
                         job.future.set_exception(error)
+                    _LOGGER.debug(
+                        "Local BLE job %s failed after %.1f ms: %s",
+                        job.name,
+                        (time.monotonic() - operation_started) * 1000,
+                        error,
+                    )
                 else:
                     if not job.future.done():
                         job.future.set_result(result)
+                    _LOGGER.debug(
+                        "Local BLE job %s completed in %.1f ms",
+                        job.name,
+                        (time.monotonic() - operation_started) * 1000,
+                    )
                 finally:
                     self._queue.task_done()
         except asyncio.CancelledError:
-            pass
+            _LOGGER.debug("Local BLE worker loop cancelled for %s", self._ble_address)
         finally:
             await self._async_clear_queued_jobs()
             await self._async_disconnect_session()
+            _LOGGER.debug("Local BLE worker loop stopped for %s", self._ble_address)
 
     async def _async_clear_queued_jobs(self) -> None:
         """Fail every queued job when the worker stops."""
 
+        cleared = 0
         while True:
             try:
                 _priority, _order, job = self._queue.get_nowait()
@@ -650,6 +791,14 @@ class LocalBleWorker:
                     LocalBleCommissioningError("Local BLE worker was stopped")
                 )
             self._queue.task_done()
+            cleared += 1
+
+        if cleared > 0:
+            _LOGGER.debug(
+                "Cleared %s pending local BLE jobs for %s",
+                cleared,
+                self._ble_address,
+            )
 
     def _remove_coalesced_future(
         self,
@@ -670,15 +819,19 @@ class LocalBleWorker:
             and self._rpc_client is not None
             and self._is_client_connected(self._client)
         ):
+            _LOGGER.debug("Reusing connected local BLE session for %s", self._ble_address)
             return self._rpc_client
 
+        reconnect_started = time.monotonic()
         await self._async_disconnect_session()
 
+        resolve_started = time.monotonic()
         ble_device = await _async_resolve_connectable_device(
             self._hass,
             self._ble_address,
             expected_serial=self._serial_number,
         )
+        resolve_ms = (time.monotonic() - resolve_started) * 1000
 
         def _refresh_ble_device() -> Any:
             """Refresh the Home Assistant BLEDevice instance before reconnects."""
@@ -692,14 +845,18 @@ class LocalBleWorker:
             )
             return refreshed if refreshed is not None else ble_device
 
+        connect_started = time.monotonic()
         client = await _async_connect_client(
             ble_device,
             ble_device_callback=_refresh_ble_device,
         )
+        connect_ms = (time.monotonic() - connect_started) * 1000
         rpc_client = _BleUartRpcClient(client)
         try:
+            initialize_started = time.monotonic()
             await rpc_client.async_initialize()
             await rpc_client.async_authorize(self._auth_key)
+            initialize_ms = (time.monotonic() - initialize_started) * 1000
         except Exception:
             await rpc_client.async_close()
             await _async_disconnect_client(client)
@@ -708,6 +865,14 @@ class LocalBleWorker:
         self._client = client
         self._rpc_client = rpc_client
         self._invalidate_service_cache()
+        _LOGGER.debug(
+            "Established local BLE session for %s (resolve=%.1f ms, connect=%.1f ms, init_auth=%.1f ms, total=%.1f ms)",
+            self._ble_address,
+            resolve_ms,
+            connect_ms,
+            initialize_ms,
+            (time.monotonic() - reconnect_started) * 1000,
+        )
         return rpc_client
 
     def _is_client_connected(self, client: Any) -> bool:
@@ -731,6 +896,7 @@ class LocalBleWorker:
     async def _async_disconnect_session(self) -> None:
         """Close the current BLE session and clear stateful caches."""
 
+        disconnect_started = time.monotonic()
         rpc_client = self._rpc_client
         client = self._client
         self._rpc_client = None
@@ -741,6 +907,13 @@ class LocalBleWorker:
             await rpc_client.async_close()
         if client is not None:
             await _async_disconnect_client(client)
+
+        if rpc_client is not None or client is not None:
+            _LOGGER.debug(
+                "Disconnected local BLE session for %s in %.1f ms",
+                self._ble_address,
+                (time.monotonic() - disconnect_started) * 1000,
+            )
 
     async def _async_resolve_mode_and_hot_water_service_bois_cached(
         self,
@@ -922,6 +1095,7 @@ class _BleUartRpcClient:
     ) -> Any:
         """Send one RPC request and return the response result payload."""
 
+        request_started = time.monotonic()
         request_id = f"{int(time.time())}-{random.randint(1, 2_147_483_647)}"
         request_payload: dict[str, Any] = {
             "V": "1.0",
@@ -944,6 +1118,11 @@ class _BleUartRpcClient:
             use_java_utf8_length=True,
         )
 
+        ignored_malformed_payloads = 0
+        ignored_malformed_json = 0
+        ignored_non_object_json = 0
+        ignored_mismatched_ids = 0
+
         deadline = self._loop.time() + timeout
         while True:
             remaining = deadline - self._loop.time()
@@ -958,8 +1137,20 @@ class _BleUartRpcClient:
                 )
             except LocalBleCommissioningError as error:
                 if str(error) == BLE_RESPONSE_TIMEOUT_MESSAGE:
+                    _LOGGER.debug(
+                        "BLE RPC request timed out (request_id=%s, hi=%s, si=%s, elapsed_ms=%.1f, ignored_payload=%s, ignored_json=%s, ignored_non_object=%s, ignored_id=%s)",
+                        request_id,
+                        handler_id,
+                        service_id,
+                        (time.monotonic() - request_started) * 1000,
+                        ignored_malformed_payloads,
+                        ignored_malformed_json,
+                        ignored_non_object_json,
+                        ignored_mismatched_ids,
+                    )
                     raise
 
+                ignored_malformed_payloads += 1
                 _LOGGER.debug(
                     "Ignoring malformed BLE response payload while waiting for id %s: %s",
                     request_id,
@@ -971,6 +1162,7 @@ class _BleUartRpcClient:
             try:
                 response = json.loads(response_body.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                ignored_malformed_json += 1
                 _LOGGER.debug(
                     "Ignoring malformed BLE JSON response while waiting for id %s: %s",
                     request_id,
@@ -980,6 +1172,7 @@ class _BleUartRpcClient:
                 continue
 
             if not isinstance(response, dict):
+                ignored_non_object_json += 1
                 _LOGGER.debug(
                     "Ignoring non-object BLE JSON response while waiting for id %s",
                     request_id,
@@ -989,6 +1182,7 @@ class _BleUartRpcClient:
 
             response_id = response.get("I")
             if response_id != request_id:
+                ignored_mismatched_ids += 1
                 _LOGGER.debug(
                     "Ignoring BLE response with mismatched id (expected=%s, got=%s)",
                     request_id,
@@ -1015,6 +1209,17 @@ class _BleUartRpcClient:
         if "R" not in response:
             raise LocalBleCommissioningError("RPC response did not include a result")
 
+        _LOGGER.debug(
+            "BLE RPC request completed (request_id=%s, hi=%s, si=%s, elapsed_ms=%.1f, ignored_payload=%s, ignored_json=%s, ignored_non_object=%s, ignored_id=%s)",
+            request_id,
+            handler_id,
+            service_id,
+            (time.monotonic() - request_started) * 1000,
+            ignored_malformed_payloads,
+            ignored_malformed_json,
+            ignored_non_object_json,
+            ignored_mismatched_ids,
+        )
         return response["R"]
 
     async def async_authorize(self, auth_key: bytes) -> None:
@@ -1108,7 +1313,16 @@ class _BleUartRpcClient:
         if self._auth_key is not None:
             framed_request = _encrypt_payload(self._auth_key, framed_request)
 
-        for packet in _packetize_payload(framed_request):
+        packets = _packetize_payload(framed_request)
+        _LOGGER.debug(
+            "Sending BLE payload (raw_len=%s, framed_len=%s, packet_count=%s, encrypted=%s)",
+            len(request_payload),
+            len(framed_request),
+            len(packets),
+            self._auth_key is not None,
+        )
+
+        for packet in packets:
             try:
                 await self._client.write_gatt_char(UART_RX_UUID, packet, response=True)
             except (BleakError, RuntimeError, OSError) as error:
@@ -1125,6 +1339,7 @@ class _BleUartRpcClient:
     async def _async_wait_for_response_payload(self, *, timeout: float) -> bytes:
         """Wait for one BLE response payload and decode transport framing."""
 
+        wait_started = time.monotonic()
         try:
             await asyncio.wait_for(self._response_event.wait(), timeout=timeout)
         except TimeoutError as error:
@@ -1133,7 +1348,15 @@ class _BleUartRpcClient:
         response_body = _reassemble_packet_bytes(self._response_packets)
         if self._auth_key is not None:
             response_body = _decrypt_payload(self._auth_key, response_body)
-        return _extract_length_prefixed_payload(response_body)
+        payload = _extract_length_prefixed_payload(response_body)
+        _LOGGER.debug(
+            "Received BLE payload (packets=%s, framed_len=%s, payload_len=%s, wait_ms=%.1f)",
+            len(self._response_packets),
+            len(response_body),
+            len(payload),
+            (time.monotonic() - wait_started) * 1000,
+        )
+        return payload
 
     def _notification_callback(self, _characteristic: Any, data: bytearray) -> None:
         """Capture incoming packetized data from TX notifications."""
