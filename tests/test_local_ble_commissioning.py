@@ -520,7 +520,7 @@ async def test_async_read_ble_snapshot_once_reads_consumption_state(
     assert requests[0]["service_id"] == 1
     assert requests[1]["handler_id"] == 9
     assert requests[1]["service_id"] == 36
-    assert requests[1]["args"] == [1]
+    assert requests[1]["args"] == [0]
     assert snapshot.statistics_recent is not None
     assert snapshot.statistics_recent["primary"]["runtime_hours"] == pytest.approx(1.0)
     assert snapshot.primary_energy_kwh == pytest.approx(1.234)
@@ -645,6 +645,93 @@ async def test_async_write_local_weekly_program_once_writes_zone_payload(
 
         async def async_rpc_request(self, **kwargs: Any) -> Any:
             self.requests.append(kwargs)
+            return 0
+
+        async def async_close(self) -> None:
+            return None
+
+    resolve = AsyncMock(return_value=fake_device)
+    connect = AsyncMock(return_value=fake_client)
+    disconnect = AsyncMock()
+    rpc_instances: list[FakeRpcClient] = []
+
+    def _rpc_factory(client: Any) -> FakeRpcClient:
+        instance = FakeRpcClient(client)
+        rpc_instances.append(instance)
+        return instance
+
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_resolve_connectable_device",
+        resolve,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_connect_client",
+        connect,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._async_disconnect_client",
+        disconnect,
+    )
+    monkeypatch.setattr(
+        "custom_components.securemtr.local_ble_commissioning._BleUartRpcClient",
+        _rpc_factory,
+    )
+
+    empty_day = DailyProgram((None, None, None), (None, None, None))
+    program = (
+        DailyProgram((60, None, None), (120, None, None)),
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+        empty_day,
+    )
+
+    await async_write_local_weekly_program(
+        fake_hass,
+        mac_address="AABBCCDDEEFF",
+        serial_number="E0044275",
+        ble_key="ABEiM0RVZneImaq7zN3u/w==",
+        zone="boost",
+        program=program,
+        zone_bois={"primary": 11, "boost": 22},
+    )
+
+    assert len(rpc_instances) == 1
+    requests = rpc_instances[0].requests
+    assert requests[0]["handler_id"] == 21
+    assert requests[0]["service_id"] == 17
+    assert requests[0]["args"][0]["I"] == 22
+    assert requests[0]["args"][0]["D"][0] == {"O": 60, "T": 1}
+    assert requests[0]["args"][0]["D"][1] == {"O": 120, "T": 0}
+    disconnect.assert_awaited_once_with(fake_client)
+
+
+@pytest.mark.asyncio
+async def test_async_write_local_weekly_program_retries_with_resolved_zone_bois(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure weekly writes resolve BOIs when cached/default BOIs are rejected."""
+
+    fake_hass = SimpleNamespace()
+    fake_device = SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+    fake_client = SimpleNamespace()
+
+    class FakeRpcClient:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+            self.requests: list[dict[str, Any]] = []
+            self.write_calls = 0
+
+        async def async_initialize(self) -> None:
+            return None
+
+        async def async_authorize(self, key: bytes) -> None:
+            return None
+
+        async def async_rpc_request(self, **kwargs: Any) -> Any:
+            self.requests.append(kwargs)
             if kwargs["handler_id"] == 3:
                 return {
                     "V": [
@@ -654,7 +741,14 @@ async def test_async_write_local_weekly_program_once_writes_zone_payload(
                         {"SI": 17, "I": 22},
                     ]
                 }
-            return 0
+
+            if kwargs["handler_id"] == 21:
+                self.write_calls += 1
+                if self.write_calls == 1:
+                    return 7
+                return 0
+
+            raise AssertionError(f"Unexpected RPC call: {kwargs}")
 
         async def async_close(self) -> None:
             return None
@@ -708,13 +802,11 @@ async def test_async_write_local_weekly_program_once_writes_zone_payload(
 
     assert len(rpc_instances) == 1
     requests = rpc_instances[0].requests
-    assert requests[0]["handler_id"] == 3
-    assert requests[0]["service_id"] == 1
-    assert requests[1]["handler_id"] == 21
-    assert requests[1]["service_id"] == 17
-    assert requests[1]["args"][0]["I"] == 22
-    assert requests[1]["args"][0]["D"][0] == {"O": 60, "T": 1}
-    assert requests[1]["args"][0]["D"][1] == {"O": 120, "T": 0}
+    assert requests[0]["handler_id"] == 21
+    assert requests[0]["args"][0]["I"] == 2
+    assert requests[1]["handler_id"] == 3
+    assert requests[2]["handler_id"] == 21
+    assert requests[2]["args"][0]["I"] == 22
     disconnect.assert_awaited_once_with(fake_client)
 
 

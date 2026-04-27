@@ -2685,7 +2685,7 @@ async def _async_read_ble_snapshot_payload(
         response,
         service_id=SERVICE_ID_DYNAMIC_TARIFF,
     )
-    consumption_args_candidates: list[list[int]] = [[1], [0]]
+    consumption_args_candidates: list[list[int]] = [[0], [1]]
     if dynamic_tariff_boi is not None:
         consumption_args_candidates.append([dynamic_tariff_boi])
 
@@ -3047,23 +3047,58 @@ async def _async_write_local_weekly_program_payload(
 
     from .beanbag import BeanbagBackend  # noqa: PLC0415
 
-    resolved_zone_bois = await _async_resolve_schedule_zone_bois(
-        rpc_client,
-        gateway_mac_id=gateway_mac_id,
-        fallback_zone_bois=zone_bois,
-    )
+    resolved_zone_bois = _coerce_schedule_zone_bois(zone_bois)
+
+    async def _async_write_with_zone_index(zone_index: int) -> Any:
+        """Write one weekly payload using the provided zone index."""
+
+        payload = BeanbagBackend._build_weekly_program_payload(program, zone_index)
+        return await rpc_client.async_rpc_request(
+            gateway_mac_id=gateway_mac_id,
+            handler_id=HANDLER_WRITE_WEEKLY_PROGRAM,
+            service_id=SERVICE_ID_SCHEDULE,
+            args=payload,
+        )
+
     zone_index = resolved_zone_bois[zone]
-    payload = BeanbagBackend._build_weekly_program_payload(program, zone_index)
-    acknowledgement = await rpc_client.async_rpc_request(
-        gateway_mac_id=gateway_mac_id,
-        handler_id=HANDLER_WRITE_WEEKLY_PROGRAM,
-        service_id=SERVICE_ID_SCHEDULE,
-        args=payload,
-    )
+    try:
+        acknowledgement = await _async_write_with_zone_index(zone_index)
+    except LocalBleCommissioningError as error:
+        if str(error) == BLE_RESPONSE_TIMEOUT_MESSAGE:
+            raise
+
+        _LOGGER.debug(
+            "WriteWeeklyProgram failed with cached zone BOI %s for %s (%s); resolving schedule BOIs and retrying once",
+            zone_index,
+            zone,
+            error,
+        )
+        resolved_zone_bois = await _async_resolve_schedule_zone_bois(
+            rpc_client,
+            gateway_mac_id=gateway_mac_id,
+            fallback_zone_bois=resolved_zone_bois,
+        )
+        acknowledgement = await _async_write_with_zone_index(resolved_zone_bois[zone])
+
+    if acknowledgement not in (0, "0", None):
+        _LOGGER.debug(
+            "WriteWeeklyProgram returned acknowledgement %s with cached zone BOI %s for %s; resolving schedule BOIs and retrying once",
+            acknowledgement,
+            zone_index,
+            zone,
+        )
+        resolved_zone_bois = await _async_resolve_schedule_zone_bois(
+            rpc_client,
+            gateway_mac_id=gateway_mac_id,
+            fallback_zone_bois=resolved_zone_bois,
+        )
+        acknowledgement = await _async_write_with_zone_index(resolved_zone_bois[zone])
+
     if acknowledgement not in (0, "0", None):
         raise LocalBleCommissioningError(
             f"Unexpected local BLE weekly schedule acknowledgement: {acknowledgement}"
         )
+
     return resolved_zone_bois
 
 
