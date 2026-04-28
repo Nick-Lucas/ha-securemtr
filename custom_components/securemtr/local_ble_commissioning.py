@@ -364,7 +364,7 @@ class LocalBleWorker:
                         method_name=method_name,
                         operation_kwargs=operation_kwargs,
                     )
-                    _LOGGER.debug(
+                    _LOGGER.info(
                         "BLE command %s attempt %s/%s succeeded in %.1f ms",
                         method_name,
                         attempt + 1,
