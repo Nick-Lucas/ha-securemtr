@@ -204,6 +204,7 @@ custom_components.securemtr.__init__._merge_local_consumption_energy: Merge pars
 custom_components.securemtr.__init__._merge_local_snapshot_statistics: Merge local snapshot duration summaries into runtime statistics state.
 custom_components.securemtr.__init__._async_refresh_local_ble_runtime: Refresh runtime state from a local BLE GetAllServiceValues snapshot.
 custom_components.securemtr.local_ble_commissioning.LocalBleSnapshot: Represent parsed local BLE values for runtime sensors.
+custom_components.securemtr.local_ble_commissioning.LocalBleWorker._ordered_consumption_args_candidates: Return consumption selector candidates ordered by recent success.
 custom_components.securemtr.local_ble_commissioning._extract_service_values: Extract ServiceValuesDTO entries from a GetAllServiceValues response.
 custom_components.securemtr.local_ble_commissioning._extract_characteristic_map: Build a characteristic-id map from a service values entry.
 custom_components.securemtr.local_ble_commissioning._extract_numeric_value: Return a float value for a dictionary key when numeric.
@@ -225,6 +226,8 @@ custom_components.securemtr.local_ble_commissioning._parse_consumption_state: Pa
 custom_components.securemtr.local_ble_commissioning._parse_local_ble_snapshot: Parse GetAllServiceValues payload into local runtime fields.
 custom_components.securemtr.local_ble_commissioning.async_read_local_snapshot: Read and parse local BLE service values for runtime sensors.
 custom_components.securemtr.local_ble_commissioning._async_read_ble_snapshot_once: Connect over BLE once and read a snapshot payload.
+custom_components.securemtr.local_ble_commissioning._async_read_ble_snapshot_payload: Read one local BLE snapshot payload using an active RPC client.
 custom_components.securemtr.local_ble_commissioning._parse_local_weekly_program: Parse one weekly program payload from local BLE RPC format.
 custom_components.securemtr.local_ble_commissioning.async_read_local_weekly_programs: Read primary and boost weekly schedules from local BLE RPC.
 custom_components.securemtr.local_ble_commissioning._async_read_ble_weekly_programs_once: Connect once and read both weekly programs from local BLE RPC.
+custom_components.securemtr.local_ble_commissioning._async_disconnect_client: Disconnect BLE client safely.

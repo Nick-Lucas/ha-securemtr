@@ -17,9 +17,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from custom_components.securemtr.local_ble_commissioning import (
     FINAL_PACKET_INDEX,
     LocalBleSnapshot,
+    LocalBleWorker,
     _BleUartRpcClient,
     LocalBleCommissioningError,
     _async_commission_over_rpc,
+    _async_disconnect_client,
     _async_read_ble_snapshot_once,
     _async_read_ble_weekly_programs_once,
     _async_resolve_mode_and_hot_water_service_bois,
@@ -520,7 +522,8 @@ async def test_async_read_ble_snapshot_once_reads_consumption_state(
     assert requests[0]["service_id"] == 1
     assert requests[1]["handler_id"] == 9
     assert requests[1]["service_id"] == 36
-    assert requests[1]["args"] == [0]
+    assert requests[1]["args"] == [1]
+    assert requests[1]["timeout"] == 5.0
     assert snapshot.statistics_recent is not None
     assert snapshot.statistics_recent["primary"]["runtime_hours"] == pytest.approx(1.0)
     assert snapshot.primary_energy_kwh == pytest.approx(1.234)
@@ -528,6 +531,66 @@ async def test_async_read_ble_snapshot_once_reads_consumption_state(
     assert snapshot.consumption_days is not None
     assert snapshot.consumption_days[0]["primary_energy_kwh"] == pytest.approx(1.234)
     disconnect.assert_awaited_once_with(fake_client)
+
+
+@pytest.mark.asyncio
+async def test_local_ble_worker_caches_working_consumption_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure worker tries the last working consumption selector first."""
+
+    worker = LocalBleWorker(
+        SimpleNamespace(),
+        mac_address="AABBCCDDEEFF",
+        serial_number="E0044275",
+        ble_key="ABEiM0RVZneImaq7zN3u/w==",
+    )
+
+    class FakeRpcClient:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, Any]] = []
+
+        async def async_rpc_request(self, **kwargs: Any) -> Any:
+            self.requests.append(kwargs)
+            if kwargs["handler_id"] == 3:
+                return {
+                    "V": [
+                        {"SI": 33, "I": 1, "V": [{"I": 6, "V": 2}]},
+                        {"SI": 16, "I": 2, "V": [{"I": 4, "V": 0}]},
+                    ]
+                }
+            if kwargs["args"] == [1]:
+                raise LocalBleCommissioningError("Timed out waiting for BLE response")
+            return {"D": {"T": 1_712_400_000, "OA": 30, "BA": 15, "OP": 1000}}
+
+    fake_rpc = FakeRpcClient()
+    monkeypatch.setattr(
+        worker,
+        "_async_ensure_rpc_client",
+        AsyncMock(return_value=fake_rpc),
+    )
+
+    first_snapshot = await worker._async_read_local_snapshot_once(
+        consumption_timeout=5.0,
+    )
+    first_consumption_requests = [
+        request for request in fake_rpc.requests if request["handler_id"] == 9
+    ]
+
+    assert [request["args"] for request in first_consumption_requests] == [[1], [0]]
+    assert [request["timeout"] for request in first_consumption_requests] == [5.0, 5.0]
+    assert first_snapshot.statistics_recent is not None
+
+    fake_rpc.requests.clear()
+    second_snapshot = await worker._async_read_local_snapshot_once(
+        consumption_timeout=5.0,
+    )
+    second_consumption_requests = [
+        request for request in fake_rpc.requests if request["handler_id"] == 9
+    ]
+
+    assert [request["args"] for request in second_consumption_requests] == [[0]]
+    assert second_snapshot.statistics_recent is not None
 
 
 @pytest.mark.asyncio
@@ -932,6 +995,17 @@ async def test_async_initialize_wraps_notify_failure() -> None:
 
     with pytest.raises(LocalBleCommissioningError, match="TX notifications"):
         await rpc_client.async_initialize()
+
+
+@pytest.mark.asyncio
+async def test_async_disconnect_client_suppresses_eoferror() -> None:
+    """Ensure BlueZ EOF disconnect races do not escape cleanup."""
+
+    fake_client = SimpleNamespace(disconnect=AsyncMock(side_effect=EOFError()))
+
+    await _async_disconnect_client(fake_client)
+
+    fake_client.disconnect.assert_awaited_once()
 
 
 @pytest.mark.asyncio

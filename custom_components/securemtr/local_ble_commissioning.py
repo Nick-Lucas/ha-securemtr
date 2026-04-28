@@ -48,6 +48,7 @@ FINAL_PACKET_INDEX = 255
 BLE_DISCOVERY_TIMEOUT_SECONDS = 20.0
 BLE_CONNECT_TIMEOUT_SECONDS = 15.0
 BLE_REQUEST_TIMEOUT_SECONDS = 30.0
+BLE_CONSUMPTION_REQUEST_TIMEOUT_SECONDS = 5.0
 
 SERVICE_ID_HAN_MANAGEMENT = 11
 SERVICE_ID_BBSERVER = 1
@@ -302,6 +303,7 @@ class LocalBleWorker:
         self._rpc_client: _BleUartRpcClient | None = None
         self._mode_hot_water_service_bois: tuple[int, int] | None = None
         self._schedule_zone_bois: dict[str, int] | None = None
+        self._preferred_consumption_args: tuple[int, ...] | None = None
 
     def matches(
         self,
@@ -412,6 +414,7 @@ class LocalBleWorker:
         *,
         priority: LocalBlePriority | int = LocalBlePriority.USER_READ,
         coalesce_key: str | None = None,
+        consumption_timeout: float = BLE_CONSUMPTION_REQUEST_TIMEOUT_SECONDS,
     ) -> LocalBleSnapshot:
         """Queue and execute one local BLE snapshot read operation."""
 
@@ -422,7 +425,9 @@ class LocalBleWorker:
             for attempt in range(BLE_COMMAND_RETRY_LIMIT + 1):
                 attempt_started = time.monotonic()
                 try:
-                    result = await self._async_read_local_snapshot_once()
+                    result = await self._async_read_local_snapshot_once(
+                        consumption_timeout=consumption_timeout,
+                    )
                     _LOGGER.debug(
                         "BLE snapshot read attempt %s/%s succeeded in %.1f ms",
                         attempt + 1,
@@ -976,18 +981,33 @@ class LocalBleWorker:
             )
         return result
 
-    async def _async_read_local_snapshot_once(self) -> LocalBleSnapshot:
+    async def _async_read_local_snapshot_once(
+        self,
+        *,
+        consumption_timeout: float,
+    ) -> LocalBleSnapshot:
         """Read one local BLE snapshot using the active reusable session."""
 
         rpc_client = await self._async_ensure_rpc_client()
+        successful_consumption_args: list[tuple[int, ...]] = []
         snapshot = await _async_read_ble_snapshot_payload(
             rpc_client,
             ble_address=self._ble_address,
             gateway_mac_id=self._gateway_mac_id,
+            consumption_timeout=consumption_timeout,
+            consumption_args_candidates=self._ordered_consumption_args_candidates(),
+            successful_consumption_args=successful_consumption_args,
         )
+        if successful_consumption_args:
+            self._preferred_consumption_args = successful_consumption_args[0]
         if isinstance(snapshot.schedule_zone_bois, dict):
             self._schedule_zone_bois = dict(snapshot.schedule_zone_bois)
         return snapshot
+
+    def _ordered_consumption_args_candidates(self) -> list[list[int]]:
+        """Return consumption selector candidates ordered by recent success."""
+
+        return [[0], [1]] if self._preferred_consumption_args == (0,) else [[1], [0]]
 
     async def _async_read_local_weekly_programs_once(
         self,
@@ -1068,12 +1088,12 @@ class _BleUartRpcClient:
 
         try:
             await self._client.start_notify(UART_TX_UUID, self._notification_callback)
-        except (BleakError, RuntimeError, OSError) as error:
+        except (BleakError, RuntimeError, OSError, EOFError) as error:
             if _is_notify_already_acquired_error(error):
                 _LOGGER.debug(
                     "TX notify channel already acquired; attempting one recovery cycle"
                 )
-                with suppress(BleakError, RuntimeError, OSError):
+                with suppress(BleakError, RuntimeError, OSError, EOFError):
                     await self._client.stop_notify(UART_TX_UUID)
                 await asyncio.sleep(BLE_NOTIFY_RECOVERY_DELAY_SECONDS)
                 try:
@@ -1082,7 +1102,7 @@ class _BleUartRpcClient:
                         self._notification_callback,
                     )
                     return
-                except (BleakError, RuntimeError, OSError) as retry_error:
+                except (BleakError, RuntimeError, OSError, EOFError) as retry_error:
                     raise LocalBleCommissioningError(
                         "Failed to subscribe to SecureMTR TX notifications"
                     ) from retry_error
@@ -1096,8 +1116,11 @@ class _BleUartRpcClient:
 
         try:
             await self._client.stop_notify(UART_TX_UUID)
-        except (BleakError, RuntimeError, OSError):
-            _LOGGER.debug("Unable to stop TX notifications", exc_info=True)
+        except (BleakError, RuntimeError, OSError, EOFError) as error:
+            if "Service Discovery has not been performed yet" in str(error):
+                _LOGGER.debug("TX notifications already unavailable while closing")
+            else:
+                _LOGGER.debug("Unable to stop TX notifications", exc_info=True)
 
     async def async_rpc_request(
         self,
@@ -1758,7 +1781,7 @@ async def _async_disconnect_client(client: Any) -> None:
 
     try:
         await client.disconnect()
-    except (BleakError, RuntimeError, OSError):
+    except (BleakError, RuntimeError, OSError, EOFError):
         _LOGGER.debug("Failed to disconnect BLE client cleanly", exc_info=True)
 
 
@@ -2572,6 +2595,7 @@ async def async_read_local_snapshot(
     mac_address: str,
     serial_number: str | None,
     ble_key: str,
+    consumption_timeout: float = BLE_CONSUMPTION_REQUEST_TIMEOUT_SECONDS,
 ) -> LocalBleSnapshot:
     """Read and parse local BLE service values for runtime sensors."""
 
@@ -2596,6 +2620,7 @@ async def async_read_local_snapshot(
                 expected_serial=serial_number,
                 gateway_mac_id=gateway_mac_id,
                 auth_key=decoded_key,
+                consumption_timeout=consumption_timeout,
             )
         except LocalBleCommissioningError as error:
             if attempt >= BLE_COMMAND_RETRY_LIMIT:
@@ -2618,6 +2643,7 @@ async def _async_read_ble_snapshot_once(
     expected_serial: str | None,
     gateway_mac_id: str,
     auth_key: bytes,
+    consumption_timeout: float = BLE_CONSUMPTION_REQUEST_TIMEOUT_SECONDS,
 ) -> LocalBleSnapshot:
     """Connect over BLE once and read a snapshot payload."""
 
@@ -2649,6 +2675,7 @@ async def _async_read_ble_snapshot_once(
             rpc_client,
             ble_address=ble_address,
             gateway_mac_id=gateway_mac_id,
+            consumption_timeout=consumption_timeout,
         )
     finally:
         await rpc_client.async_close()
@@ -2660,6 +2687,9 @@ async def _async_read_ble_snapshot_payload(
     *,
     ble_address: str,
     gateway_mac_id: str,
+    consumption_timeout: float = BLE_CONSUMPTION_REQUEST_TIMEOUT_SECONDS,
+    consumption_args_candidates: list[list[int]] | None = None,
+    successful_consumption_args: list[tuple[int, ...]] | None = None,
 ) -> LocalBleSnapshot:
     """Read one local BLE snapshot payload using an active RPC client."""
 
@@ -2685,7 +2715,10 @@ async def _async_read_ble_snapshot_payload(
         response,
         service_id=SERVICE_ID_DYNAMIC_TARIFF,
     )
-    consumption_args_candidates: list[list[int]] = [[0], [1]]
+    if consumption_args_candidates is None:
+        consumption_args_candidates = [[1], [0]]
+    else:
+        consumption_args_candidates = list(consumption_args_candidates)
     if dynamic_tariff_boi is not None:
         consumption_args_candidates.append([dynamic_tariff_boi])
 
@@ -2698,6 +2731,13 @@ async def _async_read_ble_snapshot_payload(
         seen_consumption_args.add(key)
         deduped_consumption_args.append(consumption_args)
 
+    if not deduped_consumption_args:
+        _LOGGER.debug(
+            "No local BLE consumption selector candidates available for %s",
+            ble_address,
+        )
+        return snapshot
+
     for consumption_args in deduped_consumption_args:
         try:
             consumption_response = await rpc_client.async_rpc_request(
@@ -2705,6 +2745,7 @@ async def _async_read_ble_snapshot_payload(
                 handler_id=HANDLER_GET_CONSUMPTION_STATE,
                 service_id=SERVICE_ID_DYNAMIC_TARIFF,
                 args=consumption_args,
+                timeout=consumption_timeout,
             )
             _LOGGER.debug(
                 "GetConsumptionState raw payload for %s args=%s: %s",
@@ -2720,6 +2761,8 @@ async def _async_read_ble_snapshot_payload(
             )
             snapshot.statistics_recent = _parse_consumption_state(consumption_response)
             if snapshot.statistics_recent is not None:
+                if successful_consumption_args is not None:
+                    successful_consumption_args[:] = [tuple(consumption_args)]
                 primary_stats = snapshot.statistics_recent.get("primary")
                 if (
                     snapshot.primary_energy_kwh is None
